@@ -100,6 +100,8 @@ struct Health: Decodable {
     let signedIn: Bool
     let dockerRunning: Bool
     let proxyReady: Bool
+    /// Signing in (which also starts the LLM proxy) would fix the current problem.
+    let needsLogin: Bool
     let problems: [String]
 }
 

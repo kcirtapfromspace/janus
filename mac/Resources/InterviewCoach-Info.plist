@@ -27,6 +27,24 @@
 	<!-- Menu-bar app: no Dock icon; the window opens from the menu-bar panel. -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- The full release version (e.g. 0.1.0-preview.1); scripts/build-app.sh sets it and the
+	     numeric CFBundleVersion that Sparkle compares. SUFeedURL is added only to release builds. -->
+	<key>ICReleaseVersion</key>
+	<string>0.1.0</string>
+	<key>SUAllowsAutomaticUpdates</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUPublicEDKey</key>
+	<string>qaSm2i32pzefOV1wWoJaNE/INpooSldu6xBwmPI7URQ=</string>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>14400</integer>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Interview Coach records the other side of your interview calls (Zoom, Meet, Teams, and others) so it can transcribe them. Audio stays on this Mac.</string>
 	<key>NSMicrophoneUsageDescription</key>

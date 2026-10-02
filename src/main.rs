@@ -689,26 +689,40 @@ fn proxy_status(settings: &Settings) -> Result<()> {
 
 /// `ic doctor --json`: the few facts the app's status row needs.
 fn doctor_json(settings: &Settings) -> Result<()> {
-    let signed_in = auth::has_login() && auth::access_token().is_ok();
-    let docker = proxy::docker_running();
+    let (ffmpeg, ant) = (which("ffmpeg").is_some(), which("ant").is_some());
+    let docker_installed = which("docker").is_some();
+    let docker = docker_installed && proxy::docker_running();
+    let signed_in = ant && auth::has_login() && auth::access_token().is_ok();
     let proxy_ready = LlmEndpoint::load(settings)
         .is_some_and(|e| proxy::readiness(&e.base_url).is_ok() && proxy::key_info(&e).is_ok());
+    // Most fixable first: a fresh Mac needs its tools, then Docker, then a sign-in.
     let mut problems = vec![];
-    if !docker {
+    if !ffmpeg {
+        problems.push("ffmpeg isn't installed — run: brew install ffmpeg".to_string());
+    }
+    if !ant {
+        problems.push("Anthropic's CLI (for Claude sign-in) isn't installed — run: brew install anthropics/tap/ant".to_string());
+    }
+    if !docker_installed {
+        problems.push("Docker Desktop isn't installed — get it from docker.com/products/docker-desktop".to_string());
+    } else if !docker {
         problems.push("Docker isn't running — start Docker Desktop".to_string());
-    } else if !proxy_ready {
-        problems.push("The LLM proxy isn't running — run `ic login` (or `ic proxy start`) in Terminal".to_string());
     }
-    if let Some(reason) = analysis_blocker(settings).filter(|_| proxy_ready) {
+    let can_sign_in = ant && docker;
+    if can_sign_in && !proxy_ready {
+        problems.push("The LLM proxy isn't set up or running — sign in to start it".to_string());
+    } else if can_sign_in && settings.model.provider == Provider::Anthropic && !signed_in {
+        problems.push("Not signed in to Claude (or the login expired)".to_string());
+    } else if let Some(reason) = analysis_blocker(settings).filter(|_| proxy_ready) {
         problems.push(reason);
-    } else if settings.model.provider == Provider::Anthropic && !signed_in {
-        problems.push("Your Claude login has expired — run `ic login` in Terminal".to_string());
     }
+    let needs_login = can_sign_in && (!proxy_ready || (settings.model.provider == Provider::Anthropic && !signed_in));
     println!("{}", serde_json::json!({
         "model": settings.model.to_string(),
         "signed_in": signed_in,
         "docker_running": docker,
         "proxy_ready": proxy_ready,
+        "needs_login": needs_login,
         "problems": problems,
     }));
     Ok(())

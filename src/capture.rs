@@ -11,15 +11,15 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 pub fn app_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("IC_RECORDER_APP") {
+    if let Some(p) = std::env::var_os("IC_RECORDER_APP").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    // Next to the ic binary first (a packaged install), then the source tree (a dev build).
-    let beside_exe = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("ICRecorder.app")));
-    match beside_exe {
-        Some(p) if p.exists() => p,
-        _ => Path::new(env!("CARGO_MANIFEST_DIR")).join("mac/build/ICRecorder.app"),
-    }
+    // `ic` inside Interview Coach.app (maybe reached through a symlink on PATH) is
+    // Contents/MacOS/ic, with the recorder in Contents/Helpers. A dev build uses the source tree's.
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| Some(e.parent()?.to_path_buf()));
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("mac/build/Interview Coach.app/Contents/Helpers/ICRecorder.app");
+    let candidates = exe_dir.map(|d| vec![d.join("../Helpers/ICRecorder.app"), d.join("ICRecorder.app")]).unwrap_or_default();
+    candidates.into_iter().find(|p| p.exists()).unwrap_or(dev)
 }
 
 fn pid(dir: &Path) -> Option<i32> {

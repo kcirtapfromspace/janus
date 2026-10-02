@@ -15,19 +15,27 @@ final class AppModel {
         var isRecording: Bool { if case .recording = self { true } else { false } }
     }
 
-    var phase: Phase = .idle
+    var phase: Phase = .idle {
+        didSet { if phase == .idle { updater.installIfIdle() } }  // a waiting update installs between interviews
+    }
     var sessions: [SessionSummary] = []
     var health: Health?
     var selection: SessionSummary.ID?
     var lastError: String?
     var title = ""
     var company = ""
+    /// A downloaded, verified update waiting for the app to be idle.
+    var updateReady: String?
 
     let ic = ICClient.locate()
+    let updater = Updater()
     private var recorder: RecordingSession?
     private var recordingID: Int?
 
     init() {
+        updater.isIdle = { [unowned self] in phase == .idle }
+        updater.onReady = { [unowned self] version in updateReady = version }
+        updater.start()
         Task { await refresh() }
     }
 
@@ -121,6 +129,27 @@ final class AppModel {
 
     func setOutcome(_ id: Int, _ outcome: String) {
         runIC(["outcome", "\(id)", outcome], label: "Saving outcome…", select: id)
+    }
+
+    /// `ic login` opens the browser and may ask to paste a code, so it runs in a Terminal window.
+    func signInInTerminal() {
+        guard let ic else { return }
+        let script = FileManager.default.temporaryDirectory.appendingPathComponent("interview-coach-sign-in.command")
+        let body = """
+        #!/bin/zsh
+        export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        clear
+        '\(ic.executable.path)' login
+        echo
+        echo "Done. You can close this window and go back to Interview Coach."
+        """
+        do {
+            try body.write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+            NSWorkspace.shared.open(script)
+        } catch {
+            lastError = "Couldn't open Terminal: \(error.localizedDescription)"
+        }
     }
 
     func openInBrowser(_ session: SessionSummary) {

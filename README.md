@@ -4,7 +4,14 @@ Record your job interviews, get a full transcript, find out how each one really 
 coached on what to improve. It runs locally on your Mac: audio never leaves the machine, and only
 the transcript text goes to the model you choose (Claude or OpenAI) for analysis.
 
-## Setup
+## Install on a Mac
+
+Download the notarized app from **[interview-coach-releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest)**
+and follow the steps there: Docker Desktop, `brew install ffmpeg anthropics/tap/ant`, move the app to
+Applications, open it, and **Sign in to Claude…** from the menu bar. It updates itself after that.
+Releasing is described in [docs/RELEASING.md](docs/RELEASING.md).
+
+## Build from source
 
 ```sh
 mac/build.sh               # builds `ic` and both Mac apps into mac/build/ (signed)

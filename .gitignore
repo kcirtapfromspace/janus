@@ -3,5 +3,6 @@ dist/
 tests/fixtures/out/
 mac/.build/
 mac/build/
+mac/vendor/
 mac/.swiftpm/
 .DS_Store

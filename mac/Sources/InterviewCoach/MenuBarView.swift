@@ -11,6 +11,15 @@ struct MenuBarView: View {
 
             if let problem = model.health?.problems.first {
                 ProblemRow(problem: problem)
+                if model.health?.needsLogin == true {
+                    Button("Sign in to Claude…") { model.signInInTerminal() }
+                        .controlSize(.small)
+                }
+            }
+            if let version = model.updateReady, model.phase.isBusy {
+                Label("Version \(version) installs when this finishes", systemImage: "arrow.down.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             controls
@@ -29,6 +38,10 @@ struct MenuBarView: View {
             HStack {
                 Button("Open Interview Coach") { showMainWindow() }
                 Spacer()
+                if model.updater.isAvailable {
+                    Button("Check for Updates…") { model.updater.checkForUpdates() }
+                        .disabled(model.phase.isRecording)
+                }
                 Button("Import…") { model.importRecording() }
                     .disabled(model.phase.isBusy)
                 Button("Quit") { NSApp.terminate(nil) }
