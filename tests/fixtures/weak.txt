@@ -1,0 +1,16 @@
+I: Hi, thanks for making the time today. I'm Daniel, and I lead the product team for our analytics platform here at Northwind. How are you doing?
+Y: Um, good, yeah. Sorry, I'm, uh, running a little behind today.
+I: No problem. Let's start with a quick walkthrough of your background.
+Y: Yeah, so, um, I've been at, like, a few different companies. I started in, uh, marketing, and then I kind of moved into product, sort of, at my current job, which is, um, a logistics company. I do a lot of different things there, like, you know, meetings with engineering, writing tickets, that kind of stuff. It's, um, it's been fine, I guess.
+I: Tell me about a time you had to make a tough prioritization call.
+Y: Um, yeah, so, we have a lot of priorities. Like, everything is a priority, you know? Usually my manager decides, um, what we work on, and then I sort of make sure it happens. There was one time where, uh, a customer wanted something, and, um, we did it. I think it went okay.
+I: What was the outcome of that decision?
+Y: Uh, I'm not totally sure, honestly. I think the customer was happy. We didn't really, like, track it.
+I: How do you work with engineering when estimates slip?
+Y: Honestly, that's, um, kind of the worst part of my current job. The engineers there are pretty slow, and my manager doesn't really back me up, so, you know, stuff just slips. I usually just, like, escalate it.
+I: I see. What would you want to accomplish in your first ninety days here?
+Y: Um, I guess just, like, learn the product? And, uh, meet everyone. I haven't really looked at the product that much yet, to be honest.
+I: Okay. Do you have any questions for me?
+Y: Um, no, I think you covered everything. Oh, actually, what's the salary range?
+I: The recruiter can go over compensation with you. Thanks for your time today. We'll be in touch.
+Y: Okay, cool. Thanks.

@@ -1,0 +1,40 @@
+[package]
+name = "interview-coach"
+version = "0.1.0"
+edition = "2024"
+description = "Record, transcribe, and get coached on your job interviews — locally."
+publish = false
+
+[lib]
+name = "interview_coach"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ic"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+clap = { version = "4.6", features = ["derive"] }
+console = "0.16"
+ctrlc = "3.5"
+dirs = "7"
+indicatif = "0.18"
+libc = "0.2"
+regex = "1.13"
+rpassword = "7.5"
+reqwest = { version = "0.13", features = ["blocking", "json"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Static sherpa-onnx (speaker diarization); prebuilt binaries are fetched at build time.
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries", "static", "sys"] }
+thiserror = "2"
+toml = "1.1"
+whisper-rs = { version = "0.16", features = ["metal"] }
+
+[dev-dependencies]
+hound = "3.5"
+tempfile = "3"

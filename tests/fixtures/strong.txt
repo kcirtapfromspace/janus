@@ -1,0 +1,16 @@
+I: Hi, thanks for making the time today. I'm Daniel, and I lead the product team for our analytics platform here at Northwind. How are you doing?
+Y: Doing well, thanks Daniel. I've been looking forward to this. I actually spent some time with your dashboard product this weekend.
+I: Oh, great. Let's start with a quick walkthrough of your background.
+Y: Sure. I'm a product manager at a mid-size logistics software company, where I own our routing and dispatch product. Over the last three years I've grown it from about two million to eleven million dollars in annual revenue. Before that I was a data analyst, which is why analytics products are close to my heart.
+I: Tell me about a time you had to make a tough prioritization call.
+Y: Last year our largest customer asked for a custom reporting feature, while our data showed that forty percent of new users were dropping off during onboarding, and we only had one team for the quarter. I pulled the churn and expansion numbers, showed that fixing onboarding was worth roughly three times the revenue of the custom feature, and proposed a lightweight export as a stopgap for the big customer. We shipped the onboarding redesign in eight weeks, activation went from sixty to seventy eight percent, and the customer renewed anyway.
+I: That's a great example. How did the customer react to hearing no?
+Y: I called their VP myself before they heard it anywhere else, explained the tradeoff, and gave them a firm date for the export. Being direct early actually built trust.
+I: How do you work with engineering when estimates slip?
+Y: I treat an estimate as a hypothesis. When something slips, I first ask the team what we learned. If the date matters to customers, I cut scope instead of moving the date. On my current team we define a must-have slice for every project up front, so those conversations take ten minutes instead of a week.
+I: What would you want to accomplish in your first ninety days here?
+Y: In the first month, I'd listen: talk to at least twenty customers and sit in on sales calls. In the second month, I'd pick one metric with the team, probably activation for the new self-serve tier. In the third month, I'd ship a first improvement against it and set up a weekly review so we can see whether it's working.
+I: I love that. Honestly, that's very close to what we need. Our self-serve tier launched in the spring, and activation is our biggest open question. The team is six engineers and a designer, and you'd report to me. What questions do you have for me?
+Y: Two questions. What does success look like for this role after one year? And what's the biggest disagreement the team has right now about the roadmap?
+I: Great questions. Success is activation above seventy percent and a clear self-serve roadmap. The biggest debate is whether to build integrations or improve the core dashboards, and I'd love your take on that in the next round. We're running a bit over, but this was a really good conversation. Our recruiter will reach out tomorrow to set up the onsite with our engineering lead and our CEO.
+Y: Thank you, Daniel. I really enjoyed this, and I'm excited about the activation problem. Talk soon.

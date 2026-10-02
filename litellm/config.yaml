@@ -1,0 +1,10 @@
+# LiteLLM proxy config for Interview Coach.
+#
+# ic calls each provider through LiteLLM's pass-through routes — /anthropic/v1/messages for Claude,
+# /openai_passthrough/v1/responses for OpenAI — which forward requests in the provider's own format
+# (so structured outputs, reasoning settings, and Claude's server-side fallbacks keep working).
+# LiteLLM authenticates ic's virtual key, injects the provider key from .env (ANTHROPIC_API_KEY /
+# OPENAI_API_KEY), and records spend. Pass-through routes don't use a model_list, so none is needed.
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

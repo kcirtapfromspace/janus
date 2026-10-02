@@ -1,0 +1,52 @@
+# LiteLLM gateway that brokers every LLM request Interview Coach makes.
+#
+# `ic proxy setup` copies this file and config.yaml into ~/InterviewCoach/litellm/ next to a
+# generated .env (secrets: the Anthropic key, LiteLLM master/salt keys, Postgres password), so no
+# secret ever lives in the repo. Edit the copies here, then re-run `ic proxy setup`.
+# Adapted from https://github.com/BerriAI/litellm/blob/main/docker-compose.yml
+
+services:
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:v1.103.1   # pinned: `main-stable` would drift
+    command: ["--config=/app/config.yaml"]
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    ports:
+      # Loopback only: this container holds your Anthropic key, so nothing else on the network
+      # should be able to spend against it.
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
+    environment:
+      DATABASE_URL: "postgresql://llmproxy:${POSTGRES_PASSWORD}@db:5432/litellm"
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Virtual keys, spend tracking, and request logs live here. Not published to the host.
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: litellm
+      POSTGRES_USER: llmproxy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d litellm -U llmproxy"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+volumes:
+  pgdata:
