@@ -52,10 +52,23 @@ pub fn account() -> Option<String> {
     describe(&std::fs::read_to_string(config_dir().join("credentials").join(format!("{PROFILE}.json"))).ok()?)
 }
 
+/// The profile remembers the organization (and workspace) it was first signed in to, and `ant`
+/// asks the sign-in page for that same organization next time: an account outside it then gets
+/// "You don't have access to this organization". Without a signed-in session there's nothing to
+/// keep it for, so it's forgotten and the page lets you choose.
+fn forget_organization(config_dir: &std::path::Path) -> Result<()> {
+    let credentials = config_dir.join("credentials").join(format!("{PROFILE}.json"));
+    let config = config_dir.join("configs").join(format!("{PROFILE}.json"));
+    if !credentials.exists() && config.exists() {
+        std::fs::remove_file(config)?;
+    }
+    Ok(())
+}
+
 /// Sign out of ic's own profile. Other profiles, and which one other tools use, are untouched.
 pub fn logout() -> Result<()> {
     if !has_login() {
-        return Ok(());
+        return forget_organization(&config_dir());
     }
     let out = Command::new(Tool::Ant.require()?)
         .args(["auth", "logout", "--profile", PROFILE])
@@ -64,7 +77,7 @@ pub fn logout() -> Result<()> {
     if !out.status.success() || has_login() {
         bail!("couldn't sign out of Claude: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    Ok(())
+    forget_organization(&config_dir())
 }
 
 /// A fresh access token from the login session (`ant` refreshes it when it's near expiry).
@@ -111,6 +124,8 @@ pub fn parse_login_line(line: &str) -> Option<LoginEvent> {
 /// Without `on_event`, `ant` talks to the terminal directly. With it, `ant`'s output is turned into
 /// events instead (for the app); stdin stays connected, so a code typed or sent there reaches `ant`.
 pub fn login(on_event: Option<&mut dyn FnMut(LoginEvent)>) -> Result<()> {
+    // A profile left from an earlier account would send the page to that account's organization.
+    forget_organization(&config_dir())?;
     let pointer = config_dir().join("active_config");
     let had_pointer = pointer.exists();
     let mut cmd = Command::new(Tool::Ant.require()?);
@@ -155,7 +170,9 @@ pub fn login(on_event: Option<&mut dyn FnMut(LoginEvent)>) -> Result<()> {
         }
     };
     if !status.success() {
-        bail!("Claude sign-in didn't complete (approval wasn't given within 5 minutes, or it was cancelled).");
+        bail!("Claude sign-in didn't complete: approval wasn't given within 5 minutes, it was cancelled, or the \
+               organization you chose doesn't allow it. Choose an organization you can use the Claude Console with; a \
+               Team or Enterprise organization may need its admin to allow the Anthropic CLI.");
     }
     if !had_pointer && pointer.exists() {
         // Our login became the machine-wide default; undo that so it stays private to ic.
@@ -167,6 +184,28 @@ pub fn login(on_event: Option<&mut dyn FnMut(LoginEvent)>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Signed out, the remembered organization goes too, so the next sign-in lets you choose one.
+    /// Signed in, it stays (ant uses it for that session).
+    #[test]
+    fn the_organization_is_forgotten_only_without_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("configs").join(format!("{PROFILE}.json"));
+        let credentials = dir.path().join("credentials").join(format!("{PROFILE}.json"));
+        let other = dir.path().join("configs").join("other.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(credentials.parent().unwrap()).unwrap();
+        for f in [&config, &credentials, &other] {
+            std::fs::write(f, "{}").unwrap();
+        }
+        forget_organization(dir.path()).unwrap();
+        assert!(config.exists(), "kept while signed in");
+        std::fs::remove_file(&credentials).unwrap();
+        forget_organization(dir.path()).unwrap();
+        assert!(!config.exists(), "forgotten once signed out");
+        assert!(other.exists(), "other profiles are untouched");
+        forget_organization(dir.path()).unwrap();
+    }
 
     /// The account shown in Setup comes from the credentials file's non-secret fields.
     #[test]

@@ -98,8 +98,9 @@ private struct CheckRow: View {
                 model.signIn(switching: true)
             }
         } message: {
-            Text("You'll be signed out here, then asked to approve access in your browser. If it picks the wrong "
-                 + "account, switch accounts at claude.ai first. Other apps keep their own sign-in.")
+            Text("You'll be signed out here, then asked to approve access in your browser, where you choose the "
+                 + "account and organization. If it picks the wrong account, switch accounts at claude.ai first. "
+                 + "Other apps keep their own sign-in.")
         }
     }
 
