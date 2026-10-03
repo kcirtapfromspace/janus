@@ -299,8 +299,8 @@ pub struct QuestionReview {
     pub kind: QuestionType,
     /// What the candidate actually said, in one or two sentences.
     pub answer_summary: String,
-    /// Answer quality, 1-5.
-    pub score: u8,
+    /// Answer quality, 1-5; null only when the candidate's answer is missing from the recording (see recording_notes).
+    pub score: Option<u8>,
     pub what_worked: String,
     pub what_was_missing: String,
     /// A concrete outline of a stronger answer, built from what the candidate actually knows.
@@ -351,8 +351,8 @@ impl SessionAnalysis {
                 return Err(format!("rubric score for {label} is out of range: {:?}", score.score));
             }
         }
-        if let Some(q) = self.questions.iter().find(|q| !in_range(q.score)) {
-            return Err(format!("question score out of range: {}", q.score));
+        if let Some(q) = self.questions.iter().find(|q| q.score.is_some_and(|s| !in_range(s))) {
+            return Err(format!("question score out of range: {:?}", q.score));
         }
         Ok(())
     }
@@ -368,5 +368,97 @@ impl SessionAnalysis {
         out.extend(self.red_flags.iter().map(|h| ("red flag", &h.evidence)));
         out.extend(self.coaching.iter().map(|c| ("coaching", &c.evidence)));
         out
+    }
+}
+
+// --- Stages ------------------------------------------------------------------------------------
+
+text_enum! {
+    /// The four stages every interview goes through, in order. Each can be re-run on its own.
+    pub enum Step { Recording => "recording", Transcript => "transcript", Report => "report", Next => "next" }
+}
+
+impl Step {
+    /// The stage this one is built from.
+    pub fn upstream(self) -> Option<Step> {
+        match self {
+            Step::Recording => None,
+            Step::Transcript => Some(Step::Recording),
+            Step::Report => Some(Step::Transcript),
+            Step::Next => Some(Step::Report),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Step::Recording => "Recording",
+            Step::Transcript => "Transcript",
+            Step::Report => "After-action report",
+            Step::Next => "What to do next",
+        }
+    }
+}
+
+text_enum! {
+    pub enum RunStatus { Running => "running", Succeeded => "succeeded", Failed => "failed" }
+}
+
+// --- "What to do next" schema ------------------------------------------------------------------
+// Like the analysis schema above, these doc comments are instructions to the model.
+
+text_enum! {
+    pub enum Priority { High => "high", Medium => "medium", Low => "low" }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PrepItem {
+    /// What the next round will likely probe, in a few words.
+    pub topic: String,
+    /// Why you expect it: what the interviewer said or did, in one or two sentences.
+    pub why: String,
+    /// The interviewer's words that signal it (or the candidate's, if a gap they showed is the reason).
+    pub evidence: Evidence,
+    /// Concretely how to prepare, built from what the candidate has actually done.
+    pub how_to_prepare: String,
+    /// 2-3 questions they are likely to ask about it.
+    pub likely_questions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PracticeItem {
+    /// The skill to practise, in a few words.
+    pub skill: String,
+    /// The title of the report's coaching point this serves.
+    pub from_coaching: String,
+    /// A specific exercise to do, step by step in one or two sentences.
+    pub drill: String,
+    /// Realistic minutes for one session of the drill.
+    pub minutes: u16,
+    pub priority: Priority,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NextSteps {
+    /// One sentence: where the candidate stands and the single most important next move.
+    pub headline: String,
+    /// 3-5 topics the next conversation is likely to probe, strongest signal first.
+    pub next_round_prep: Vec<PrepItem>,
+    /// 3-5 drills, most important first.
+    pub practice_plan: Vec<PracticeItem>,
+}
+
+impl NextSteps {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.next_round_prep.is_empty() || self.practice_plan.is_empty() {
+            return Err("both next-round prep and a practice plan are required".into());
+        }
+        if let Some(p) = self.practice_plan.iter().find(|p| !(1..=180).contains(&p.minutes)) {
+            return Err(format!("unrealistic drill length: {} minutes", p.minutes));
+        }
+        Ok(())
+    }
+
+    pub fn evidence(&self) -> Vec<&Evidence> {
+        self.next_round_prep.iter().map(|p| &p.evidence).collect()
     }
 }

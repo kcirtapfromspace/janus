@@ -1,3 +1,4 @@
+import InterviewCoachKit
 import SwiftUI
 import WebKit
 
@@ -20,12 +21,15 @@ struct MainWindow: View {
                 }
             }
         } detail: {
-            if let session = model.selectedSession {
-                SessionDetail(session: session)
+            if let detail = model.detail, detail.session.id == model.selection {
+                PipelineView(detail: detail)
+            } else if model.selection != nil {
+                ProgressView()
             } else {
                 ContentUnavailableView("Select an interview", systemImage: "doc.text.magnifyingglass")
             }
         }
+        .task(id: model.selection) { await model.loadDetail() }
         .toolbar { toolbar }
         .confirmationDialog("Has everyone on the call agreed to be recorded?", isPresented: $askingConsent) {
             Button("Yes — start recording") { Task { await model.startRecording() } }
@@ -49,9 +53,6 @@ struct MainWindow: View {
             Button("Import", systemImage: "square.and.arrow.down") { model.importRecording() }
                 .help("Import a recording (audio or video)")
                 .disabled(busy)
-            Button("Analyze", systemImage: "sparkles") { if let s = selected { model.analyze(s.id) } }
-                .help("Analyse this interview again")
-                .disabled(selected == nil || busy || selected?.status == "recording")
             Menu("Outcome", systemImage: "flag") {
                 ForEach(outcomeChoices, id: \.value) { choice in
                     Button(choice.label) { if let s = selected { model.setOutcome(s.id, choice.value) } }
@@ -59,8 +60,6 @@ struct MainWindow: View {
             }
             .help("Record how the interview actually turned out")
             .disabled(selected == nil || busy)
-            Button("Open in Browser", systemImage: "safari") { if let s = selected { model.openInBrowser(s) } }
-                .disabled(selected?.reportPath == nil)
             Button("Show in Finder", systemImage: "folder") { if let s = selected { model.revealInFinder(s) } }
                 .disabled(selected == nil)
         }
@@ -88,7 +87,13 @@ struct MainWindow: View {
     }
 
     @ViewBuilder private var statusLine: some View {
-        if case .working(let label) = model.phase {
+        if let problem = model.captureProblem {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+                .help(problem)
+        } else if case .working(let label) = model.phase {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text(label).font(.callout)
@@ -106,41 +111,6 @@ struct MainWindow: View {
                 .lineLimit(1)
                 .help(problem)
         }
-    }
-}
-
-struct SessionDetail: View {
-    @Environment(AppModel.self) private var model
-    let session: SessionSummary
-
-    var body: some View {
-        if let report = session.reportPath {
-            ReportView(path: report)
-        } else {
-            ContentUnavailableView {
-                Label(heading, systemImage: session.status == "failed" ? "exclamationmark.triangle" : "doc.text")
-            } description: {
-                Text(session.error ?? detail)
-            } actions: {
-                if session.status != "recording" {
-                    Button("Analyze") { model.analyze(session.id) }
-                        .disabled(model.phase.isBusy)
-                }
-            }
-        }
-    }
-
-    private var heading: String {
-        switch session.status {
-        case "failed": "This session failed"
-        case "recording": "Recording in progress"
-        default: "Not analysed yet"
-        }
-    }
-
-    private var detail: String {
-        session.status == "recording" ? "Stop the recording to transcribe and analyse it."
-                                      : "Transcribed, but there's no analysis yet."
     }
 }
 

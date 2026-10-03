@@ -22,7 +22,7 @@ fn dual_track_import_labels_every_turn_correctly() {
     let fixture = common::build("strong");
     let expected = common::expected(&fixture);
     let (_tmp, settings, mut db) = env();
-    let s = ingest_tracks(&db, &settings, &fixture.join("mic.wav"), &fixture.join("system.wav"), "strong", None).unwrap();
+    let s = ingest_tracks(&mut db, &settings, &fixture.join("mic.wav"), &fixture.join("system.wav"), "strong", None, &mut Quiet).unwrap();
     let result = transcribe_session(&mut db, &settings, s.id, &mut Quiet).unwrap();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let turns = to_turns(&result.segments);
@@ -46,7 +46,7 @@ fn silent_system_track_warns_and_keeps_your_side() {
         w.write_sample(0i16).unwrap();
     }
     w.finalize().unwrap();
-    let s = ingest_tracks(&db, &settings, &fixture.join("mic.wav"), &silent, "weak", None).unwrap();
+    let s = ingest_tracks(&mut db, &settings, &fixture.join("mic.wav"), &silent, "weak", None, &mut Quiet).unwrap();
     let result = transcribe_session(&mut db, &settings, s.id, &mut Quiet).unwrap();
     assert!(result.warnings.iter().any(|w| w.contains("System Audio Recording")), "{:?}", result.warnings);
     assert!(result.segments.iter().all(|seg| seg.speaker == "you"));
@@ -58,7 +58,7 @@ fn single_track_import_detects_speakers() {
     let fixture = common::build("strong");
     let expected = common::expected(&fixture);
     let (_tmp, settings, mut db) = env();
-    let s = ingest_file(&db, &settings, &fixture.join("mixed.wav"), "strong mixed", None, Some(2)).unwrap();
+    let s = ingest_file(&mut db, &settings, &fixture.join("mixed.wav"), "strong mixed", None, Some(2), &mut Quiet).unwrap();
     let result = transcribe_session(&mut db, &settings, s.id, &mut Quiet).unwrap();
     let accuracy = common::speaker_accuracy(&result.segments, &expected);
     assert!(accuracy > 0.9, "speaker accuracy {accuracy:.3}");

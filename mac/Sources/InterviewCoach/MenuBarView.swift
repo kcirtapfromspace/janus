@@ -1,3 +1,4 @@
+import InterviewCoachKit
 import SwiftUI
 
 /// The panel that drops down from the menu-bar icon: record/stop, recent interviews, status.
@@ -101,6 +102,9 @@ struct MenuBarView: View {
                     Label("Stop", systemImage: "stop.fill")
                 }
                 .buttonStyle(.borderedProminent)
+            }
+            if let problem = model.captureProblem {
+                ProblemRow(problem: problem)
             }
 
         case .working(let label):

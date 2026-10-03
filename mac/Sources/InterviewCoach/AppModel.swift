@@ -1,3 +1,4 @@
+import InterviewCoachKit
 import AppKit
 import ICRecorderCore
 import Observation
@@ -26,11 +27,18 @@ final class AppModel {
     var company = ""
     /// A downloaded, verified update waiting for the app to be idle.
     var updateReady: String?
+    /// The selected session's whole pipeline, and which stage the window shows.
+    var detail: SessionDetail?
+    var selectedStage: StageStep = .report
+    let player = AudioPlayer()
+    /// While recording: a track that has stopped receiving audio (e.g. a call app took the mic).
+    var captureProblem: String?
 
     let ic = ICClient.locate()
     let updater = Updater()
     private var recorder: RecordingSession?
     private var recordingID: Int?
+    @ObservationIgnored private var healthTimer: Timer?
 
     init() {
         updater.isIdle = { [unowned self] in phase == .idle }
@@ -40,6 +48,47 @@ final class AppModel {
     }
 
     var selectedSession: SessionSummary? { sessions.first { $0.id == selection } }
+
+    /// Load the selected session's stages, transcript, reports, and next steps.
+    func loadDetail() async {
+        guard let ic, let id = selection else {
+            detail = nil
+            return
+        }
+        do {
+            let loaded = try await ic.decode(SessionDetail.self, ["session", "\(id)"])
+            guard selection == id else { return }  // the selection moved on while loading
+            if detail?.session.id != id {
+                // A different interview: start on its furthest stage that has something to show.
+                selectedStage = loaded.stages.last { $0.hasResult }?.step ?? .recording
+            }
+            detail = loaded
+            player.load(loaded.audio.listenPath)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Re-run one stage; later stages built on it go out of date (or update too, with `thenLater`).
+    func rerun(_ step: StageStep, options: [String] = [], thenLater: Bool = false) {
+        guard let id = selection else { return }
+        selectedStage = step
+        let label = detail?.stage(step)?.label.lowercased() ?? step.rawValue
+        runIC(["run", step.rawValue, "\(id)"] + options + (thenLater ? ["--then-later"] : []),
+              label: "Running the \(label)…", select: id)
+    }
+
+    /// Bring every out-of-date stage current, starting from the first.
+    func updateLaterSteps() {
+        guard let stale = detail?.firstOutOfDate else { return }
+        rerun(stale.step, thenLater: true)
+    }
+
+    func swapSpeakers() {
+        guard let id = selection else { return }
+        selectedStage = .transcript
+        runIC(["swap", "\(id)"], label: "Swapping speakers…", select: id)
+    }
 
     func refresh() async {
         guard let ic else {
@@ -83,8 +132,10 @@ final class AppModel {
             )
             recorder = session
             recordingID = new.id
+            selection = new.id  // the window follows the interview through its stages
             phase = .recording(since: Date())
             session.start()  // asks for microphone permission on first use
+            watchCaptureHealth()
             title = ""
             company = ""
             await refresh()
@@ -98,7 +149,25 @@ final class AppModel {
         recorder?.stop(reason: "stopped in app")  // finalizes the WAVs, then calls onExit
     }
 
+    /// Checks every second that both tracks are still receiving audio, so a dead mic shows up
+    /// during the interview rather than in the report afterwards.
+    private func watchCaptureHealth() {
+        healthTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let problem = self.recorder?.health()?.problem
+                if problem != self.captureProblem { self.captureProblem = problem }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)  // keeps checking while a menu is open
+        healthTimer = timer
+    }
+
     private func recordingEnded(exitCode: Int32) {
+        healthTimer?.invalidate()
+        healthTimer = nil
+        captureProblem = nil
         recorder = nil
         guard let id = recordingID else { return }
         recordingID = nil
@@ -124,7 +193,8 @@ final class AppModel {
     }
 
     func analyze(_ id: Int) {
-        runIC(["analyze", "\(id)"], label: "Analysing…", select: id)
+        selection = id
+        rerun(.report)
     }
 
     func setOutcome(_ id: Int, _ outcome: String) {
@@ -164,14 +234,24 @@ final class AppModel {
         guard let ic else { return }
         lastError = nil
         phase = .working(label)
+        // While ic works, keep the pipeline view live: stage status and progress come from the database.
+        let poll = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                if id == nil || selection == id { await loadDetail() }
+            }
+        }
         Task {
             do {
                 _ = try await ic.run(args)
             } catch {
                 lastError = error.localizedDescription
             }
+            poll.cancel()
             await refresh()
             if let id { selection = id }
+            await loadDetail()
             phase = .idle
         }
     }

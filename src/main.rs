@@ -18,12 +18,14 @@ use interview_coach::config::{FileConfig, ModelRef, Provider, Settings, which};
 use interview_coach::db::Db;
 use interview_coach::diarize;
 use interview_coach::llm;
-use interview_coach::merge::{swap_you_and_interviewer, to_turns};
-use interview_coach::models::{Mode, OutcomeResult, Status, YOU, fmt_ts, speaker_label};
+use interview_coach::merge::to_turns;
+use interview_coach::models::{OutcomeResult, Status, Step, YOU, fmt_ts, speaker_label};
 use interview_coach::pipeline;
 use interview_coach::progress::Progress;
 use interview_coach::proxy::{self, LlmEndpoint};
 use interview_coach::report;
+use interview_coach::session_view;
+use interview_coach::steps::{self, StageStatus};
 use interview_coach::transcribe;
 
 #[derive(Parser)]
@@ -111,6 +113,30 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show an interview's four stages (recording, transcript, report, next) and where each stands.
+    Steps {
+        id: i64,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Re-run one stage: recording, transcript, report, or next. Later stages built on it go out of date.
+    Run {
+        #[arg(value_parser = parse_step)]
+        step: Step,
+        id: i64,
+        /// People on the call, including you (transcript of a single-track recording).
+        #[arg(long)]
+        speakers: Option<i64>,
+        /// Also update every later stage that's out of date.
+        #[arg(long)]
+        then_later: bool,
+    },
+    /// Show what to do next: next-round prep and a practice plan.
+    Next { id: i64 },
+    /// Everything about one session as JSON (used by the Interview Coach app).
+    #[command(hide = true)]
+    Session { id: i64 },
     /// Swap 'You' and 'Interviewer' labels if speaker detection guessed wrong.
     Swap { id: i64 },
     /// Analyse a transcribed session with Claude (re-running keeps earlier analyses).
@@ -210,6 +236,10 @@ enum ProxyCmd {
     Status,
 }
 
+fn parse_step(s: &str) -> Result<Step, String> {
+    s.parse().map_err(|_| "expected one of: recording, transcript, report, next".to_string())
+}
+
 fn parse_outcome(s: &str) -> Result<OutcomeResult, String> {
     s.parse().map_err(|_| {
         let all: Vec<_> = OutcomeResult::ALL.iter().map(|o| o.as_str()).collect();
@@ -280,31 +310,36 @@ fn run_transcription(db: &mut Db, settings: &Settings, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Why analysis can't run with the current setup, if it can't.
+/// Why the default model can't be used with the current setup, if it can't.
 fn analysis_blocker(settings: &Settings) -> Option<String> {
+    blocker_for(settings, &settings.model)
+}
+
+/// Why `model` can't be used with the current setup, if it can't.
+fn blocker_for(settings: &Settings, model: &ModelRef) -> Option<String> {
     if LlmEndpoint::load(settings).is_none() {
         return Some("the LLM proxy isn't set up yet — run: ic proxy setup".into());
     }
-    match settings.model.provider {
+    match model.provider {
         Provider::Anthropic => (!auth::has_login()).then(|| "you're not signed in to Claude — run: ic login".to_string()),
         Provider::OpenAi => (!proxy::using_external_proxy() && !proxy::has_provider_key(settings, Provider::OpenAi))
-            .then(|| format!("the proxy has no OpenAI key, which {} needs — add one with: ic proxy key openai",
-                             settings.model)),
+            .then(|| format!("the proxy has no OpenAI key, which {model} needs — add one with: ic proxy key openai")),
     }
 }
 
-fn run_analysis(db: &mut Db, settings: &Settings, id: i64, open: bool, full: bool) -> Result<()> {
-    if let Some(reason) = analysis_blocker(settings) {
-        bail!("Can't analyse yet: {reason}\nThen run: ic analyze {id}");
+fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, open: bool, full: bool) -> Result<()> {
+    if let Some(reason) = blocker_for(settings, model) {
+        bail!("Can't analyse yet: {reason}\nThen run: ic run report {id}");
     }
     let endpoint = LlmEndpoint::load(settings).expect("checked above");
-    let client = llm::client(&settings.model, endpoint);
+    let client = llm::client(model, endpoint);
     let mut ui = Ui::new();
-    let stored = pipeline::analyze_session(db, client.as_ref(), &settings.model, id, &mut ui);
+    let stored = pipeline::analyze_session(db, client.as_ref(), model, id, &mut ui);
     ui.finish();
     let stored = stored?;
     let session = db.get_session(id)?;
     let outcome = db.get_outcome(id)?;
+    report::write_analysis_html(&session, &stored, outcome.as_ref())?;
     let path = report::write_html(&session, &stored, outcome.as_ref())?;
     report::print_report(&session, &stored, outcome.as_ref(), full);
     if open {
@@ -313,14 +348,119 @@ fn run_analysis(db: &mut Db, settings: &Settings, id: i64, open: bool, full: boo
     Ok(())
 }
 
+/// Stage 4: next-round prep and a practice plan from the current report.
+fn run_next(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, show: bool) -> Result<()> {
+    if let Some(reason) = blocker_for(settings, model) {
+        bail!("Can't plan next steps yet: {reason}\nThen run: ic run next {id}");
+    }
+    let endpoint = LlmEndpoint::load(settings).expect("checked above");
+    let client = llm::client(model, endpoint);
+    let mut ui = Ui::new();
+    let stored = pipeline::plan_next_steps(db, client.as_ref(), model, id, &mut ui);
+    ui.finish();
+    let stored = stored?;
+    if show {
+        report::print_next_steps(&db.get_session(id)?, &stored);
+    }
+    Ok(())
+}
+
+/// The rest of the pipeline after the recording stage: transcript, report, what to do next.
 fn after_transcription(db: &mut Db, settings: &Settings, id: i64, analyze: bool) -> Result<()> {
     run_transcription(db, settings, id)?;
     if !analyze {
         return Ok(());
     }
     match analysis_blocker(settings) {
-        None => run_analysis(db, settings, id, false, false)?,
-        Some(reason) => println!("{}", style(format!("Skipping analysis: {reason}, then: ic analyze {id}")).dim()),
+        None => {
+            run_analysis(db, settings, &settings.model, id, false, false)?;
+            run_next(db, settings, &settings.model, id, false)?;
+            println!("{}", style(format!("What to do next: ic next {id} · All stages: ic steps {id}")).dim());
+        }
+        Some(reason) => println!("{}", style(format!("Skipping analysis: {reason}, then: ic run report {id} --then-later")).dim()),
+    }
+    Ok(())
+}
+
+/// Re-run one stage; with `then_later`, also update every later stage that's out of date.
+fn run_step(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model: Option<&ModelRef>,
+            speakers: Option<i64>, then_later: bool) -> Result<()> {
+    run_one(db, settings, step, id, explicit_model, speakers)?;
+    if then_later {
+        for later in Step::ALL.iter().copied().skip_while(|s| *s != step).skip(1) {
+            let state = steps::flow(db, id)?.into_iter().find(|s| s.step == later).expect("every stage has a state");
+            if matches!(state.status, StageStatus::OutOfDate | StageStatus::NotRun | StageStatus::Failed) {
+                run_one(db, settings, later, id, explicit_model, None)?;
+            }
+        }
+    }
+    println!();
+    print_steps(db, id)
+}
+
+fn run_one(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model: Option<&ModelRef>,
+           speakers: Option<i64>) -> Result<()> {
+    match step {
+        Step::Recording => {
+            let mut ui = Ui::new();
+            let result = pipeline::reprocess_audio(db, id, &mut ui);
+            ui.finish();
+            result?;
+            println!("{} Re-processed the audio for session {id}.", style("✓").green());
+        }
+        Step::Transcript => {
+            if let Some(n) = speakers {
+                let mut session = db.get_session(id)?;
+                session.num_speakers = Some(n);
+                db.save_session(&session)?;
+            }
+            run_transcription(db, settings, id)?;
+        }
+        Step::Report => {
+            let model = explicit_model.cloned().unwrap_or_else(|| settings.model.clone());
+            run_analysis(db, settings, &model, id, false, false)?;
+        }
+        Step::Next => {
+            // Next steps default to the model that wrote the report they build on.
+            let model = match explicit_model {
+                Some(m) => m.clone(),
+                None => pipeline::report_model(db, id)?.unwrap_or_else(|| settings.model.clone()),
+            };
+            run_next(db, settings, &model, id, true)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_steps(db: &Db, id: i64) -> Result<()> {
+    let view = session_view::build(db, id)?;
+    println!("{}", style(format!("━━ {} ━━", view.session.title)).bold());
+    for stage in &view.stages {
+        let (mark, status) = match stage.status {
+            StageStatus::Done => (style("✓").green(), style("done".to_string()).green()),
+            StageStatus::Running => (
+                style("…").cyan(),
+                style(match stage.progress {
+                    Some(p) => format!("running {p:.0}%"),
+                    None => "running".into(),
+                })
+                .cyan(),
+            ),
+            StageStatus::OutOfDate => (style("⚠").yellow(), style("out of date".to_string()).yellow()),
+            StageStatus::Failed => (style("✗").red(), style("failed".to_string()).red()),
+            StageStatus::NotRun => (style("○").dim(), style("not run".to_string()).dim()),
+        };
+        let when = stage.last_run_at.as_deref().map(|t| t.chars().take(16).collect::<String>().replace('T', " "));
+        println!(" {mark} {:<20} {:<12} {}  {}", stage.label, status.to_string(), stage.summary.as_deref().unwrap_or(""),
+                 style(when.unwrap_or_default()).dim());
+        if let Some(error) = &stage.error {
+            println!("     {}", style(error).red());
+        }
+    }
+    if let Some(first) = view.stages.iter().find(|s| s.status == StageStatus::OutOfDate) {
+        let upstream = first.step.upstream().map(|u| u.as_str()).unwrap_or("recording");
+        println!("{}", style(format!("Update later stages: ic run {} {id} --then-later   (or just: ic run {} {id} --then-later)",
+                                     first.step, upstream)).dim());
     }
     Ok(())
 }
@@ -399,8 +539,10 @@ fn finish_recording(db: &mut Db, settings: &Settings, id: i64, analyze: bool, st
     }
     // The raw 48 kHz WAVs stay next to the FLACs for now: they're what we'd inspect if the recorder
     // misbehaves. Revisit deleting them once real calls have validated the recorder.
-    pipeline::normalize_tracks(db, &mut session, &mic, &system)
-        .with_context(|| format!("Couldn't process the recording; the raw audio is still in {}", dir.display()))?;
+    let mut ui = Ui::new();
+    let processed = pipeline::process_recording(db, id, &mic, &system, &mut ui);
+    ui.finish();
+    session = processed.with_context(|| format!("Couldn't process the recording; the raw audio is still in {}", dir.display()))?;
     println!("Saved session {} ({}) → {}", style(id).bold(), fmt_ts(session.duration_s.unwrap_or(0.0)), dir.display());
     after_transcription(db, settings, id, analyze)
 }
@@ -525,14 +667,9 @@ fn transcript(settings: &Settings, id: i64, json: bool) -> Result<()> {
 
 fn swap(settings: &Settings, id: i64) -> Result<()> {
     let mut db = open_db(settings)?;
-    let session = db.get_session(id)?;
-    if session.mode == Mode::Dual {
-        bail!("This session has separate tracks, so its labels come from the tracks themselves.");
-    }
-    let segments = swap_you_and_interviewer(&db.get_segments(id)?);
-    db.replace_segments(id, &segments)?;
-    pipeline::write_transcript_files(Path::new(&session.dir), &segments)?;
-    println!("Swapped speakers for session {id}. Re-run the analysis with: ic analyze {id}");
+    pipeline::swap_speakers(&mut db, id, &mut interview_coach::progress::Quiet)?;
+    println!("Swapped speakers for session {id}. The report and next steps are now out of date:");
+    println!("  ic run report {id} --then-later");
     Ok(())
 }
 
@@ -554,9 +691,13 @@ fn show_report(settings: &Settings, id: i64, open: bool, full: bool) -> Result<(
 fn outcome(settings: &Settings, id: i64, result: OutcomeResult, notes: Option<String>) -> Result<()> {
     let db = open_db(settings)?;
     let outcome = db.set_outcome(id, result, notes.as_deref())?;
+    let session = db.get_session(id)?;
+    for analysis in db.analyses(id)? {
+        report::write_analysis_html(&session, &analysis, Some(&outcome))?;  // every report page shows the outcome
+    }
     match db.latest_analysis(id)? {
         Some(stored) => {
-            report::write_html(&db.get_session(id)?, &stored, Some(&outcome))?;
+            report::write_html(&session, &stored, Some(&outcome))?;
             println!("Recorded {} for session {id} (the analysis predicted: {}).", style(outcome.result.label()).bold(),
                      stored.analysis.outlook.verdict.label());
         }
@@ -785,6 +926,8 @@ fn doctor(settings: &Settings) {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let mut settings = Settings::load()?;
+    // Kept apart from the default: `ic run next` falls back to the report's model, not the default.
+    let explicit_model = cli.model.clone();
     if let Some(model) = cli.model {
         settings.model = model;
     }
@@ -810,14 +953,20 @@ fn run() -> Result<()> {
             let session = match (path, mic, system) {
                 (Some(path), None, None) => {
                     let title = title.unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into());
-                    pipeline::ingest_file(&db, &settings, &path, &title, company, Some(speakers))?
+                    let mut ui = Ui::new();
+                    let session = pipeline::ingest_file(&mut db, &settings, &path, &title, company, Some(speakers), &mut ui);
+                    ui.finish();
+                    session?
                 }
                 (None, Some(mic), Some(system)) => {
                     let title = title.unwrap_or_else(|| {
                         mic.canonicalize().ok().and_then(|p| Some(p.parent()?.file_name()?.to_string_lossy().into_owned()))
                             .unwrap_or_else(|| "Interview".into())
                     });
-                    pipeline::ingest_tracks(&db, &settings, &mic, &system, &title, company)?
+                    let mut ui = Ui::new();
+                    let session = pipeline::ingest_tracks(&mut db, &settings, &mic, &system, &title, company, &mut ui);
+                    ui.finish();
+                    session?
                 }
                 _ => bail!("Pass a recording file, or both --mic and --system tracks."),
             };
@@ -844,7 +993,31 @@ fn run() -> Result<()> {
         },
         Cmd::Transcript { id, json } => transcript(&settings, id, json),
         Cmd::Swap { id } => swap(&settings, id),
-        Cmd::Analyze { id, open, full } => run_analysis(&mut open_db(&settings)?, &settings, id, open, full),
+        Cmd::Analyze { id, open, full } => run_analysis(&mut open_db(&settings)?, &settings, &settings.model, id, open, full),
+        Cmd::Steps { id, json } => {
+            let db = open_db(&settings)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&session_view::build(&db, id)?.stages)?);
+                Ok(())
+            } else {
+                print_steps(&db, id)
+            }
+        }
+        Cmd::Run { step, id, speakers, then_later } => {
+            run_step(&mut open_db(&settings)?, &settings, step, id, explicit_model.as_ref(), speakers, then_later)
+        }
+        Cmd::Next { id } => {
+            let db = open_db(&settings)?;
+            let Some(next) = db.latest_next_steps(id)? else {
+                bail!("Session {id} has no next steps yet. Run: ic run next {id}");
+            };
+            report::print_next_steps(&db.get_session(id)?, &next);
+            Ok(())
+        }
+        Cmd::Session { id } => {
+            println!("{}", serde_json::to_string(&session_view::build(&open_db(&settings)?, id)?)?);
+            Ok(())
+        }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
         Cmd::Outcome { id, result, notes } => outcome(&settings, id, result, notes),
         Cmd::Proxy { action } => match action {

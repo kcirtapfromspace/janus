@@ -1,14 +1,15 @@
 //! SQLite index. Audio and exports live in per-session folders; the database ties them together.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
 use crate::metrics::TalkMetrics;
-use crate::models::{Mode, OutcomeResult, Segment, Session, SessionAnalysis, Source, Stage, Status, Verdict, Word};
+use crate::models::{Mode, NextSteps, OutcomeResult, RunStatus, Segment, Session, SessionAnalysis, Source, Stage, Status,
+                    Step, Verdict, Word};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS roles (
@@ -73,6 +74,40 @@ CREATE TABLE IF NOT EXISTS outcomes (
     updated_at TEXT NOT NULL
 );
 
+-- One row per attempt at a stage (recording, transcript, report, next). input_run_id is the upstream
+-- run it was built from, which is how a stage knows it's out of date; output_id points at the
+-- analyses / next_steps row it produced. progress + message are live status for the app.
+CREATE TABLE IF NOT EXISTS step_runs (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    step TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    input_run_id INTEGER,
+    output_id INTEGER,
+    error TEXT,
+    progress REAL,
+    message TEXT,
+    pid INTEGER,
+    warnings_json TEXT
+);
+CREATE INDEX IF NOT EXISTS step_runs_by_session ON step_runs(session_id, id);
+
+-- "What to do next": every run is kept, like analyses.
+CREATE TABLE IF NOT EXISTS next_steps (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    analysis_id INTEGER,
+    plan_json TEXT NOT NULL,
+    unverified_quotes_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS next_steps_by_session ON next_steps(session_id, id);
+
 CREATE TABLE IF NOT EXISTS coaching_plans (
     id INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -112,6 +147,38 @@ pub struct StoredAnalysis {
     pub unverified_quotes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct StoredNextSteps {
+    pub id: i64,
+    pub session_id: i64,
+    pub created_at: String,
+    pub model: String,
+    pub prompt_version: String,
+    pub analysis_id: Option<i64>,
+    pub plan: NextSteps,
+    pub unverified_quotes: Vec<String>,
+}
+
+/// One attempt at one stage of one session.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StepRun {
+    pub id: i64,
+    pub session_id: i64,
+    pub step: Step,
+    pub status: RunStatus,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub params: serde_json::Value,
+    pub input_run_id: Option<i64>,
+    pub output_id: Option<i64>,
+    pub error: Option<String>,
+    pub progress: Option<f64>,
+    pub message: Option<String>,
+    pub pid: Option<i64>,
+    /// Problems worth showing with a successful run (e.g. "found 1 voice but 2 were expected").
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
     pub session_id: i64,
@@ -122,7 +189,11 @@ pub struct Outcome {
 
 pub struct Db {
     conn: Connection,
+    path: PathBuf,
 }
+
+/// Schema version; `migrate` brings older databases up to it.
+const SCHEMA_VERSION: i64 = 3;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into()))
@@ -151,6 +222,29 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
 /// id, session_id, created_at, model, prompt_version, then the three JSON columns.
 type AnalysisRow = (i64, i64, String, String, String, String, String, String);
 
+fn run_from_row(r: &Row) -> rusqlite::Result<StepRun> {
+    let params: String = r.get("params_json")?;
+    Ok(StepRun {
+        id: r.get("id")?,
+        session_id: r.get("session_id")?,
+        step: parse(r.get("step")?)?,
+        status: parse(r.get("status")?)?,
+        started_at: r.get("started_at")?,
+        finished_at: r.get("finished_at")?,
+        params: serde_json::from_str(&params).unwrap_or_default(),
+        input_run_id: r.get("input_run_id")?,
+        output_id: r.get("output_id")?,
+        error: r.get("error")?,
+        progress: r.get("progress")?,
+        message: r.get("message")?,
+        pid: r.get("pid")?,
+        warnings: r
+            .get::<_, Option<String>>("warnings_json")?
+            .and_then(|w| serde_json::from_str(&w).ok())
+            .unwrap_or_default(),
+    })
+}
+
 fn analysis_from_row(r: &Row) -> rusqlite::Result<AnalysisRow> {
     Ok((
         r.get("id")?,
@@ -170,9 +264,40 @@ impl Db {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        // WAL + a busy timeout: the app reads (polling progress) while ic writes.
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(SCHEMA)?;
-        Ok(Db { conn })
+        let db = Db { conn, path: path.to_path_buf() };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    /// Another connection to the same database (for writing progress while a stage runs).
+    pub fn reopen(&self) -> Result<Db> {
+        Db::open(&self.path)
+    }
+
+    /// Version 2 added stage runs: sessions created before it get runs synthesized from what
+    /// they already have, once, so their stages show correctly. Version 3 added run warnings.
+    fn migrate(&self) -> Result<()> {
+        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        // A v2 database's step_runs predates the column; a new or pre-v2 one just got it from SCHEMA.
+        let has_warnings: bool = self.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('step_runs') WHERE name = 'warnings_json'", [], |r| r.get(0))?;
+        if !has_warnings {
+            self.conn.execute_batch("ALTER TABLE step_runs ADD COLUMN warnings_json TEXT;")?;
+        }
+        if version < 2 {
+            for session in self.list_sessions()? {
+                crate::steps::backfill(self, &session)?;
+            }
+        }
+        self.conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        Ok(())
     }
 
     // --- sessions ---------------------------------------------------------------------------
@@ -295,6 +420,131 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn analyses(&self, session_id: i64) -> Result<Vec<StoredAnalysis>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM analyses WHERE session_id = ?1 ORDER BY id DESC")?;
+        let rows = stmt.query_map([session_id], analysis_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, session_id, created_at, model, prompt_version, analysis, metrics, unverified)| {
+                Ok(StoredAnalysis {
+                    id, session_id, created_at, model, prompt_version,
+                    analysis: serde_json::from_str(&analysis)?,
+                    metrics: serde_json::from_str(&metrics)?,
+                    unverified_quotes: serde_json::from_str(&unverified)?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn analysis_by_id(&self, id: i64) -> Result<Option<StoredAnalysis>> {
+        self.analysis_where("id = ?1", id)
+    }
+
+    // --- stage runs -------------------------------------------------------------------------
+
+    pub fn start_run(&self, session_id: i64, step: Step, params: &serde_json::Value, input_run_id: Option<i64>)
+        -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO step_runs (session_id, step, status, started_at, params_json, input_run_id, pid)
+             VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6)",
+            params![session_id, step.as_str(), now_iso(), params.to_string(), input_run_id, std::process::id() as i64],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// A finished run from history (used to backfill older sessions). One argument per column.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_finished_run(&self, session_id: i64, step: Step, status: RunStatus, at: &str,
+                               params: &serde_json::Value, input_run_id: Option<i64>, output_id: Option<i64>,
+                               error: Option<&str>) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO step_runs (session_id, step, status, started_at, finished_at, params_json, input_run_id,
+             output_id, error) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
+            params![session_id, step.as_str(), status.as_str(), at, params.to_string(), input_run_id, output_id, error],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn finish_run(&self, id: i64, output_id: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE step_runs SET status = 'succeeded', finished_at = ?2, output_id = ?3, progress = NULL WHERE id = ?1",
+            params![id, now_iso(), output_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn fail_run(&self, id: i64, error: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE step_runs SET status = 'failed', finished_at = ?2, error = ?3, progress = NULL WHERE id = ?1",
+            params![id, now_iso(), error],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_run_input(&self, id: i64, input_run_id: i64) -> Result<()> {
+        self.conn.execute("UPDATE step_runs SET input_run_id = ?2 WHERE id = ?1", params![id, input_run_id])?;
+        Ok(())
+    }
+
+    pub fn set_run_warnings(&self, id: i64, warnings: &[String]) -> Result<()> {
+        let json = (!warnings.is_empty()).then(|| serde_json::to_string(warnings).expect("strings serialize"));
+        self.conn.execute("UPDATE step_runs SET warnings_json = ?2 WHERE id = ?1", params![id, json])?;
+        Ok(())
+    }
+
+    pub fn set_run_progress(&self, id: i64, progress: Option<f64>, message: &str) -> Result<()> {
+        self.conn.execute("UPDATE step_runs SET progress = ?2, message = ?3 WHERE id = ?1", params![id, progress, message])?;
+        Ok(())
+    }
+
+    /// Every run for a session, oldest first.
+    pub fn runs(&self, session_id: i64) -> Result<Vec<StepRun>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM step_runs WHERE session_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([session_id], run_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- next steps -------------------------------------------------------------------------
+
+    pub fn add_next_steps(&self, session_id: i64, plan: &NextSteps, model: &str, prompt_version: &str,
+                          analysis_id: Option<i64>, unverified_quotes: &[String]) -> Result<StoredNextSteps> {
+        self.conn.execute(
+            "INSERT INTO next_steps (session_id, created_at, model, prompt_version, analysis_id, plan_json,
+             unverified_quotes_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![session_id, now_iso(), model, prompt_version, analysis_id, serde_json::to_string(plan)?,
+                    serde_json::to_string(unverified_quotes)?],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.next_steps_by_id(id)?.ok_or_else(|| anyhow!("next steps {id} vanished"))
+    }
+
+    pub fn next_steps_by_id(&self, id: i64) -> Result<Option<StoredNextSteps>> {
+        self.next_steps_where("id = ?1", id)
+    }
+
+    pub fn latest_next_steps(&self, session_id: i64) -> Result<Option<StoredNextSteps>> {
+        self.next_steps_where("session_id = ?1 ORDER BY id DESC LIMIT 1", session_id)
+    }
+
+    fn next_steps_where(&self, clause: &str, arg: i64) -> Result<Option<StoredNextSteps>> {
+        let row = self
+            .conn
+            .query_row(&format!("SELECT * FROM next_steps WHERE {clause}"), [arg], |r| {
+                Ok((r.get::<_, i64>("id")?, r.get::<_, i64>("session_id")?, r.get::<_, String>("created_at")?,
+                    r.get::<_, String>("model")?, r.get::<_, String>("prompt_version")?,
+                    r.get::<_, Option<i64>>("analysis_id")?, r.get::<_, String>("plan_json")?,
+                    r.get::<_, String>("unverified_quotes_json")?))
+            })
+            .optional()?;
+        let Some((id, session_id, created_at, model, prompt_version, analysis_id, plan, unverified)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(StoredNextSteps {
+            id, session_id, created_at, model, prompt_version, analysis_id,
+            plan: serde_json::from_str(&plan)?,
+            unverified_quotes: serde_json::from_str(&unverified)?,
+        }))
+    }
+
     // --- outcomes ---------------------------------------------------------------------------
 
     pub fn set_outcome(&self, session_id: i64, result: OutcomeResult, notes: Option<&str>) -> Result<Outcome> {
@@ -360,6 +610,26 @@ mod tests {
         db.replace_segments(s.id, &segs[..1])?;
         assert_eq!(db.get_segments(s.id)?.len(), 1);
         assert_eq!(db.list_sessions()?.iter().map(|s| s.id).collect::<Vec<_>>(), [1]);
+        Ok(())
+    }
+
+    /// A version-2 database (stage runs, no run warnings) gains the column and keeps its runs.
+    #[test]
+    fn version_2_databases_gain_run_warnings() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("coach.db");
+        {
+            let db = Db::open(&path)?;
+            let s = db.create_session(new_session(Mode::Dual))?;
+            db.start_run(s.id, Step::Recording, &serde_json::json!({}), None)?;
+            db.conn.execute_batch("ALTER TABLE step_runs DROP COLUMN warnings_json; PRAGMA user_version = 2;")?;
+        }
+        let db = Db::open(&path)?;
+        let run = db.runs(1)?.pop().expect("the run survives");
+        assert!(run.warnings.is_empty());
+        db.set_run_warnings(run.id, &["Speaker detection found 1 voice".into()])?;
+        assert_eq!(db.runs(1)?[0].warnings, ["Speaker detection found 1 voice"]);
+        assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
         Ok(())
     }
 

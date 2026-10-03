@@ -36,6 +36,36 @@ public struct RecorderReport: Codable {
     public var errors: [Issue]
 }
 
+/// Whether both tracks are receiving audio right now, for a live warning while recording.
+public struct CaptureHealth: Equatable {
+    public var elapsedSeconds: Double
+    /// Seconds since each track last received audio (nil: never has).
+    public var micStalledSeconds: Double?
+    public var systemStalledSeconds: Double?
+
+    public init(elapsedSeconds: Double, micStalledSeconds: Double?, systemStalledSeconds: Double?) {
+        self.elapsedSeconds = elapsedSeconds
+        self.micStalledSeconds = micStalledSeconds
+        self.systemStalledSeconds = systemStalledSeconds
+    }
+
+    /// What to tell the person recording, or nil when both tracks are flowing. Both sources
+    /// deliver buffers continuously (zeros when quiet), so a few seconds with none means capture
+    /// has stopped, not that nobody is talking. The mic must start flowing on its own; call audio
+    /// is only flagged once it has flowed and then stopped, in case a tap waits for playback.
+    public var problem: String? {
+        let threshold = 5.0
+        guard elapsedSeconds > threshold else { return nil }
+        if (micStalledSeconds ?? elapsedSeconds) > threshold {
+            return "Your microphone isn't being recorded (nothing for \(Int(micStalledSeconds ?? elapsedSeconds)) s) — trying to reconnect. Check your input device in System Settings › Sound."
+        }
+        if let stalled = systemStalledSeconds, stalled > threshold {
+            return "The call's audio isn't being recorded (nothing for \(Int(stalled)) s)."
+        }
+        return nil
+    }
+}
+
 /// Owns one recording: claims the session directory, starts both tracks against a shared t0,
 /// and on stop finalizes the WAVs, writes recorder.json and removes the pid file.
 /// All methods run on the main queue.
@@ -89,6 +119,16 @@ public final class RecordingSession {
 
     public func stop(reason: String) {
         finish(reason: reason, exitCode: 0)
+    }
+
+    /// Live capture state; nil before capture starts and after it stops.
+    public func health() -> CaptureHealth? {
+        guard let startedAt, !finished else { return nil }
+        return CaptureHealth(
+            elapsedSeconds: Date().timeIntervalSince(startedAt),
+            micStalledSeconds: micWriter?.secondsSinceLastAudio,
+            systemStalledSeconds: systemWriter?.secondsSinceLastAudio
+        )
     }
 
     // MARK: - Lifecycle
@@ -163,6 +203,7 @@ public final class RecordingSession {
             tracks["mic"] = stats
             warnings += silenceWarnings(track: "mic", stats: stats)
         }
+        warnings += Self.continuityWarnings(tracks)
         warnings += mic.warnings.map { Issue(code: "mic_warning", message: $0) }
         errors += mic.errors.map { Issue(code: "mic_error", message: $0) }
         for (name, stats) in tracks where stats.writeError != nil {
@@ -197,6 +238,32 @@ public final class RecordingSession {
         for issue in warnings { log.warn("\(issue.code): \(issue.message)") }
         log.info("done (exit \(exitCode))")
         onExit(exitCode)
+    }
+
+    /// Flags a track that stopped well before the other one, or that dropped out for a while.
+    /// Either means part of the conversation is missing from it — on the mic track, the
+    /// candidate's own answers — so the analysis must not treat the missing part as silence.
+    static func continuityWarnings(_ tracks: [String: TrackWriter.Stats], tolerance: Double = 10) -> [Issue] {
+        let end = tracks.values.map(\.durationSeconds).max() ?? 0
+        var issues: [Issue] = []
+        for (name, stats) in tracks.sorted(by: { $0.key < $1.key }) where stats.capturedFrames > 0 {
+            let label = name == "mic" ? "microphone (your voice)" : "call audio (the other side)"
+            let missing = end - stats.durationSeconds
+            if missing > tolerance {
+                issues.append(Issue(
+                    code: "\(name)_stopped",
+                    message: "The \(label) stopped recording at \(MicCapture.clock(stats.durationSeconds)), \(MicCapture.clock(missing)) before the end. Nothing after that was captured on this track."
+                ))
+            }
+            let gaps = Double(stats.gapFillFrames) / stats.sampleRate
+            if gaps > tolerance / 2 {
+                issues.append(Issue(
+                    code: "\(name)_gaps",
+                    message: "The \(label) dropped out for \(MicCapture.clock(gaps)) in total (\(stats.gapFillEvents) gap(s), filled with silence). Anything said then is missing from this track."
+                ))
+            }
+        }
+        return issues
     }
 
     /// Flags tracks that are silent. An all-zero system track is the signature of missing

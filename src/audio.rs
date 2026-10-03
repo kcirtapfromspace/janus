@@ -44,6 +44,23 @@ pub fn load(path: &Path) -> Result<Vec<f32>> {
     Ok(out.stdout.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
 }
 
+/// A small copy to listen to: the tracks mixed together (dual-track) or the single track, as AAC.
+pub fn make_listen_copy(tracks: &[std::path::PathBuf], dst: &Path) -> Result<()> {
+    let mut cmd = Command::new(ffmpeg()?);
+    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"]);
+    for track in tracks {
+        cmd.arg("-i").arg(track);
+    }
+    if tracks.len() > 1 {
+        cmd.args(["-filter_complex", &format!("amix=inputs={}:duration=longest:normalize=0", tracks.len())]);
+    }
+    let out = cmd.args(["-ac", "1", "-c:a", "aac", "-b:a", "64k"]).arg(dst).output()?;
+    if !out.status.success() {
+        bail!("ffmpeg couldn't make the listening copy:\n{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
 pub fn duration_s(samples: &[f32]) -> f64 {
     samples.len() as f64 / SR as f64
 }

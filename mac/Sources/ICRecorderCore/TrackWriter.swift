@@ -57,6 +57,7 @@ public final class TrackWriter {
     private var writeError: String?
     private var finishedStats: Stats?
     private var pcmScratch: [Int16] = []
+    private var lastAppendUptime: TimeInterval?
 
     public init(url: URL, sampleRate: Double, gapToleranceSeconds: Double = 0.05) throws {
         guard sampleRate > 0 else { throw CaptureError.message("invalid sample rate \(sampleRate) for \(url.lastPathComponent)") }
@@ -78,6 +79,14 @@ public final class TrackWriter {
         return peakValue
     }
 
+    /// Seconds since audio last arrived (nil before the first buffer). Drives the mic watchdog and
+    /// the app's live "is your mic being recorded?" warning.
+    public var secondsSinceLastAudio: TimeInterval? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastAppendUptime.map { ProcessInfo.processInfo.systemUptime - $0 }
+    }
+
     /// Appends mono samples.
     /// - Parameters:
     ///   - startSeconds: time of `samples[0]` relative to t0, or nil to append contiguously.
@@ -86,6 +95,7 @@ public final class TrackWriter {
         lock.lock()
         defer { lock.unlock() }
         guard handle != nil, writeError == nil, !samples.isEmpty else { return }
+        lastAppendUptime = ProcessInfo.processInfo.systemUptime
 
         var body = samples
         if let start = startSeconds {

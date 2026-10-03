@@ -10,7 +10,7 @@ struct InterviewCoachApp: App {
             MenuBarView()
                 .environment(model)
         } label: {
-            Image(systemName: model.phase.menuBarSymbol)
+            Image(systemName: model.captureProblem == nil ? model.phase.menuBarSymbol : "exclamationmark.triangle.fill")
         }
         .menuBarExtraStyle(.window)
 

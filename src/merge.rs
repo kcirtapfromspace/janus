@@ -141,11 +141,16 @@ pub fn merge_tracks(tracks: Vec<(&str, Vec<Segment>)>) -> Vec<Segment> {
     all
 }
 
+/// A silence this long before the same speaker resumes starts a new turn. In a normal conversation
+/// the other person spoke in between; when their track failed (a mic that stopped mid-interview),
+/// this keeps 40 minutes of one side from collapsing into a single turn with a single timestamp.
+const TURN_BREAK_S: f64 = 8.0;
+
 pub fn to_turns(segments: &[Segment]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = vec![];
     for s in segments {
         match turns.last_mut() {
-            Some(last) if last.speaker == s.speaker => {
+            Some(last) if last.speaker == s.speaker && s.start - last.end < TURN_BREAK_S => {
                 last.end = last.end.max(s.end);
                 last.text.push(' ');
                 last.text.push_str(&s.text);
@@ -166,6 +171,18 @@ mod tests {
 
     fn span(start: f64, end: f64, speaker: &str) -> SpeechSpan {
         SpeechSpan { start, end, speaker: speaker.into() }
+    }
+
+    #[test]
+    fn turns_merge_one_speaker_until_a_long_silence() {
+        let segs = [Segment::new(0.0, 4.0, "Tell me about", "interviewer"), Segment::new(5.0, 9.0, "your last role.", "interviewer"),
+                    Segment::new(9.5, 30.0, "I led the platform team.", "you"),
+                    // The candidate's next answer is missing (their track stopped): the interviewer resumes 40 s later.
+                    Segment::new(31.0, 35.0, "Great.", "interviewer"), Segment::new(75.0, 80.0, "And why Agility?", "interviewer")];
+        let turns = to_turns(&segs);
+        let summary: Vec<_> = turns.iter().map(|t| (t.speaker.as_str(), t.start, t.text.as_str())).collect();
+        assert_eq!(summary, [("interviewer", 0.0, "Tell me about your last role."), ("you", 9.5, "I led the platform team."),
+                             ("interviewer", 31.0, "Great."), ("interviewer", 75.0, "And why Agility?")]);
     }
 
     #[test]

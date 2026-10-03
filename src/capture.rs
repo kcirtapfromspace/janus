@@ -127,6 +127,9 @@ pub fn report_warnings(report: &Value) -> Vec<String> {
         .as_array()
         .into_iter()
         .flatten()
+        // A track that stopped early or dropped out is reported from the tracks themselves (coverage.rs),
+        // which also covers recordings made before the recorder checked for it.
+        .filter(|w| !w["code"].as_str().is_some_and(|c| c.ends_with("_stopped") || c.ends_with("_gaps")))
         .map(|w| match w["code"].as_str() {
             Some("system_silent") => "The interviewer track is silent. Allow the recording app (Interview Coach or ICRecorder) under System Settings > Privacy & \
                 Security > Screen & System Audio Recording > System Audio Recording Only."

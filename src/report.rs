@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use console::style;
 
-use crate::db::{Outcome, StoredAnalysis};
+use crate::coverage::{self, RecordingNotes};
+use crate::db::{Outcome, StoredAnalysis, StoredNextSteps};
 use crate::metrics::TalkMetrics;
-use crate::models::{Direction, Evidence, Session, Verdict, fmt_ts};
+use crate::models::{Direction, Evidence, Priority, Session, Verdict, fmt_ts};
 
 fn dots(score: Option<u8>) -> String {
     match score {
@@ -61,6 +62,14 @@ pub fn metric_lines(m: &TalkMetrics) -> Vec<String> {
     lines
 }
 
+/// What's missing from this session's recording; derived from its tracks, so pages for older
+/// reports get it too.
+fn notes(session: &Session) -> RecordingNotes {
+    coverage::recording_notes(Path::new(&session.dir), session.mode)
+}
+
+const METRICS_LEFT_OUT: &str = "Left out: part of the conversation wasn't recorded, so talk-time numbers would be wrong.";
+
 fn quote(ev: &Evidence) -> String {
     format!("{} {}", style(&ev.timestamp).dim(), style(format!("\"{}\"", ev.quote)).italic())
 }
@@ -78,6 +87,13 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
     .flatten()
     .collect();
     println!("{}", style(format!("━━ {} ━━", header.join(" · "))).bold());
+    let notes = notes(session);
+    if !notes.is_empty() {
+        println!("\n{}", style("Part of this interview wasn't recorded").yellow().bold());
+        for note in &notes.for_you {
+            println!(" {}", style(note).yellow());
+        }
+    }
 
     let actual = match outcome {
         Some(o) => format!("   Actual outcome: {}", style(o.result.label()).bold()),
@@ -99,8 +115,12 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
     }
 
     println!("\n{}", style("By the numbers").bold());
-    for line in metric_lines(m) {
-        println!(" {line}");
+    if notes.incomplete {
+        println!(" {}", style(METRICS_LEFT_OUT).dim());
+    } else {
+        for line in metric_lines(m) {
+            println!(" {line}");
+        }
     }
 
     println!("\n{}", style("Rubric").bold());
@@ -124,7 +144,7 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
 
     println!("\n{}", style("Question by question").bold());
     for q in &a.questions {
-        println!(" {} {} {} {}", style(&q.timestamp).dim(), style(dots(Some(q.score))).cyan(), q.question,
+        println!(" {} {} {} {}", style(&q.timestamp).dim(), style(dots(q.score)).cyan(), q.question,
                  style(format!("({})", q.kind)).dim());
         if full {
             println!("    {} {}\n    {} {}\n    {} {}\n    {} {}\n", style("You:").dim(), q.answer_summary,
@@ -176,7 +196,9 @@ h1 { font-size:28px; line-height:1.2; margin:0 0 6px } h2 { font-size:15px; text
 .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px }
 .stat b { display:block; font-size:22px } .stat span { color:var(--muted); font-size:13px }
 .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin:12px 0 }
-.card h3 { margin:0 0 6px; font-size:18px } blockquote { margin:10px 0; padding:8px 12px; border-left:3px solid var(--line);
+.card h3 { margin:0 0 6px; font-size:18px }
+.notice { border:1px solid color-mix(in srgb,var(--warn) 45%,transparent); background:color-mix(in srgb,var(--warn) 10%,transparent);
+  border-radius:12px; padding:12px 16px; margin:20px 0 4px } .notice b { color:var(--warn) } .notice p { margin:4px 0 } blockquote { margin:10px 0; padding:8px 12px; border-left:3px solid var(--line);
   color:var(--fg); font-style:italic } .ts { font-style:normal; font-size:12px; color:var(--muted);
   background:var(--chip); border-radius:6px; padding:1px 6px; margin-right:6px; font-variant-numeric:tabular-nums }
 .label { font-weight:600 } .rubric { display:grid; grid-template-columns:170px 110px 1fr; gap:6px 14px; align-items:baseline }
@@ -229,8 +251,17 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
         (m.questions_you_asked.to_string(), "questions you asked".into()),
     ];
 
+    let notes = notes(session);
+
     let mut h = String::new();
     let _ = write!(h, "<h1>{}</h1><div class='meta'>{}</div>", esc(&session.title), meta.join(" · "));
+    if !notes.is_empty() {
+        h.push_str("<div class='notice'><b>Part of this interview wasn't recorded</b>");
+        for note in &notes.for_you {
+            let _ = write!(h, "<p>{}</p>", esc(note));
+        }
+        h.push_str("</div>");
+    }
     let _ = write!(h, "<span class='verdict v-{}'>{}</span><span class='muted'>{} confidence{}</span>",
                    a.outlook.verdict, a.outlook.verdict.label(), a.outlook.confidence,
                    outcome.map_or(String::new(), |o| format!(" · actual outcome: <b>{}</b>", o.result.label())));
@@ -243,11 +274,17 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
                        i + 1, esc(&c.title), esc(&c.why_it_matters), q_html(&c.evidence), esc(&c.fix), esc(&c.drill));
     }
 
-    h.push_str("<h2>By the numbers</h2><div class='stats'>");
-    for (value, label) in &stats {
-        let _ = write!(h, "<div class='stat'><b>{}</b><span>{}</span></div>", esc(value), esc(label));
+    h.push_str("<h2>By the numbers</h2>");
+    if notes.incomplete {
+        let _ = write!(h, "<p class='muted'>{METRICS_LEFT_OUT}</p>");
+    } else {
+        h.push_str("<div class='stats'>");
+        for (value, label) in &stats {
+            let _ = write!(h, "<div class='stat'><b>{}</b><span>{}</span></div>", esc(value), esc(label));
+        }
+        h.push_str("</div>");
     }
-    h.push_str("</div><h2>Interviewer signals</h2><ul class='plain'>");
+    h.push_str("<h2>Interviewer signals</h2><ul class='plain'>");
     for s in &a.outlook.signals {
         let _ = write!(h, "<li class='sig-{}'>{}{}</li>", s.direction, esc(&s.signal), q_html(&s.evidence));
     }
@@ -261,7 +298,7 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
         let _ = write!(h, "<details><summary><span class='ts'>{}</span><span class='dots'>{}</span> {}</summary>\
                            <p><span class='label'>You said:</span> {}</p><p><span class='label'>Worked:</span> {}</p>\
                            <p><span class='label'>Missing:</span> {}</p><p><span class='label'>Stronger answer:</span> {}</p></details>",
-                       esc(&q.timestamp), dots(Some(q.score)), esc(&q.question), esc(&q.answer_summary),
+                       esc(&q.timestamp), dots(q.score), esc(&q.question), esc(&q.answer_summary),
                        esc(&q.what_worked), esc(&q.what_was_missing), esc(&q.stronger_answer));
     }
     h.push_str("<h2>Strengths</h2><ul class='plain'>");
@@ -296,4 +333,50 @@ pub fn write_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&O
     let path = Path::new(&session.dir).join("report.html");
     std::fs::write(&path, render_html(session, stored, outcome))?;
     Ok(path)
+}
+
+/// Every analysis run gets its own page, so earlier runs stay viewable next to newer ones.
+pub fn analysis_html_path(session: &Session, analysis_id: i64) -> PathBuf {
+    Path::new(&session.dir).join("reports").join(format!("{analysis_id}.html"))
+}
+
+/// Writes the page only when its content changed, so a page open in the app isn't reloaded for nothing.
+pub fn write_analysis_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>) -> std::io::Result<PathBuf> {
+    let path = analysis_html_path(session, stored.id);
+    let html = render_html(session, stored, outcome);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(html.as_str()) {
+        std::fs::create_dir_all(path.parent().expect("reports dir"))?;
+        std::fs::write(&path, html)?;
+    }
+    Ok(path)
+}
+
+pub fn print_next_steps(session: &Session, next: &StoredNextSteps) {
+    let plan = &next.plan;
+    println!("{}", style(format!("━━ What to do next · {} ━━", session.title)).bold());
+    println!("\n{}\n", style(&plan.headline).bold());
+    println!("{}", style("Next-round prep").bold());
+    for (i, item) in plan.next_round_prep.iter().enumerate() {
+        println!("\n {}\n    {}\n    {}\n    {} {}", style(format!("{}. {}", i + 1, item.topic)).bold(), item.why,
+                 quote(&item.evidence), style("Prepare:").green(), item.how_to_prepare);
+        for q in &item.likely_questions {
+            println!("    {} {q}", style("?").cyan());
+        }
+    }
+    println!("\n{}", style("Practice plan").bold());
+    for p in &plan.practice_plan {
+        let priority = match p.priority {
+            Priority::High => style("high").red(),
+            Priority::Medium => style("medium").yellow(),
+            Priority::Low => style("low").dim(),
+        };
+        println!(" {} {} {} {}\n    {}", style("□").dim(), style(&p.skill).bold(),
+                 style(format!("({} min · {priority} priority)", p.minutes)).dim(), style(format!("— {}", p.from_coaching)).dim(),
+                 p.drill);
+    }
+    if !next.unverified_quotes.is_empty() {
+        println!("\n{} {} quoted line(s) aren't word-for-word in the transcript and may be paraphrased.",
+                 style("Note:").yellow(), next.unverified_quotes.len());
+    }
+    println!("\n{}", style(format!("Generated {} with {}", &next.created_at[..16.min(next.created_at.len())], next.model)).dim());
 }

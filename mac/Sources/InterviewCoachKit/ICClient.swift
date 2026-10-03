@@ -2,11 +2,15 @@ import Foundation
 
 /// Runs the `ic` command-line tool, which owns all session data, transcription, and analysis.
 /// The app only records audio and shows results.
-struct ICClient: Sendable {
-    let executable: URL
+public struct ICClient: Sendable {
+    public let executable: URL
+
+    public init(executable: URL) {
+        self.executable = executable
+    }
 
     /// The copy bundled inside the app first, then a `cargo install`ed one.
-    static func locate() -> ICClient? {
+    public static func locate() -> ICClient? {
         let candidates = [
             Bundle.main.url(forAuxiliaryExecutable: "ic"),
             URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".cargo/bin/ic"),
@@ -16,9 +20,9 @@ struct ICClient: Sendable {
             .map(ICClient.init(executable:))
     }
 
-    struct Failure: LocalizedError {
-        let message: String
-        var errorDescription: String? { message }
+    public struct Failure: LocalizedError {
+        public let message: String
+        public var errorDescription: String? { message }
     }
 
     /// GUI apps don't inherit the shell's PATH, and ic shells out to ffmpeg, docker, ant, and tar.
@@ -31,7 +35,7 @@ struct ICClient: Sendable {
     }()
 
     /// Run `ic <arguments>` off the main thread; returns stdout, or throws with ic's error message.
-    func run(_ arguments: [String]) async throws -> String {
+    public func run(_ arguments: [String]) async throws -> String {
         let executable = self.executable
         return try await Task.detached {
             let process = Process()
@@ -55,10 +59,15 @@ struct ICClient: Sendable {
         }.value
     }
 
-    func decode<T: Decodable>(_ type: T.Type, _ arguments: [String]) async throws -> T {
+    public func decode<T: Decodable>(_ type: T.Type, _ arguments: [String]) async throws -> T {
+        try Self.decode(T.self, from: Data(try await run(arguments).utf8))
+    }
+
+    /// ic's JSON uses snake_case keys.
+    public static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(T.self, from: Data(try await run(arguments).utf8))
+        return try decoder.decode(T.self, from: data)
     }
 
     /// ic prints "Error: <message>" (possibly multi-line) as its last stderr output.
@@ -73,45 +82,45 @@ struct ICClient: Sendable {
 
 // MARK: - JSON shapes (see `ic list --json`, `ic doctor --json`, `ic recording begin`)
 
-struct SessionSummary: Decodable, Identifiable, Hashable {
-    let id: Int
-    let createdAt: String
-    let title: String
-    let company: String?
-    let stage: String?
-    let status: String
-    let mode: String
-    let durationS: Double?
-    let dir: String
-    let verdict: String?
-    let verdictLabel: String?
-    let outcome: String?
-    let outcomeLabel: String?
-    let reportPath: String?
-    let transcriptPath: String?
-    let error: String?
+public struct SessionSummary: Decodable, Identifiable, Hashable {
+    public let id: Int
+    public let createdAt: String
+    public let title: String
+    public let company: String?
+    public let stage: String?
+    public let status: String
+    public let mode: String
+    public let durationS: Double?
+    public let dir: String
+    public let verdict: String?
+    public let verdictLabel: String?
+    public let outcome: String?
+    public let outcomeLabel: String?
+    public let reportPath: String?
+    public let transcriptPath: String?
+    public let error: String?
 
-    var date: String { String(createdAt.prefix(10)) }
-    var isAnalyzed: Bool { reportPath != nil }
+    public var date: String { String(createdAt.prefix(10)) }
+    public var isAnalyzed: Bool { reportPath != nil }
 }
 
-struct Health: Decodable {
-    let model: String
-    let signedIn: Bool
-    let dockerRunning: Bool
-    let proxyReady: Bool
+public struct Health: Decodable {
+    public let model: String
+    public let signedIn: Bool
+    public let dockerRunning: Bool
+    public let proxyReady: Bool
     /// Signing in (which also starts the LLM proxy) would fix the current problem.
-    let needsLogin: Bool
-    let problems: [String]
+    public let needsLogin: Bool
+    public let problems: [String]
 }
 
-struct NewRecording: Decodable {
-    let id: Int
-    let dir: String
+public struct NewRecording: Decodable {
+    public let id: Int
+    public let dir: String
 }
 
 /// Values `ic outcome` accepts, with their labels.
-let outcomeChoices: [(value: String, label: String)] = [
+public let outcomeChoices: [(value: String, label: String)] = [
     ("pending", "Waiting to hear"), ("advanced", "Advanced"), ("offer", "Offer"),
     ("rejected", "Rejected"), ("withdrew", "Withdrew"), ("no_response", "No response"),
 ]
