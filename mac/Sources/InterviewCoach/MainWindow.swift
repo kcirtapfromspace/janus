@@ -135,23 +135,48 @@ struct StatusBanner: View {
     }
 }
 
-/// Shows report.html, reloading when ic rewrites it (e.g. after setting an outcome).
+/// Shows report.html, reloading when ic rewrites it (e.g. after setting an outcome). Its timestamp
+/// links (`#t=754.0`) hand their moment to `onSeek`; web links open in the browser.
 struct ReportView: NSViewRepresentable {
     let path: String
+    let onSeek: (Double) -> Void
 
-    final class Coordinator {
+    @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: (path: String, modified: Date?)?
+        var onSeek: (Double) -> Void
+
+        init(onSeek: @escaping (Double) -> Void) { self.onSeek = onSeek }
+
+        /// WebKit asks here about same-page `#t=` clicks too (HTML and SVG links alike), so the report
+        /// needs no script. Anything that isn't a timestamp or web link, like the report itself or an
+        /// in-page anchor, loads as usual.
+        func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                     decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+            guard let url = action.request.url else { return decisionHandler(.allow) }
+            if url.isFileURL, url.path == webView.url?.path,
+               let seconds = seekSeconds(fromFragment: url.fragment(percentEncoded: false)) {
+                onSeek(seconds)
+                decisionHandler(.cancel)
+            } else if action.navigationType == .linkActivated, ["http", "https"].contains(url.scheme?.lowercased()) {
+                NSWorkspace.shared.open(url)
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek) }
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView()
         view.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
+        view.navigationDelegate = context.coordinator
         return view
     }
 
     func updateNSView(_ view: WKWebView, context: Context) {
+        context.coordinator.onSeek = onSeek
         let url = URL(fileURLWithPath: path)
         let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         guard context.coordinator.loaded?.path != path || context.coordinator.loaded?.modified != modified else { return }
