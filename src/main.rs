@@ -178,7 +178,12 @@ enum Cmd {
         /// JSON-lines events for the app (the sign-in URL, a code prompt); a code is read from stdin.
         #[arg(long, hide = true)]
         events: bool,
+        /// Sign out first, to sign in with a different account.
+        #[arg(long)]
+        switch: bool,
     },
+    /// Sign out of Claude (only Interview Coach's sign-in; other tools keep theirs).
+    Logout,
     /// What this Mac still needs before Interview Coach works, and the steps that set it up.
     Setup {
         #[command(subcommand)]
@@ -933,9 +938,16 @@ fn proxy_key(settings: &Settings, target: KeyTarget, from_stdin: bool) -> Result
     Ok(())
 }
 
-fn login(events: bool) -> Result<()> {
+fn login(events: bool, switch: bool) -> Result<()> {
     if events {
         let mut out = JsonEvents::new();
+        if switch {
+            if let Err(e) = auth::logout() {
+                out.error(&format!("{e:#}"));
+                return Err(e);
+            }
+            out.stage("Signed out. Approve access in your browser with the account you want…");
+        }
         let result = auth::login(Some(&mut |event| match event {
             auth::LoginEvent::OpenUrl(url) => out.open_url(&url),
             auth::LoginEvent::NeedCode => out.need_code(),
@@ -953,12 +965,18 @@ fn login(events: bool) -> Result<()> {
             }
         };
     }
+    if switch {
+        let account = auth::account();
+        auth::logout()?;
+        outln!("Signed out{}. Sign in with the account you want: if your browser picks the wrong one, switch accounts at \
+                claude.ai first.", account.map(|a| format!(" of {a}")).unwrap_or_default());
+    }
     outln!("{} — a browser window will open. Approve access there, then come back here.", style("Claude sign-in").bold());
     outln!("{}", style("If the page shows a code instead of closing, paste it at the Code: prompt below.").dim());
     auth::login(None)?;
     auth::access_token()?; // prove the session works before saying so
-    outln!("{} Signed in to Claude — no API key stored. ic gets short-lived tokens from this session as needed.",
-             style("✓").green());
+    outln!("{} Signed in to Claude{} — no API key stored. ic gets short-lived tokens from this session as needed.",
+             style("✓").green(), auth::account().map(|a| format!(" as {a}")).unwrap_or_default());
     Ok(())
 }
 
@@ -1268,7 +1286,13 @@ fn run() -> Result<()> {
             ProxyCmd::Stop => proxy::stop(&settings),
             ProxyCmd::Status => proxy_status(&settings),
         },
-        Cmd::Login { events } => login(events),
+        Cmd::Login { events, switch } => login(events, switch),
+        Cmd::Logout => {
+            let account = auth::account();
+            auth::logout()?;
+            outln!("{} Signed out of Claude{}.", style("✓").green(), account.map(|a| format!(" ({a})")).unwrap_or_default());
+            Ok(())
+        }
         Cmd::Setup { action } => match action {
             SetupCmd::Status { json } => setup_status(&settings, json),
             SetupCmd::Run { step, events } => setup_run(&settings, step, events),

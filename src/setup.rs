@@ -38,6 +38,9 @@ pub enum Step {
     Models,
     /// Everything above, in order.
     All,
+    /// Stop and start the AI proxy (keys and spend history are kept).
+    #[serde(rename = "restart-proxy")]
+    RestartProxy,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -46,6 +49,8 @@ pub enum ActionKind {
     Run { step: Step },
     OpenUrl { url: String },
     SignIn,
+    /// Sign out, then sign in again with another account.
+    SwitchAccount,
     Key { target: &'static str },
 }
 
@@ -96,6 +101,8 @@ pub trait Probe {
     fn proxy_set_up(&self) -> bool;
     fn proxy_ready(&self) -> bool;
     fn sign_in(&self) -> SignIn;
+    /// Who's signed in to Claude, e.g. "you@example.com (Your Organization)".
+    fn account(&self) -> Option<String>;
     /// Bytes of the transcription models still to download (0 = all there). The speaker-detection
     /// models, only used for single-track imports, download with them but aren't required.
     fn models_missing(&self) -> u64;
@@ -167,7 +174,8 @@ pub fn status(p: &dyn Probe) -> SetupStatus {
 
         checks.push(if proxy_ready {
             Check { id: "proxy", status: Status::Ok, required: true, title: "AI proxy is running".into(),
-                    detail: "LiteLLM, on this Mac only. Every AI request goes through it.".into(), action: None }
+                    detail: "LiteLLM, on this Mac only. Every AI request goes through it.".into(),
+                    action: action("Restart", ActionKind::Run { step: Step::RestartProxy }) }
         } else if !docker_ok {
             Check { id: "proxy", status: Status::Blocked, required: true, title: "Set up the AI proxy".into(),
                     detail: "Needs Docker first.".into(), action: None }
@@ -213,9 +221,19 @@ pub fn status(p: &dyn Probe) -> SetupStatus {
 
     let claude_required = p.analysis_provider() == Provider::Anthropic;
     checks.push(match p.sign_in() {
-        SignIn::Ok => Check { id: "claude", status: Status::Ok, required: claude_required,
-                              title: "Signed in to Claude".into(), detail: "Through your browser; no API key is stored.".into(),
-                              action: None },
+        SignIn::Ok => Check {
+            id: "claude",
+            status: Status::Ok,
+            required: claude_required,
+            title: match p.account() {
+                Some(account) => format!("Signed in to Claude as {account}"),
+                None => "Signed in to Claude".into(),
+            },
+            detail: "Through your browser; no API key is stored. To use another account, sign in to it at claude.ai in \
+                     your browser first, then switch."
+                .into(),
+            action: action("Switch Account…", ActionKind::SwitchAccount),
+        },
         state => Check {
             id: "claude",
             status: if claude_required { Status::Action } else { Status::Optional },
@@ -301,6 +319,10 @@ impl Probe for System<'_> {
         proxy::is_ready(self.settings)
     }
 
+    fn account(&self) -> Option<String> {
+        auth::account()
+    }
+
     fn sign_in(&self) -> SignIn {
         match (auth::has_login(), auth::has_login() && auth::access_token().is_ok()) {
             (false, _) => SignIn::Missing,
@@ -352,6 +374,12 @@ pub fn run(step: Step, settings: &Settings, progress: &mut dyn Progress) -> anyh
             }
             Ok(())
         }
+        Step::RestartProxy => {
+            progress.stage("Stopping the AI proxy");
+            proxy::stop(settings)?;
+            progress.stage("Starting the AI proxy");
+            proxy::ensure_running(settings, progress)
+        }
     }
 }
 
@@ -395,6 +423,7 @@ mod tests {
         fn proxy_set_up(&self) -> bool { self.proxy_set_up }
         fn proxy_ready(&self) -> bool { self.proxy_ready }
         fn sign_in(&self) -> SignIn { self.sign_in }
+        fn account(&self) -> Option<String> { (self.sign_in == SignIn::Ok).then(|| "you@example.com (Your Org)".into()) }
         fn models_missing(&self) -> u64 { self.models_missing }
         fn has_key(&self, target: KeyTarget) -> bool { self.keys.contains(&target) }
         fn stray_anthropic_key(&self) -> bool { false }
@@ -474,6 +503,31 @@ mod tests {
         let s = status(&Fake { missing_tools: vec!["ffmpeg"], ..Fake::ready() });
         assert_eq!(summary(&s)[0], ("app", Act));
         assert!(s.checks[0].detail.contains("ffmpeg"));
+    }
+
+    /// Once everything works, the rows still let you change things: switch Claude accounts,
+    /// restart the proxy, replace a key.
+    #[test]
+    fn finished_rows_can_still_be_changed() {
+        let s = status(&Fake { keys: vec![KeyTarget::TypeSafe], ..Fake::ready() });
+        let get = |id| s.checks.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(get("claude").title, "Signed in to Claude as you@example.com (Your Org)");
+        let json = serde_json::to_value(&s).unwrap();
+        let action = |id: &str| json["checks"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap()["action"].clone();
+        assert_eq!(action("claude"), serde_json::json!({"label": "Switch Account…", "kind": "switch_account"}));
+        assert_eq!(action("proxy"), serde_json::json!({"label": "Restart", "kind": "run", "step": "restart-proxy"}));
+        assert_eq!(action("typesafe_key"), serde_json::json!({"label": "Replace", "kind": "key", "target": "typesafe"}));
+        assert_eq!(get("docker").action, None);
+    }
+
+    /// The app passes a step's JSON name to `ic setup run`, so the two spellings must match.
+    #[test]
+    fn step_names_are_the_same_in_json_and_on_the_command_line() {
+        use clap::ValueEnum;
+        for step in Step::value_variants() {
+            let cli = step.to_possible_value().unwrap().get_name().to_string();
+            assert_eq!(serde_json::to_value(step).unwrap(), serde_json::Value::String(cli));
+        }
     }
 
     #[test]

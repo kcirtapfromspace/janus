@@ -28,6 +28,21 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(status.check("typesafe_key")?.action?.kind, .key(target: "typesafe"))
     }
 
+    /// A finished Mac: the rows still offer changes (switch account, restart the proxy).
+    func testDecodesTheActionsOfFinishedRows() throws {
+        let json = """
+        {"ready":true,"remaining":0,"model":"anthropic/claude-opus-5-5","checks":[
+         {"id":"proxy","status":"ok","required":true,"title":"AI proxy is running","detail":"…",
+          "action":{"label":"Restart","kind":"run","step":"restart-proxy"}},
+         {"id":"claude","status":"ok","required":true,"title":"Signed in to Claude as you@example.com (Your Org)","detail":"…",
+          "action":{"label":"Switch Account…","kind":"switch_account"}}]}
+        """
+        let status = try ICClient.decode(SetupStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.check("proxy")?.action?.kind, .run(step: "restart-proxy"))
+        XCTAssertEqual(status.check("claude")?.action?.kind, .switchAccount)
+        XCTAssertEqual(status.check("claude")?.isDone, true)
+    }
+
     func testParsesEveryEvent() {
         XCTAssertEqual(SetupEvent.parse(#"{"event":"stage","message":"Downloading the speech model"}"#),
                        .stage("Downloading the speech model"))

@@ -235,9 +235,11 @@ final class AppModel {
         follow(["setup", "run", step, "--events"], check: check, message: "Starting…")
     }
 
-    /// Browser sign-in: ic runs the bundled `ant`, which opens the approval page.
-    func signIn() {
-        follow(["login", "--events"], check: "claude", message: "Approve access in your browser…")
+    /// Browser sign-in: ic runs the bundled `ant`, which opens the approval page. `switching` signs
+    /// out first, to sign in with a different account.
+    func signIn(switching: Bool = false) {
+        follow(["login", "--events"] + (switching ? ["--switch"] : []), check: "claude",
+               message: switching ? "Signing out…" : "Approve access in your browser…")
     }
 
     /// The code the sign-in page shows when it can't hand the approval back by itself.

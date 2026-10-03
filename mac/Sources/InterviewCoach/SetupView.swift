@@ -61,6 +61,7 @@ private struct CheckRow: View {
     @State private var enteringKey = false
     @State private var key = ""
     @State private var code = ""
+    @State private var confirmingSwitch = false
 
     private var activity: SetupActivity? {
         model.setupActivity.flatMap { $0.checkID == check.id ? $0 : nil }
@@ -91,15 +92,34 @@ private struct CheckRow: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
+        .confirmationDialog("Switch Claude account?", isPresented: $confirmingSwitch) {
+            Button("Sign Out and Switch") {
+                code = ""
+                model.signIn(switching: true)
+            }
+        } message: {
+            Text("You'll be signed out here, then asked to approve access in your browser. If it picks the wrong "
+                 + "account, switch accounts at claude.ai first. Other apps keep their own sign-in.")
+        }
     }
 
     @ViewBuilder private var actionButton: some View {
         if activity != nil {
             Button("Cancel") { model.cancelSetupActivity() }
         } else if let action = check.action, check.status != .blocked, !enteringKey {
+            // Signing out or restarting the proxy mid-analysis would fail that step, so these wait.
+            let waits = interruptsWork(action) && { if case .working = model.phase { true } else { false } }()
             let button = Button(action.label) { perform(action) }
-                .disabled(model.setupActivity != nil)
+                .disabled(model.setupActivity != nil || waits)
+                .help(waits ? "Available when the current step finishes." : "")
             if check.status == .action { button.buttonStyle(.borderedProminent) } else { button }
+        }
+    }
+
+    private func interruptsWork(_ action: SetupAction) -> Bool {
+        switch action.kind {
+        case .switchAccount, .key, .run(step: "restart-proxy"): true
+        default: false
         }
     }
 
@@ -131,6 +151,7 @@ private struct CheckRow: View {
         case .signIn:
             code = ""
             model.signIn()
+        case .switchAccount: confirmingSwitch = true
         case .key: enteringKey = true
         }
     }

@@ -34,6 +34,8 @@ public struct SetupAction: Decodable, Equatable {
         case openURL(URL)
         /// `ic login --events`
         case signIn
+        /// `ic login --switch --events`: sign out, then sign in with another account
+        case switchAccount
         /// `ic proxy key <target> --stdin`
         case key(target: String)
     }
@@ -62,6 +64,7 @@ public struct SetupAction: Decodable, Equatable {
             }
             kind = .openURL(url)
         case "sign_in": kind = .signIn
+        case "switch_account": kind = .switchAccount
         case "key": kind = .key(target: try c.decode(String.self, forKey: .target))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c, debugDescription: "unknown action \(other)")
