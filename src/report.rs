@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use console::style;
 
 use crate::coverage::{self, RecordingNotes};
-use crate::db::{AnswerCheck, Outcome, StoredAnalysis, StoredNextSteps};
+use crate::db::{AnswerCheck, Db, Outcome, StoredAnalysis, StoredNextSteps};
+use crate::history::History;
 use crate::metrics::TalkMetrics;
 use crate::models::{Direction, Evidence, Mode, Priority, Session, Verdict, fmt_ts, parse_ts};
 use crate::temperature::{self, Kind, Signal};
@@ -355,6 +356,12 @@ svg.room text { font-size:11px; fill:var(--muted) } svg.room text.mark { font-si
 svg.room text.tick { text-anchor:middle } .legend { font-size:13px } .legend i { font-style:normal; font-weight:700 }
 .legend .warm { color:var(--good) } .legend .mid { color:var(--muted) } .legend .cool { color:var(--bad) }
 ul.moments li { margin:0 0 10px } ul.moments .cues { color:var(--muted); font-size:14px }
+main a { color:var(--accent) } .version { margin:6px 0 0; font-size:14px } ul.tree, ul.tree ul { list-style:none; margin:0; padding:0 }
+ul.tree > li { margin:0 0 16px } ul.tree ul { margin:8px 0 0 10px; padding-left:14px; border-left:2px solid var(--line) }
+ul.tree ul li { margin:0 0 12px } ul.tree .rev { font-weight:650 } ul.tree .nums { font-size:14px }
+ul.tree .this { background:var(--chip); border-radius:8px; padding:6px 8px; margin-left:-8px }
+.tag { display:inline-block; font-size:12px; padding:0 7px; border-radius:999px; background:var(--chip); color:var(--muted);
+  margin-left:4px } .this .tag { background:var(--card) }
 .sig-positive::before { content:"+ "; color:var(--good); font-weight:700 } .sig-negative::before { content:"− ";
   color:var(--bad); font-weight:700 } ul.plain { list-style:none; padding:0 } ul.plain li { margin:0 0 14px }
 @media (max-width:600px) { .rubric { grid-template-columns:1fr 90px } .rubric .muted { grid-column:1/-1; margin-bottom:8px } }
@@ -524,7 +531,86 @@ fn room_html(h: &mut String, session: &Session, stored: &StoredAnalysis) {
                        mind-reading: every point is something you can replay.{single} Method {}.</p>", temperature::METHOD);
 }
 
-pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>) -> String {
+fn when(created_at: &str) -> String {
+    format!("{} UTC", created_at.chars().take(16).collect::<String>().replace('T', " "))
+}
+
+/// "Version 2 of 3 · claude-opus-5-5 · made … · current", under the title.
+fn version_line(stored: &StoredAnalysis, history: &History) -> String {
+    let Some(v) = history.version(stored.id) else { return String::new() };
+    let status = match history.current {
+        Some(c) if c == stored.id => " · the current version".to_string(),
+        Some(c) => history.version(c).map_or(String::new(), |cv| format!(" · not current (<a href='{c}.html'>v{}</a> is)", cv.number)),
+        None => String::new(),
+    };
+    format!("<p class='muted version'>Version {} of {} · {} · made {}{status} · <a href='#history'>all versions</a></p>",
+            v.number, history.total_versions, esc(crate::versions::short_model(&v.model)), esc(&when(&v.created_at)))
+}
+
+fn history_html(h: &mut String, this: i64, history: &History) {
+    h.push_str("<h2 id='history'>Versions</h2><p class='muted'>Re-running with nothing changed shows the same version \
+                again, with no new model call, so its verdict, scores and call stats stay exactly as they were. A new \
+                version appears when the transcript, the model or the prompt changes.</p><ul class='tree'>");
+    for r in &history.revisions {
+        let title = if r.number == 0 { "Earlier transcript".to_string() } else { format!("Transcript {}", r.number) };
+        let same = r.same_as.map_or(String::new(), |n| format!(" · same lines as Transcript {n}"));
+        let at = if r.created_at.is_empty() { String::new() } else { format!(" · {}", esc(&when(&r.created_at))) };
+        let _ = write!(h, "<li><span class='rev'>{title}</span> <span class='muted'>· {}{at}{same}</span>", esc(&r.how));
+        if r.versions.is_empty() {
+            h.push_str("<div class='muted'>No report built on it.</div></li>");
+            continue;
+        }
+        h.push_str("<ul>");
+        for v in &r.versions {
+            let label = if v.analysis_id == this {
+                format!("<b>v{}</b>", v.number)
+            } else {
+                format!("<a href='{}.html'>v{}</a>", v.analysis_id, v.number)
+            };
+            let mut tags = String::new();
+            if history.current == Some(v.analysis_id) {
+                tags.push_str("<span class='tag'>current</span>");
+            }
+            if v.analysis_id == this {
+                tags.push_str("<span class='tag'>this page</span>");
+            }
+            let mut nums = vec![format!("{} ({} confidence)", v.verdict, v.confidence)];
+            if let Some(share) = v.your_share {
+                nums.push(format!("you spoke {:.0}%", share * 100.0));
+            }
+            if let Some(room) = v.room {
+                nums.push(format!("room {room:+.2}"));
+            }
+            nums.push(format!("signals +{} −{}", v.positive_signals, v.negative_signals));
+            if let Some(r) = v.rubric_mean {
+                nums.push(format!("rubric {r:.1}"));
+            }
+            let _ = write!(h, "<li{}><div>{label} · {} · {}{tags}</div><div class='nums'>{}</div>",
+                           if v.analysis_id == this { " class='this'" } else { "" },
+                           esc(crate::versions::short_model(&v.model)), esc(&when(&v.created_at)), esc(&nums.join(" · ")));
+            if let Some(p) = v.parent {
+                let what = if v.changes.is_empty() { "re-run".to_string() } else { v.changes.join(", ") };
+                let _ = write!(h, "<div class='muted'>From v{p}: {}</div>", esc(&what));
+            }
+            if !v.inputs_recorded {
+                h.push_str("<div class='muted'>Made before versions recorded their inputs.</div>");
+            }
+            if v.reruns_reused > 0 {
+                let _ = write!(h, "<div class='muted'>Shown again by {} unchanged re-run{}.</div>", v.reruns_reused,
+                               if v.reruns_reused == 1 { "" } else { "s" });
+            }
+            for (at, model) in &v.next_steps {
+                let _ = write!(h, "<div class='muted'>Next steps planned {} with {}.</div>", esc(&when(at)),
+                               esc(crate::versions::short_model(model)));
+            }
+            h.push_str("</li>");
+        }
+        h.push_str("</ul></li>");
+    }
+    h.push_str("</ul>");
+}
+
+pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>, history: Option<&History>) -> String {
     let (a, m, ctx) = (&stored.analysis, &stored.metrics, &stored.analysis.context);
     let meta: Vec<String> = [
         session.company.clone().or(ctx.company.clone()),
@@ -550,6 +636,9 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
 
     let mut h = String::new();
     let _ = write!(h, "<h1>{}</h1><div class='meta'>{}</div>", esc(&session.title), meta.join(" · "));
+    if let Some(history) = history {
+        h.push_str(&version_line(stored, history));
+    }
     if !notes.is_empty() {
         h.push_str("<div class='notice'><b>Part of this interview wasn't recorded</b>");
         for note in &notes.for_you {
@@ -635,6 +724,9 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
         let _ = write!(h, "<p class='muted'>{} quoted line(s) aren't word-for-word in the transcript and may be paraphrased.</p>",
                        stored.unverified_quotes.len());
     }
+    if let Some(history) = history {
+        history_html(&mut h, stored.id, history);
+    }
     let _ = write!(h, "<p class='muted'>Analysed {} UTC with {} ({}). Transcript: transcript.md in this folder.</p>",
                    esc(&stored.created_at.chars().take(16).collect::<String>().replace('T', " ")),
                    esc(&stored.model), esc(&stored.prompt_version));
@@ -647,26 +739,42 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
     )
 }
 
-pub fn write_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>) -> std::io::Result<PathBuf> {
-    let path = Path::new(&session.dir).join("report.html");
-    std::fs::write(&path, render_html(session, stored, outcome))?;
-    Ok(path)
+/// Writes a page only when its content changed, so a page open in the app isn't reloaded for nothing.
+fn write_if_changed(path: &Path, html: &str) -> std::io::Result<()> {
+    if std::fs::read_to_string(path).ok().as_deref() != Some(html) {
+        std::fs::create_dir_all(path.parent().expect("a folder"))?;
+        std::fs::write(path, html)?;
+    }
+    Ok(())
 }
 
-/// Every analysis run gets its own page, so earlier runs stay viewable next to newer ones.
+/// Every report version gets its own page in `reports/`, so earlier versions stay viewable.
 pub fn analysis_html_path(session: &Session, analysis_id: i64) -> PathBuf {
     Path::new(&session.dir).join("reports").join(format!("{analysis_id}.html"))
 }
 
-/// Writes the page only when its content changed, so a page open in the app isn't reloaded for nothing.
-pub fn write_analysis_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>) -> std::io::Result<PathBuf> {
+pub fn write_analysis_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>, history: Option<&History>)
+    -> std::io::Result<PathBuf> {
     let path = analysis_html_path(session, stored.id);
-    let html = render_html(session, stored, outcome);
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(html.as_str()) {
-        std::fs::create_dir_all(path.parent().expect("reports dir"))?;
-        std::fs::write(&path, html)?;
-    }
+    write_if_changed(&path, &render_html(session, stored, outcome, history))?;
     Ok(path)
+}
+
+/// Every version's page (each shows the whole history), and `report.html`, which opens the current
+/// version. Returns `report.html`'s path, or None before the first report.
+pub fn write_pages(db: &Db, session: &Session, outcome: Option<&Outcome>) -> anyhow::Result<Option<PathBuf>> {
+    let history = crate::history::build(db, session.id)?;
+    let analyses = db.analyses(session.id)?;
+    for a in &analyses {
+        write_analysis_html(session, a, outcome, Some(&history))?;
+    }
+    let Some(shown) = history.current.or(analyses.first().map(|a| a.id)) else { return Ok(None) };
+    let path = Path::new(&session.dir).join("report.html");
+    write_if_changed(&path, &format!(
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='0; url=reports/{shown}.html'>\
+         <title>{} — Interview report</title></head><body><a href='reports/{shown}.html'>Open the report</a></body></html>",
+        esc(&session.title)))?;
+    Ok(Some(path))
 }
 
 pub fn print_next_steps(session: &Session, next: &StoredNextSteps) {

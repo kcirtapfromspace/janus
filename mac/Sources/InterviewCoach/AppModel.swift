@@ -27,6 +27,9 @@ final class AppModel {
     /// The last failure per setup check, shown on its row until it's retried.
     var setupErrors: [String: String] = [:]
     var selfTest: SelfTestState = .notRun
+    /// Models a report can be re-run with (`ic models --json`), loaded when first needed.
+    var modelOffers: [ModelOffer] = []
+    private var modelOffersAsked: Date?
     var micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
     /// Setup opens by itself at most once per launch.
     @ObservationIgnored var setupPromptShown = false
@@ -106,6 +109,16 @@ final class AppModel {
     func updateLaterSteps() {
         guard let stale = detail?.firstOutOfDate else { return }
         rerun(stale.step, thenLater: true)
+    }
+
+    /// The models a report can be written with, and their prices. Quiet on failure: the menu then
+    /// offers the configured default and "cheapest", which ic resolves itself.
+    func loadModelOffers() async {
+        // At most once a minute while it keeps failing (e.g. the proxy isn't running yet).
+        if let asked = modelOffersAsked, Date().timeIntervalSince(asked) < 60 { return }
+        modelOffersAsked = Date()
+        guard let ic, let offers = try? await ic.decode([ModelOffer].self, ["models", "--json"]) else { return }
+        modelOffers = offers
     }
 
     func swapSpeakers() {

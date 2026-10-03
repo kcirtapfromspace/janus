@@ -70,7 +70,10 @@ fn analyze_session_stores_result_and_fills_session_context() {
     let stored = analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
     assert_eq!(db.latest_analysis(id).unwrap().unwrap().id, stored.id);
     let s = db.get_session(id).unwrap();
-    assert_eq!((s.status, s.stage, s.company.as_deref()), (Status::Analyzed, Some(Stage::HiringManager), Some("Northwind")));
+    // The company stays as you entered it (none here): writing back the inferred one would change
+    // the next report's inputs. Lists show the inferred one from the report instead.
+    assert_eq!((s.status, s.stage, s.company.as_deref()), (Status::Analyzed, Some(Stage::HiringManager), None));
+    assert_eq!(db.latest_companies().unwrap()[&id], "Northwind");
     assert_eq!(db.latest_verdicts().unwrap()[&id].as_str(), "leaning_positive");
     assert!(std::path::Path::new(&s.dir).join("analysis.json").exists());
 }
@@ -83,6 +86,15 @@ fn swapped_labels_are_fixed_and_reanalysed_for_single_track() {
     assert_eq!(llm.requests.borrow().len(), 2);
     assert_eq!(db.get_segments(id).unwrap()[0].speaker, YOU); // first speaker was the interviewer; now swapped
     assert!(llm.requests.borrow()[1].0.contains("[00:00:00] You: Tell me about"));
+
+    // Another model disagreeing doesn't flip the transcript back: the swap was already made once.
+    let haiku: interview_coach::config::ModelRef = "anthropic/claude-haiku-4-5".parse().unwrap();
+    let other = FakeLlm::new(vec![Ok(sample(true, GOOD_QUOTE))]);
+    analyze_session(&mut db, &other, &haiku, id, &mut Quiet).unwrap();
+    assert_eq!(other.requests.borrow().len(), 1, "no second, re-swapped analysis");
+    assert_eq!(db.get_segments(id).unwrap()[0].speaker, YOU, "the transcript stays as it was");
+    let run = interview_coach::steps::current_run(&db, id, interview_coach::models::Step::Report).unwrap().unwrap();
+    assert!(run.warnings.iter().any(|w| w.contains("already swapped once")), "{:?}", run.warnings);
 }
 
 #[test]
@@ -102,7 +114,7 @@ fn html_report_renders_with_outcome() {
     let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE))]);
     let stored = analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
     let outcome = db.set_outcome(id, OutcomeResult::Offer, None).unwrap();
-    let html = render_html(&db.get_session(id).unwrap(), &stored, Some(&outcome));
+    let html = render_html(&db.get_session(id).unwrap(), &stored, Some(&outcome), None);
     assert!(html.contains("<b>Offer</b>") && html.contains("Cut the fillers") && html.contains("prefers-color-scheme"));
     assert!(html.contains("Daniel") || html.contains("Northwind"));
 }

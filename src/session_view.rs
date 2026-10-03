@@ -125,10 +125,11 @@ pub fn build(db: &Db, id: i64) -> Result<SessionView> {
     let next_steps = db.latest_next_steps(id)?;
     let busy = flow.iter().any(|s| s.status == StageStatus::Running);
 
+    // Kept current: e.g. a recording-gap notice added after a page was first written, or a new version.
+    report::write_pages(db, &session, outcome.as_ref())?;
     let mut reports = vec![];
     for a in db.analyses(id)? {
-        // Kept current: e.g. a recording-gap notice added after the page was first written.
-        let path = report::write_analysis_html(&session, &a, outcome.as_ref())?;
+        let path = report::analysis_html_path(&session, a.id);
         reports.push(ReportSummary {
             analysis_id: a.id,
             is_current: current_report.as_ref().is_some_and(|c| c.id == a.id),
@@ -225,7 +226,11 @@ pub fn build(db: &Db, id: i64) -> Result<SessionView> {
     let listen = dir.join("listen.m4a");
 
     Ok(SessionView {
-        session: info(&session),
+        session: SessionInfo {
+            // You entered none: the company the current report inferred.
+            company: session.company.clone().or_else(|| current_report.as_ref().and_then(|r| r.analysis.context.company.clone())),
+            ..info(&session)
+        },
         stages,
         audio: AudioView {
             listen_path: listen.exists().then(|| listen.display().to_string()),

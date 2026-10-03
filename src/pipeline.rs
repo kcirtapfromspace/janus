@@ -27,6 +27,7 @@ use crate::progress::Progress;
 use crate::prosody;
 use crate::steps::{self, RunProgress};
 use crate::temperature;
+use crate::versions::{self, CachedScorer, Manifest};
 use crate::transcribe::Transcriber;
 
 /// Dual-track layout: which file belongs to which speaker.
@@ -210,6 +211,7 @@ pub fn transcribe_session(db: &mut Db, settings: &Settings, id: i64, progress: &
         }?;
         db.set_run_warnings(run, &result.warnings)?;
         db.replace_segments(id, &result.segments)?;
+        db.save_transcript_revision(run, id, &result.segments)?;
         write_transcript_files(&dir, &result.segments)?;
         db.set_status(id, Status::Transcribed, None)?;
         Ok((result, None))
@@ -224,9 +226,10 @@ pub fn swap_speakers(db: &mut Db, id: i64, progress: &mut dyn Progress) -> Resul
     if session.mode == Mode::Dual {
         bail!("This session has separate tracks, so its labels come from the tracks themselves.");
     }
-    run_stage(db, id, Step::Transcript, json!({"kind": "swap"}), progress, |db, _, _| {
+    run_stage(db, id, Step::Transcript, json!({"kind": "swap"}), progress, |db, run, _| {
         let segments = swap_you_and_interviewer(&db.get_segments(id)?);
         db.replace_segments(id, &segments)?;
+        db.save_transcript_revision(run, id, &segments)?;
         write_transcript_files(Path::new(&session.dir), &segments)?;
         Ok(((), None))
     })
@@ -325,9 +328,31 @@ pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i6
         params["timeline"] = json!(timeline.name());
     }
     run_stage(db, id, Step::Report, params, progress, |db, run, progress| {
-        let stored = analyze_inner(db, llm, model, session, run, progress)?;
+        let parent = current_report(db, id)?.map(|r| r.id);
         let mut warnings = vec![];
-        if let Some(checker) = extras.checker {
+        let (metrics, message) = report_message(&session, &db.get_segments(id)?);
+        let key = versions::report_key(model, &message);
+        let (stored, reused) = match db.analysis_by_key(id, &key)? {
+            Some(existing) => {
+                // Same inputs as an earlier version: show it again rather than asking for a new answer.
+                let number = db.analyses(id)?.iter().filter(|a| a.id <= existing.id).count();
+                progress.stage(&format!("Nothing has changed since version {number}, so it's shown again"));
+                let mut s = db.get_session(id)?;
+                (s.status, s.error) = (Status::Analyzed, None);
+                db.save_session(&s)?;
+                (existing, true)
+            }
+            None => {
+                let (stored, notes) = analyze_inner(db, llm, model, session, run, parent, (metrics, message), progress)?;
+                warnings.extend(notes);
+                (stored, false)
+            }
+        };
+        let checker = extras.checker.map(|inner| CachedScorer { inner, db: &*db });
+        let timeline = extras.timeline.map(|inner| CachedScorer { inner, db: &*db });
+        if let Some(checker) = &checker
+            && stored.answer_checks.is_empty()
+        {
             let answers = scoring::answers_from_report(&to_turns(&db.get_segments(id)?), &stored.analysis.questions);
             if !answers.is_empty() {
                 progress.stage(&format!("Checking your {} answers one by one…", answers.len()));
@@ -338,9 +363,18 @@ pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i6
             }
         }
         // Built from the final transcript: a single-track report may just have swapped the speakers.
-        let session = db.get_session(id)?;
-        warnings.extend(add_timeline(db, &session, stored.id, extras.timeline, progress)?);
+        // A reused version keeps its timeline; one made before timelines existed gets one now.
+        if stored.turn_signals.is_empty() {
+            let session = db.get_session(id)?;
+            warnings.extend(add_timeline(db, &session, stored.id, timeline.as_ref().map(|t| t as &dyn Scorer), progress)?);
+        }
         db.set_run_warnings(run, &warnings)?;
+        let stored = db.analysis_by_id(stored.id)?.unwrap_or(stored);
+        if !reused || stored.inputs.is_none() {
+            let inputs = manifest(db, &db.get_session(id)?, model, stored.timeline_scorer.clone(),
+                                  stored.answer_checks.first().map(|c| c.scorer.clone()))?;
+            db.set_analysis_inputs(stored.id, &inputs)?;
+        }
         let stored = db.analysis_by_id(stored.id)?.unwrap_or(stored);
         let analysis_id = stored.id;
         Ok((stored, Some(analysis_id)))
@@ -391,7 +425,9 @@ pub fn refresh_timeline(db: &mut Db, id: i64, scorer: Option<&dyn Scorer>, progr
     -> Result<(StoredAnalysis, Vec<String>)> {
     let report = current_report(db, id)?
         .with_context(|| format!("Session {id} has no after-action report yet — run: ic run report {id}"))?;
-    let warnings = add_timeline(db, &db.get_session(id)?, report.id, scorer, progress)?;
+    // Through the stored verdicts, like the Report stage: the same turn always gets the same verdict.
+    let cached = scorer.map(|inner| CachedScorer { inner, db: &*db });
+    let warnings = add_timeline(db, &db.get_session(id)?, report.id, cached.as_ref().map(|c| c as &dyn Scorer), progress)?;
     Ok((db.analysis_by_id(report.id)?.unwrap_or(report), warnings))
 }
 
@@ -412,11 +448,49 @@ fn timeline_audio(session: &Session) -> Result<temperature::Audio> {
     })
 }
 
-fn analyze_inner(db: &mut Db, llm: &dyn Llm, model: &ModelRef, mut session: Session, report_run: i64,
-                 progress: &mut dyn Progress) -> Result<StoredAnalysis> {
+/// What a report built now, from the live transcript, is built from.
+fn manifest(db: &Db, session: &Session, model: &ModelRef, timeline_scorer: Option<String>, answer_checker: Option<String>)
+    -> Result<Manifest> {
+    let segments = db.get_segments(session.id)?;
+    Ok(Manifest {
+        key: versions::report_key(model, &report_message(session, &segments).1),
+        transcript_run_id: steps::current_run(db, session.id, Step::Transcript)?.map(|r| r.id).unwrap_or_default(),
+        transcript_sha: versions::transcript_sha(&segments),
+        title: session.title.clone(),
+        model: model.to_string(),
+        prompt_version: PROMPT_VERSION.into(),
+        timeline_method: temperature::METHOD.into(),
+        timeline_scorer,
+        answer_checker,
+        app_version: env!("CARGO_PKG_VERSION").into(),
+    })
+}
+
+/// The analysis message for a transcript, and the call stats in it: everything a report is built from.
+fn report_message(session: &Session, segments: &[Segment]) -> (metrics::TalkMetrics, String) {
+    let metrics = metrics::compute(segments, session.mode);
+    let notes = coverage::recording_notes(Path::new(&session.dir), session.mode);
+    let message = analyze::build_user_message(&to_turns(segments), &metrics, &session.title, session.company.as_deref(),
+                                              session.mode, None, &notes);
+    (metrics, message)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_inner(db: &mut Db, llm: &dyn Llm, model: &ModelRef, mut session: Session, report_run: i64, parent: Option<i64>,
+                 prepared: (metrics::TalkMetrics, String), progress: &mut dyn Progress)
+    -> Result<(StoredAnalysis, Vec<String>)> {
     let mut segments = db.get_segments(session.id)?;
-    let (mut metrics, mut analysis) = run_analysis(llm, model, &session, &segments, progress)?;
-    if analysis.context.labels_swapped && session.mode == Mode::Single {
+    let (mut metrics, message) = prepared;
+    let mut analysis = run_analysis(llm, model, &message, progress)?;
+    let mut warnings = vec![];
+    // Speakers are swapped automatically only on a fresh transcript. Once a swap has been made (by
+    // a report or by you), another model disagreeing doesn't flip the transcript back: every version
+    // would then be built on a different one.
+    let already_swapped = steps::current_run(db, session.id, Step::Transcript)?.is_some_and(|r| r.params["kind"] == "swap");
+    if analysis.context.labels_swapped && session.mode == Mode::Single && already_swapped {
+        warnings.push(format!("{model} thinks You and Interviewer are the wrong way round in this transcript. It was \
+                               already swapped once, so it was left as it is: if the labels look wrong, use Swap Speakers."));
+    } else if analysis.context.labels_swapped && session.mode == Mode::Single {
         // Speaker detection guessed backwards: fix the transcript — a new transcript revision this
         // report is built on — then re-analyse so the metrics describe the right person.
         progress.stage("Speakers were swapped — fixing labels and re-analysing");
@@ -426,34 +500,33 @@ fn analyze_inner(db: &mut Db, llm: &dyn Llm, model: &ModelRef, mut session: Sess
         let recording = steps::upstream_run(db, session.id, Step::Transcript)?;
         let revision = db.insert_finished_run(session.id, Step::Transcript, RunStatus::Succeeded, &now_iso(),
                                               &json!({"kind": "swap", "by": "analysis"}), recording, None, None)?;
+        db.save_transcript_revision(revision, session.id, &segments)?;
         db.set_run_input(report_run, revision)?;
-        (metrics, analysis) = run_analysis(llm, model, &session, &segments, progress)?;
+        let (swapped_metrics, swapped_message) = report_message(&session, &segments);
+        metrics = swapped_metrics;
+        analysis = run_analysis(llm, model, &swapped_message, progress)?;
     }
     let unverified = analyze::unverified_quotes(&analysis, &to_turns(&segments));
     // The full provider/model is stored so reports (and calibration) show which model judged each interview.
-    let stored = db.add_analysis(session.id, &analysis, &metrics, &model.to_string(), PROMPT_VERSION, &unverified)?;
+    // Its inputs go in with it, so even a run interrupted later can be reused; the scorers are added after.
+    let inputs = manifest(db, &session, model, None, None)?;
+    let stored = db.add_analysis(session.id, &analysis, &metrics, &model.to_string(), PROMPT_VERSION, &unverified,
+                                 Some(&inputs), parent)?;
     session.status = Status::Analyzed;
     session.error = None;
     session.stage = Some(analysis.context.stage);
-    session.company = session.company.take().or(analysis.context.company.clone());
     db.save_session(&session)?;
     std::fs::write(Path::new(&session.dir).join("analysis.json"), serde_json::to_string_pretty(&stored)?)?;
-    Ok(stored)
+    Ok((stored, warnings))
 }
 
-fn run_analysis(llm: &dyn Llm, model: &ModelRef, session: &Session, segments: &[Segment], progress: &mut dyn Progress)
-    -> Result<(metrics::TalkMetrics, SessionAnalysis)> {
-    let metrics = metrics::compute(segments, session.mode);
-    let notes = coverage::recording_notes(Path::new(&session.dir), session.mode);
-    let message = analyze::build_user_message(&to_turns(segments), &metrics, &session.title, session.company.as_deref(),
-                                              session.mode, None, &notes);
+fn run_analysis(llm: &dyn Llm, model: &ModelRef, message: &str, progress: &mut dyn Progress) -> Result<SessionAnalysis> {
     progress.stage(&format!("{model} is reading the transcript…"));
-    let analysis = analyze::analyze(llm, &model.name, &message, &mut |chars| {
+    analyze::analyze(llm, &model.name, message, &mut |chars| {
         if chars > 0 {
             progress.stage(&format!("{model} is writing the analysis… ({} KB)", chars / 1024));
         }
-    })?;
-    Ok((metrics, analysis))
+    })
 }
 
 // --- Stage 4: what to do next ------------------------------------------------------------------

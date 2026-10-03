@@ -34,9 +34,10 @@ use interview_coach::tools::{Origin, Tool};
 #[derive(Parser)]
 #[command(name = "ic", about = "Interview Coach — record, transcribe, and get coached on your interviews.", version)]
 struct Cli {
-    /// Model for analysis, e.g. anthropic/claude-opus-5-5 or openai/gpt-5.6 (overrides the configured default).
+    /// Model for analysis, e.g. anthropic/claude-opus-5-5 or openai/gpt-5.6, or "cheapest" for the
+    /// cheapest one available (by list price; see `ic models`). Overrides the configured default.
     #[arg(long, global = true, value_name = "PROVIDER/MODEL")]
-    model: Option<ModelRef>,
+    model: Option<String>,
     #[command(subcommand)]
     command: Cmd,
 }
@@ -159,6 +160,11 @@ enum Cmd {
         open: bool,
         #[arg(long)]
         full: bool,
+    },
+    /// The models a report can be written with, and their list prices.
+    Models {
+        #[arg(long)]
+        json: bool,
     },
     /// Rebuild how the room felt for an analysed interview (no new Claude analysis; uses Jev when
     /// its key is set).
@@ -477,8 +483,7 @@ fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, ope
     let stored = stored?;
     let session = db.get_session(id)?;
     let outcome = db.get_outcome(id)?;
-    report::write_analysis_html(&session, &stored, outcome.as_ref())?;
-    let path = report::write_html(&session, &stored, outcome.as_ref())?;
+    let path = report::write_pages(db, &session, outcome.as_ref())?.context("no report page")?;
     report::print_report(&session, &stored, outcome.as_ref(), full);
     if open {
         Command::new("open").arg(path).status()?;
@@ -711,7 +716,7 @@ struct SessionRow {
 }
 
 fn list_json(db: &Db) -> Result<()> {
-    let (verdicts, outcomes) = (db.latest_verdicts()?, db.all_outcomes()?);
+    let (verdicts, outcomes, companies) = (db.latest_verdicts()?, db.all_outcomes()?, db.latest_companies()?);
     let existing = |dir: &str, name: &str| {
         let p = Path::new(dir).join(name);
         p.exists().then(|| p.display().to_string())
@@ -732,7 +737,7 @@ fn list_json(db: &Db) -> Result<()> {
             transcript_path: existing(&s.dir, "transcript.md"),
             created_at: s.created_at,
             title: s.title,
-            company: s.company,
+            company: s.company.or_else(|| companies.get(&s.id).cloned()),
             duration_s: s.duration_s,
             dir: s.dir,
             error: s.error,
@@ -752,7 +757,7 @@ fn list(settings: &Settings, json: bool) -> Result<()> {
         outln!("No sessions yet. Try: ic record   or   ic import path/to/interview.m4a");
         return Ok(());
     }
-    let (verdicts, outcomes) = (db.latest_verdicts()?, db.all_outcomes()?);
+    let (verdicts, outcomes, companies) = (db.latest_verdicts()?, db.all_outcomes()?, db.latest_companies()?);
     let header = ["ID", "Date", "Title", "Company", "Length", "Status", "Verdict", "Outcome"];
     let rows: Vec<[String; 8]> = sessions
         .iter()
@@ -761,7 +766,7 @@ fn list(settings: &Settings, json: bool) -> Result<()> {
                 s.id.to_string(),
                 s.created_at.chars().take(10).collect(),
                 s.title.clone(),
-                s.company.clone().unwrap_or_default(),
+                s.company.clone().or_else(|| companies.get(&s.id).cloned()).unwrap_or_default(),
                 fmt_ts(s.duration_s.unwrap_or(0.0)),
                 s.status.to_string(),
                 verdicts.get(&s.id).map(|v| v.label().to_string()).unwrap_or_default(),
@@ -818,15 +823,40 @@ fn swap(settings: &Settings, id: i64) -> Result<()> {
 fn show_report(settings: &Settings, id: i64, open: bool, full: bool) -> Result<()> {
     let db = open_db(settings)?;
     let session = db.get_session(id)?;
-    let Some(stored) = db.latest_analysis(id)? else {
+    // The current version (what report.html opens), e.g. after going back to an earlier model's.
+    let Some(stored) = pipeline::current_report(&db, id)?.or(db.latest_analysis(id)?) else {
         bail!("Session {id} hasn't been analysed yet. Run: ic analyze {id}");
     };
     let outcome = db.get_outcome(id)?;
-    let path = report::write_html(&session, &stored, outcome.as_ref())?;
+    let path = report::write_pages(&db, &session, outcome.as_ref())?.context("no report page")?;
     report::print_report(&session, &stored, outcome.as_ref(), full);
     if open {
         Command::new("open").arg(path).status()?;
     }
+    Ok(())
+}
+
+fn list_models(settings: &Settings, json: bool) -> Result<()> {
+    // Only asks a running proxy: listing models (the app does it to fill a menu) never starts Docker.
+    if !proxy::using_external_proxy() && !proxy::is_ready(settings) {
+        bail!("The AI proxy isn't running. Start it from Setup in the app (or run: ic proxy start).");
+    }
+    let offers = interview_coach::catalog::fetch(settings)?;
+    if json {
+        outln!("{}", serde_json::to_string(&offers)?);
+        return Ok(());
+    }
+    let money = |v: Option<f64>| v.map_or("—".to_string(), |v| format!("${v:.2}"));
+    outln!("{}", style(format!("{:<44} {:>9} {:>9} {:>14}", "Model", "In /M", "Out /M", "Typical report")).bold());
+    for o in &offers {
+        let mark = if o.cheapest { style(" ← cheapest").green().to_string() } else { String::new() };
+        outln!("{:<44} {:>9} {:>9} {:>14}{mark}", o.model, money(o.input_per_mtok), money(o.output_per_mtok), money(o.typical_report));
+    }
+    outln!("{}", style(format!("List prices from LiteLLM; a typical report is about {}k tokens in and {}k out. Claude through \
+                                your sign-in may be billed to your plan instead.",
+                               interview_coach::catalog::TYPICAL_INPUT_TOKENS / 1000.0,
+                               interview_coach::catalog::TYPICAL_OUTPUT_TOKENS / 1000.0)).dim());
+    outln!("{}", style("Re-run a report with one: ic run report <id> --model <model>   (or --model cheapest)").dim());
     Ok(())
 }
 
@@ -854,8 +884,7 @@ fn refresh_timeline(settings: &Settings, id: i64) -> Result<()> {
     }
     let session = db.get_session(id)?;
     let outcome = db.get_outcome(id)?;
-    report::write_analysis_html(&session, &stored, outcome.as_ref())?;
-    report::write_html(&session, &stored, outcome.as_ref())?;
+    report::write_pages(&db, &session, outcome.as_ref())?;
     if stored.turn_signals.iter().any(|s| s.temperature.is_some()) {
         report::print_room(&stored, true);
     } else {
@@ -868,12 +897,9 @@ fn outcome(settings: &Settings, id: i64, result: OutcomeResult, notes: Option<St
     let db = open_db(settings)?;
     let outcome = db.set_outcome(id, result, notes.as_deref())?;
     let session = db.get_session(id)?;
-    for analysis in db.analyses(id)? {
-        report::write_analysis_html(&session, &analysis, Some(&outcome))?;  // every report page shows the outcome
-    }
-    match db.latest_analysis(id)? {
+    report::write_pages(&db, &session, Some(&outcome))?; // every report page shows the outcome
+    match pipeline::current_report(&db, id)?.or(db.latest_analysis(id)?) {
         Some(stored) => {
-            report::write_html(&session, &stored, Some(&outcome))?;
             outln!("Recorded {} for session {id} (the analysis predicted: {}).", style(outcome.result.label()).bold(),
                      stored.analysis.outlook.verdict.label());
         }
@@ -1172,9 +1198,18 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let mut settings = Settings::load()?;
     // Kept apart from the default: `ic run next` falls back to the report's model, not the default.
-    let explicit_model = cli.model.clone();
-    if let Some(model) = cli.model {
-        settings.model = model;
+    let explicit_model: Option<ModelRef> = match cli.model.as_deref() {
+        None => None,
+        Some("cheapest") => {
+            proxy::ensure_running(&settings, &mut Ui::new())?;
+            let model = interview_coach::catalog::cheapest(&settings)?;
+            errln!("{}", style(format!("Cheapest available by list price: {model}")).dim());
+            Some(model)
+        }
+        Some(text) => Some(text.parse().map_err(|e: String| anyhow::anyhow!(e))?),
+    };
+    if let Some(model) = &explicit_model {
+        settings.model = model.clone();
     }
     match cli.command {
         Cmd::Record { title, company, aec, duration, yes, no_analyze } => {
@@ -1265,6 +1300,7 @@ fn run() -> Result<()> {
         }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
         Cmd::Timeline { id } => refresh_timeline(&settings, id),
+        Cmd::Models { json } => list_models(&settings, json),
         Cmd::Outcome { id, result, notes } => outcome(&settings, id, result, notes),
         Cmd::Proxy { action } => match action {
             ProxyCmd::Setup => {

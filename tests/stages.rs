@@ -86,7 +86,9 @@ fn a_failed_rerun_is_recorded_and_the_last_good_result_stays() {
     let (_tmp, mut db, id) = transcribed(Mode::Dual);
     let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE)), Err(LlmError::Overloaded)]);
     let first = analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
-    assert!(analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).is_err());
+    // With another model (the same one would reuse the first report without a call).
+    let haiku: ModelRef = "anthropic/claude-haiku-4-5".parse().unwrap();
+    assert!(analyze_session(&mut db, &llm, &haiku, id, &mut Quiet).is_err());
 
     let report = steps::flow(&db, id).unwrap().into_iter().find(|s| s.step == Step::Report).unwrap();
     assert_eq!(report.status, StageStatus::Failed);
@@ -241,12 +243,14 @@ fn each_answer_is_checked_after_the_report_and_a_failure_only_warns() {
     assert_eq!(get("specificity").scorer, "typesafe/jev-1.13.0");
 
     let session = db.get_session(id).unwrap();
-    let html = interview_coach::report::render_html(&session, &stored, None);
+    let html = interview_coach::report::render_html(&session, &stored, None, None);
     assert!(html.contains("Answer by answer"));
     assert!(html.contains("Led with the point 0 of 1 · Gave a number 1 of 1"));
     assert!(html.contains("✓ 4/5") && html.contains("✗ we"));
     assert!(html.contains("Checked answer by answer by typesafe/jev-1.13.0"));
 
+    // A scorer failure (on another interview: this one's verdicts are stored, so they'd be reused).
+    let (_tmp2, mut db, id) = transcribed(Mode::Dual);
     let broken = FakeScorer { fail: true, asked: Default::default() };
     let again = analyze_session_with(&mut db, &llm, &claude(), id, checks(&broken), &mut Quiet).unwrap();
     assert!(again.answer_checks.is_empty());
@@ -318,14 +322,14 @@ fn the_report_reads_the_room_and_renders_it_the_same_every_time() {
     assert!(run.warnings.iter().any(|w| w.contains("couldn't read the audio")), "no audio in this test: {:?}", run.warnings);
 
     let session = db.get_session(id).unwrap();
-    let html = interview_coach::report::render_html(&session, &stored, None);
+    let html = interview_coach::report::render_html(&session, &stored, None, None);
     assert!(html.contains("<h2>How the room felt</h2>"));
     assert!(html.contains("<svg class='room'") && html.contains("href='#t=31.0'"), "the dots seek");
     assert!(html.contains("<a class='ts' href='#t=31.0'>00:00:31</a>"), "quoted timestamps seek too");
     assert!(html.contains("Next steps mentioned") && html.contains("★ next steps"));
     assert!(html.contains("checked turn by turn by typesafe/jev-1.13.0"));
     let reloaded = db.analysis_by_id(stored.id).unwrap().unwrap();
-    assert_eq!(interview_coach::report::render_html(&session, &reloaded, None), html, "same rows, same page");
+    assert_eq!(interview_coach::report::render_html(&session, &reloaded, None, None), html, "same rows, same page");
 
     // Without a TypeSafe key the timeline is rebuilt from voices only, and says so.
     let (voice_only, warnings) = refresh_timeline(&mut db, id, None, &mut Quiet).unwrap();
@@ -333,6 +337,97 @@ fn the_report_reads_the_room_and_renders_it_the_same_every_time() {
     assert_eq!((voice_only.turn_signals.len(), voice_only.timeline_scorer.clone()), (3, None));
     assert!(voice_only.turn_signals.iter().all(|s| s.checks.is_empty()));
     assert!(warnings.iter().any(|w| w.contains("couldn't read the audio")));
-    let html = interview_coach::report::render_html(&session, &voice_only, None);
+    let html = interview_coach::report::render_html(&session, &voice_only, None, None);
     assert!(html.contains("add a TypeSafe key in Setup"));
+}
+
+/// The same inputs give the same report back: a rerun with nothing changed makes no model call
+/// and no new version. Another model makes a new version whose parent is the one it was rerun
+/// from, and going back to the first model brings the first version back, still without a call.
+#[test]
+fn unchanged_reruns_give_the_same_report_back_and_new_models_branch() {
+    use interview_coach::config::{ModelRef, Provider};
+    let (_tmp, mut db, id) = transcribed(Mode::Dual);
+    let haiku = ModelRef { provider: Provider::Anthropic, name: "claude-haiku-4-5".into() };
+    let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE)), Ok(sample(false, GOOD_QUOTE))]);
+
+    let v1 = analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
+    let again = analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
+    assert_eq!(llm.requests.borrow().len(), 1, "nothing changed, so Claude wasn't asked again");
+    assert_eq!(again.id, v1.id);
+    assert_eq!(serde_json::to_value(&again.analysis).unwrap(), serde_json::to_value(&v1.analysis).unwrap());
+    let run = steps::current_run(&db, id, Step::Report).unwrap().unwrap();
+    assert_eq!(run.output_id, Some(v1.id), "the rerun is recorded and points at the same version");
+    assert_eq!(db.analyses(id).unwrap().len(), 1);
+
+    let inputs = v1.inputs.clone().unwrap_or_else(|| db.analysis_by_id(v1.id).unwrap().unwrap().inputs.unwrap());
+    assert_eq!(inputs.model, "anthropic/claude-opus-5-5");
+    assert_eq!(inputs.transcript_sha.len(), 64);
+
+    let v2 = analyze_session(&mut db, &llm, &haiku, id, &mut Quiet).unwrap();
+    assert_ne!(v2.id, v1.id);
+    assert_eq!(v2.parent_id, Some(v1.id));
+    assert_eq!(v2.inputs.as_ref().unwrap().model, "anthropic/claude-haiku-4-5");
+    assert_eq!(llm.requests.borrow().len(), 2);
+
+    let back = analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
+    assert_eq!((back.id, llm.requests.borrow().len()), (v1.id, 2), "the first version is back, without a call");
+    assert_eq!(pipeline_current(&db, id), v1.id);
+
+    // The history: one transcript, v1 (shown again twice) and v2 re-run from it with another model.
+    let history = interview_coach::history::build(&db, id).unwrap();
+    let versions: Vec<_> = history.revisions.iter().flat_map(|r| &r.versions).collect();
+    assert_eq!(versions.len(), 2);
+    assert_eq!((versions[0].number, versions[0].reruns_reused), (1, 2));
+    assert_eq!((versions[1].parent, versions[1].changes.clone()), (Some(1), vec!["model claude-opus-5-5 → claude-haiku-4-5".to_string()]));
+    assert_eq!(history.current, Some(v1.id));
+    let session = db.get_session(id).unwrap();
+    let page = interview_coach::report::render_html(&session, &back, None, Some(&history));
+    assert!(page.contains("Version 1 of 2 · claude-opus-5-5"), "{page}");
+    assert!(page.contains(&format!("<a href='{}.html'>v2</a>", v2.id)));
+    assert!(page.contains("From v1: model claude-opus-5-5 → claude-haiku-4-5"));
+    assert!(page.contains("Shown again by 2 unchanged re-runs."));
+    assert_eq!(page, interview_coach::report::render_html(&session, &back, None, Some(&history)), "deterministic");
+    let older = interview_coach::report::render_html(&session, &v2, None, Some(&history));
+    assert!(older.contains(&format!("not current (<a href='{}.html'>v1</a> is)", v1.id)));
+
+    // report.html opens the current version's page.
+    let index = interview_coach::report::write_pages(&db, &session, None).unwrap().unwrap();
+    assert!(std::fs::read_to_string(index).unwrap().contains(&format!("url=reports/{}.html", v1.id)));
+}
+
+fn pipeline_current(db: &Db, id: i64) -> i64 {
+    interview_coach::pipeline::current_report(db, id).unwrap().unwrap().id
+}
+
+/// Swapping speakers keeps the old transcript as a revision, so every version's transcript is known.
+#[test]
+fn every_transcript_revision_is_kept() {
+    let (_tmp, mut db, id) = transcribed(Mode::Single);
+    let before = db.get_segments(id).unwrap();
+    // The fixture's transcript predates revisions; a speaker swap records the new one.
+    swap_speakers(&mut db, id, &mut Quiet).unwrap();
+    swap_speakers(&mut db, id, &mut Quiet).unwrap();
+    let revisions = db.transcript_revisions(id).unwrap();
+    assert_eq!(revisions.len(), 2);
+    assert_ne!(revisions[0].1, revisions[1].1);
+    assert_eq!(revisions[1].1, interview_coach::versions::transcript_sha(&before), "swapping back is the same transcript");
+}
+
+/// Scorer verdicts are stored under their exact inputs: the same answer is judged once, however
+/// many times the report is rebuilt.
+#[test]
+fn the_same_input_is_judged_once() {
+    use interview_coach::scoring::Scorer;
+    use interview_coach::temperature::TurnInput;
+    let (_tmp, db, _) = transcribed(Mode::Dual);
+    let counting = FakeScorer { fail: false, asked: Default::default() };
+    let cached = interview_coach::versions::CachedScorer { inner: &counting, db: &db };
+    let set = interview_coach::temperature::interviewer_set();
+    let turn = |says: &str| TurnInput { question: "q".into(), candidate_said: "a".into(), interviewer_says: says.into() };
+    let first = cached.assess(&turn("Great answer."), &set, 0).unwrap();
+    let again = cached.assess(&turn("Great answer."), &set, 0).unwrap();
+    assert_eq!(first, again);
+    cached.assess(&turn("Tell me more."), &set, 0).unwrap();
+    assert_eq!(counting.asked.borrow().len(), 2, "the repeated turn wasn't sent again");
 }

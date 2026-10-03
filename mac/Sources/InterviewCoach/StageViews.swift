@@ -2,7 +2,6 @@ import InterviewCoachKit
 import SwiftUI
 
 /// Models offered for re-running the report and next steps (the configured default is first).
-private let modelChoices = ["anthropic/claude-opus-5-5", "anthropic/claude-sonnet-5-5", "openai/gpt-5.6"]
 
 /// Title row of a stage pane: what it is, when and how it last ran, any problem, and its actions.
 struct StageHeader<Actions: View>: View {
@@ -249,14 +248,16 @@ struct ReportStageView: View {
         VStack(spacing: 0) {
             StageHeader(stage: stage, title: "After-action report") {
                 if detail.reports.count > 1 {
-                    Menu("Runs (\(detail.reports.count))") {
-                        ForEach(detail.reports) { r in
+                    // Oldest first, numbered like the report's history (v1, v2, …).
+                    let versions = Array(detail.reports.sorted { $0.analysisId < $1.analysisId }.enumerated())
+                    Menu("Versions (\(detail.reports.count))") {
+                        ForEach(versions, id: \.element.analysisId) { index, r in
                             Toggle(isOn: Binding(get: { shown?.analysisId == r.analysisId }, set: { _ in chosen = r.analysisId })) {
-                                Text("\(relativeTime(r.createdAt) ?? r.createdAt) · \(r.model) · \(r.verdictLabel)\(r.isCurrent ? " (current)" : "")")
+                                Text("v\(index + 1) · \(r.model.split(separator: "/").last.map(String.init) ?? r.model) · \(r.verdictLabel)\(r.isCurrent ? " (current)" : "")")
                             }
                         }
                     }
-                    .help("Every report run is kept; pick one to show")
+                    .help("Every version is kept. The report's Versions section shows how they relate.")
                 }
                 RerunMenu(step: .report, stage: stage, defaultModel: model.setup?.model)
                 Menu("Outcome") {
@@ -275,7 +276,7 @@ struct ReportStageView: View {
                 if detail.audio.listenPath != nil {
                     PlayerBar(player: model.player).padding(.horizontal, 16).padding(.bottom, 8)
                 }
-                ReportView(path: shown.htmlPath, onSeek: { model.player.play(from: $0) })
+                ReportView(path: shown.htmlPath, onSeek: { model.player.play(from: $0) }, onOpenReport: { chosen = $0 })
             } else {
                 EmptyStage(stage: stage, step: .report)
             }
@@ -284,7 +285,8 @@ struct ReportStageView: View {
     }
 }
 
-/// "Re-run" with the default model, or pick another one.
+/// "Re-run": with the same model, the cheapest one available, or any model your accounts can use
+/// (from `ic models`, with list prices).
 struct RerunMenu: View {
     @Environment(AppModel.self) private var model
     let step: StageStep
@@ -293,16 +295,45 @@ struct RerunMenu: View {
 
     var body: some View {
         Menu("Re-run") {
-            Button("Re-run with \(stage?.model ?? defaultModel ?? "the default model")") { model.rerun(step) }
+            if let last = stage?.model {
+                Button("Same model (\(shortName(last)))") { model.rerun(step, options: ["--model", last]) }
+            } else {
+                Button("With \(defaultModel.map(shortName) ?? "the default model")") { model.rerun(step) }
+            }
+            Button(cheapestLabel) { model.rerun(step, options: ["--model", "cheapest"]) }
             Divider()
-            ForEach(modelChoices, id: \.self) { choice in
-                Button(choice) { model.rerun(step, options: ["--model", choice]) }
+            if model.modelOffers.isEmpty {
+                Text("Loading your models…")
+            } else {
+                Section("Choose a model (list price)") {
+                    ForEach(model.modelOffers) { offer in
+                        Button(offer.priceLabel.map { "\(offer.name) — \($0)" } ?? offer.name) {
+                            model.rerun(step, options: ["--model", offer.model])
+                        }
+                    }
+                }
             }
         }
         .fixedSize()
         .disabled(!(stage?.canRerun ?? false) || model.phase.isBusy)
-        .help(stage?.rerunBlocked ?? "Run this stage again; earlier runs are kept")
+        .help(stage?.rerunBlocked ?? help)
+        .task { if model.modelOffers.isEmpty { await model.loadModelOffers() } }
     }
+
+    private var help: String {
+        step == .report
+            ? "Nothing changed? You get the same report back, with no new model call. Another model makes a new version; every version is kept."
+            : "Run this stage again; earlier runs are kept"
+    }
+
+    private var cheapestLabel: String {
+        guard let cheapest = model.modelOffers.first(where: \.cheapest) else { return "Cheapest available" }
+        return "Cheapest available (\(cheapest.name)\(cheapest.priceLabel.map { ", \($0)" } ?? ""))"
+    }
+}
+
+private func shortName(_ model: String) -> String {
+    model.split(separator: "/", maxSplits: 1).last.map(String.init) ?? model
 }
 
 // MARK: - 4. What to do next

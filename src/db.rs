@@ -62,7 +62,11 @@ CREATE TABLE IF NOT EXISTS analyses (
     verdict TEXT NOT NULL,
     analysis_json TEXT NOT NULL,
     metrics_json TEXT NOT NULL,
-    unverified_quotes_json TEXT NOT NULL
+    unverified_quotes_json TEXT NOT NULL,
+    -- Version 6: what the report was built from (versions.rs), so an unchanged rerun reuses it.
+    inputs_key TEXT,
+    inputs_json TEXT,
+    parent_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS analyses_by_session ON analyses(session_id, id);
 
@@ -148,6 +152,25 @@ CREATE TABLE IF NOT EXISTS turn_signals (
 );
 CREATE INDEX IF NOT EXISTS turn_signals_by_analysis ON turn_signals(analysis_id, turn_idx);
 
+-- Every transcript a report could be built on, kept when a newer one (e.g. a speaker swap)
+-- replaces the live segments, so each report version's exact transcript stays known.
+CREATE TABLE IF NOT EXISTS transcript_revisions (
+    run_id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    segments_json TEXT NOT NULL
+);
+
+-- Scorer verdicts (Jev, or Claude checks) stored under their exact inputs, so the same turn or
+-- answer always gets the same verdict, and reruns are free.
+CREATE TABLE IF NOT EXISTS judgments (
+    key TEXT PRIMARY KEY,
+    scorer TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    assessment_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS coaching_plans (
     id INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -191,6 +214,10 @@ pub struct StoredAnalysis {
     pub turn_signals: Vec<crate::temperature::Signal>,
     /// Which scorer judged the timeline's turns, e.g. `typesafe/jev-1.13.0` (None: voice only).
     pub timeline_scorer: Option<String>,
+    /// What the report was built from (None for reports made before versions were recorded).
+    pub inputs: Option<crate::versions::Manifest>,
+    /// The version this one was re-run from.
+    pub parent_id: Option<i64>,
 }
 
 /// One check of one answer (see scoring.rs).
@@ -221,6 +248,9 @@ pub struct StoredNextSteps {
     pub plan: NextSteps,
     pub unverified_quotes: Vec<String>,
 }
+
+/// A next-steps run's id, when it was made, its model, and the report it was planned from.
+pub type NextStepsEntry = (i64, String, String, Option<i64>);
 
 /// One attempt at one stage of one session.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -256,7 +286,7 @@ pub struct Db {
 }
 
 /// Schema version; `migrate` brings older databases up to it.
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into()))
@@ -283,7 +313,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
 }
 
 /// id, session_id, created_at, model, prompt_version, then the three JSON columns.
-type AnalysisRow = (i64, i64, String, String, String, String, String, String);
+type AnalysisRow = (i64, i64, String, String, String, String, String, String, Option<String>, Option<i64>);
 
 fn run_from_row(r: &Row) -> rusqlite::Result<StepRun> {
     let params: String = r.get("params_json")?;
@@ -318,6 +348,8 @@ fn analysis_from_row(r: &Row) -> rusqlite::Result<AnalysisRow> {
         r.get("analysis_json")?,
         r.get("metrics_json")?,
         r.get("unverified_quotes_json")?,
+        r.get("inputs_json")?,
+        r.get("parent_id")?,
     ))
 }
 
@@ -333,6 +365,7 @@ impl Db {
         conn.execute_batch(SCHEMA)?;
         let db = Db { conn, path: path.to_path_buf() };
         db.migrate()?;
+        db.ensure_indexes()?;
         Ok(db)
     }
 
@@ -360,7 +393,32 @@ impl Db {
                 crate::steps::backfill(self, &session)?;
             }
         }
+        // Version 6: report versions record their inputs; transcripts are kept per revision.
+        for column in ["inputs_key TEXT", "inputs_json TEXT", "parent_id INTEGER"] {
+            let name = column.split(' ').next().expect("named");
+            let has: bool = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('analyses') WHERE name = ?1", [name], |r| r.get(0))?;
+            if !has {
+                self.conn.execute_batch(&format!("ALTER TABLE analyses ADD COLUMN {column};"))?;
+            }
+        }
+        if version < 6 {
+            // The live transcript is the current transcript run's; earlier ones weren't kept.
+            for session in self.list_sessions()? {
+                let current = self.runs(session.id)?.into_iter()
+                    .rfind(|r| r.step == Step::Transcript && r.status == RunStatus::Succeeded);
+                let segments = self.get_segments(session.id)?;
+                if let (Some(run), false) = (current, segments.is_empty()) {
+                    self.save_transcript_revision(run.id, session.id, &segments)?;
+                }
+            }
+        }
         self.conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        Ok(())
+    }
+
+    fn ensure_indexes(&self) -> Result<()> {
+        self.conn.execute_batch("CREATE INDEX IF NOT EXISTS analyses_by_inputs ON analyses(session_id, inputs_key);")?;
         Ok(())
     }
 
@@ -439,17 +497,67 @@ impl Db {
 
     // --- analyses ---------------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_analysis(&self, session_id: i64, analysis: &SessionAnalysis, metrics: &TalkMetrics, model: &str,
-                        prompt_version: &str, unverified_quotes: &[String]) -> Result<StoredAnalysis> {
+                        prompt_version: &str, unverified_quotes: &[String], inputs: Option<&crate::versions::Manifest>,
+                        parent_id: Option<i64>) -> Result<StoredAnalysis> {
         self.conn.execute(
             "INSERT INTO analyses (session_id, created_at, model, prompt_version, verdict, analysis_json, metrics_json,
-             unverified_quotes_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             unverified_quotes_json, inputs_key, inputs_json, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![session_id, now_iso(), model, prompt_version, analysis.outlook.verdict.as_str(),
                     serde_json::to_string(analysis)?, serde_json::to_string(metrics)?,
-                    serde_json::to_string(unverified_quotes)?],
+                    serde_json::to_string(unverified_quotes)?, inputs.map(|m| m.key.clone()),
+                    inputs.map(serde_json::to_string).transpose()?, parent_id],
         )?;
         let id = self.conn.last_insert_rowid();
         self.analysis_where("id = ?1", id)?.ok_or_else(|| anyhow!("analysis {id} vanished"))
+    }
+
+    pub fn set_analysis_inputs(&self, id: i64, inputs: &crate::versions::Manifest) -> Result<()> {
+        self.conn.execute("UPDATE analyses SET inputs_key = ?2, inputs_json = ?3 WHERE id = ?1",
+                          params![id, inputs.key, serde_json::to_string(inputs)?])?;
+        Ok(())
+    }
+
+    /// This session's report built from exactly these inputs, if there is one.
+    pub fn analysis_by_key(&self, session_id: i64, key: &str) -> Result<Option<StoredAnalysis>> {
+        let id: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM analyses WHERE session_id = ?1 AND inputs_key = ?2 ORDER BY id LIMIT 1",
+                       params![session_id, key], |r| r.get(0))
+            .optional()?;
+        id.map_or(Ok(None), |id| self.analysis_by_id(id))
+    }
+
+    /// Record the transcript a run produced (a no-op if it's already recorded).
+    pub fn save_transcript_revision(&self, run_id: i64, session_id: i64, segments: &[Segment]) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO transcript_revisions (run_id, session_id, sha256, created_at, segments_json)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![run_id, session_id, crate::versions::transcript_sha(segments), now_iso(), serde_json::to_string(segments)?],
+        )?;
+        Ok(())
+    }
+
+    /// (transcript run id, sha256) for every kept transcript of a session, oldest first.
+    pub fn transcript_revisions(&self, session_id: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare("SELECT run_id, sha256 FROM transcript_revisions WHERE session_id = ?1 ORDER BY run_id")?;
+        let rows = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn judgment(&self, key: &str) -> Result<Option<crate::scoring::Assessment>> {
+        let json: Option<String> =
+            self.conn.query_row("SELECT assessment_json FROM judgments WHERE key = ?1", [key], |r| r.get(0)).optional()?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
+    }
+
+    pub fn save_judgment(&self, key: &str, scorer: &str, assessment: &crate::scoring::Assessment) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO judgments (key, scorer, created_at, assessment_json) VALUES (?1, ?2, ?3, ?4)",
+            params![key, scorer, now_iso(), serde_json::to_string(assessment)?],
+        )?;
+        Ok(())
     }
 
     pub fn latest_analysis(&self, session_id: i64) -> Result<Option<StoredAnalysis>> {
@@ -461,7 +569,7 @@ impl Db {
             .conn
             .query_row(&format!("SELECT * FROM analyses WHERE {clause}"), [arg], analysis_from_row)
             .optional()?;
-        let Some((id, session_id, created_at, model, prompt_version, analysis, metrics, unverified)) = row else {
+        let Some((id, session_id, created_at, model, prompt_version, analysis, metrics, unverified, inputs, parent_id)) = row else {
             return Ok(None);
         };
         let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
@@ -477,6 +585,8 @@ impl Db {
             answer_checks: self.answer_checks(id)?,
             turn_signals,
             timeline_scorer,
+            inputs: inputs.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+            parent_id,
         }))
     }
 
@@ -577,6 +687,16 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The company each session's latest report inferred (shown when you didn't enter one).
+    pub fn latest_companies(&self) -> Result<HashMap<i64, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, json_extract(analysis_json, '$.context.company') FROM analyses
+             WHERE id IN (SELECT MAX(id) FROM analyses GROUP BY session_id)",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))?;
+        Ok(rows.filter_map(|r| r.map(|(id, c)| c.map(|c| (id, c))).transpose()).collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn latest_verdicts(&self) -> Result<HashMap<i64, Verdict>> {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, verdict FROM analyses WHERE id IN (SELECT MAX(id) FROM analyses GROUP BY session_id)",
@@ -589,7 +709,7 @@ impl Db {
         let mut stmt = self.conn.prepare("SELECT * FROM analyses WHERE session_id = ?1 ORDER BY id DESC")?;
         let rows = stmt.query_map([session_id], analysis_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|(id, session_id, created_at, model, prompt_version, analysis, metrics, unverified)| {
+            .map(|(id, session_id, created_at, model, prompt_version, analysis, metrics, unverified, inputs, parent_id)| {
                 let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
                 Ok(StoredAnalysis {
                     id, session_id, created_at, model, prompt_version,
@@ -599,6 +719,8 @@ impl Db {
                     answer_checks: self.answer_checks(id)?,
                     turn_signals,
                     timeline_scorer,
+                    inputs: inputs.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+                    parent_id,
                 })
             })
             .collect()
@@ -684,6 +806,14 @@ impl Db {
         )?;
         let id = self.conn.last_insert_rowid();
         self.next_steps_by_id(id)?.ok_or_else(|| anyhow!("next steps {id} vanished"))
+    }
+
+    /// (id, created_at, model, the report it was planned from) for every next-steps run, oldest first.
+    pub fn next_steps_index(&self, session_id: i64) -> Result<Vec<NextStepsEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, model, analysis_id FROM next_steps WHERE session_id = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn next_steps_by_id(&self, id: i64) -> Result<Option<StoredNextSteps>> {
@@ -816,6 +946,31 @@ mod tests {
         assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
         assert_eq!(db.turn_signals(1)?, (vec![], None));
         assert!(db.get_session(1).is_ok(), "the session survives");
+        Ok(())
+    }
+
+    /// A version-5 database gains report inputs and transcript revisions; the live transcript is
+    /// kept as its transcript run's revision.
+    #[test]
+    fn version_5_databases_gain_versions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("coach.db");
+        {
+            let mut db = Db::open(&path)?;
+            let s = db.create_session(new_session(Mode::Dual))?;
+            db.replace_segments(s.id, &[Segment::new(0.0, 2.0, "Tell me about yourself.", crate::models::INTERVIEWER)])?;
+            db.insert_finished_run(s.id, Step::Transcript, RunStatus::Succeeded, "t", &serde_json::json!({}), None, None, None)?;
+            db.conn.execute_batch(
+                "DROP INDEX analyses_by_inputs; DROP TABLE transcript_revisions; DROP TABLE judgments;
+                 ALTER TABLE analyses DROP COLUMN inputs_key; ALTER TABLE analyses DROP COLUMN inputs_json;
+                 ALTER TABLE analyses DROP COLUMN parent_id; PRAGMA user_version = 5;")?;
+        }
+        let db = Db::open(&path)?;
+        assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
+        let revisions = db.transcript_revisions(1)?;
+        assert_eq!(revisions.len(), 1, "the live transcript is kept");
+        assert_eq!(revisions[0].1, crate::versions::transcript_sha(&db.get_segments(1)?));
+        assert_eq!(db.analysis_by_key(1, "none")?.map(|a| a.id), None, "the new columns are queryable");
         Ok(())
     }
 

@@ -140,12 +140,18 @@ struct StatusBanner: View {
 struct ReportView: NSViewRepresentable {
     let path: String
     let onSeek: (Double) -> Void
+    /// A link to another version of the report (its analysis id).
+    var onOpenReport: (Int) -> Void = { _ in }
 
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: (path: String, modified: Date?)?
         var onSeek: (Double) -> Void
+        var onOpenReport: (Int) -> Void
 
-        init(onSeek: @escaping (Double) -> Void) { self.onSeek = onSeek }
+        init(onSeek: @escaping (Double) -> Void, onOpenReport: @escaping (Int) -> Void) {
+            self.onSeek = onSeek
+            self.onOpenReport = onOpenReport
+        }
 
         /// WebKit asks here about same-page `#t=` clicks too (HTML and SVG links alike), so the report
         /// needs no script. Anything that isn't a timestamp or web link, like the report itself or an
@@ -157,6 +163,10 @@ struct ReportView: NSViewRepresentable {
                let seconds = seekSeconds(fromFragment: url.fragment(percentEncoded: false)) {
                 onSeek(seconds)
                 decisionHandler(.cancel)
+            } else if action.navigationType == .linkActivated, let page = webView.url,
+                      let id = reportID(fromLink: url, currentPage: page) {
+                onOpenReport(id)
+                decisionHandler(.cancel)
             } else if action.navigationType == .linkActivated, ["http", "https"].contains(url.scheme?.lowercased()) {
                 NSWorkspace.shared.open(url)
                 decisionHandler(.cancel)
@@ -166,7 +176,7 @@ struct ReportView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek) }
+    func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek, onOpenReport: onOpenReport) }
 
     func makeNSView(context: Context) -> WKWebView {
         let view = WKWebView()
@@ -177,6 +187,7 @@ struct ReportView: NSViewRepresentable {
 
     func updateNSView(_ view: WKWebView, context: Context) {
         context.coordinator.onSeek = onSeek
+        context.coordinator.onOpenReport = onOpenReport
         let url = URL(fileURLWithPath: path)
         let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         guard context.coordinator.loaded?.path != path || context.coordinator.loaded?.modified != modified else { return }
