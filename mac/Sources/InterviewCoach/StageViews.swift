@@ -272,7 +272,10 @@ struct ReportStageView: View {
                 .disabled(shown == nil)
             }
             if let shown {
-                ReportView(path: shown.htmlPath)
+                if detail.audio.listenPath != nil {
+                    PlayerBar(player: model.player).padding(.horizontal, 16).padding(.bottom, 8)
+                }
+                ReportView(path: shown.htmlPath, onSeek: { model.player.play(from: $0) })
             } else {
                 EmptyStage(stage: stage, step: .report)
             }
