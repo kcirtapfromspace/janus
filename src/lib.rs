@@ -46,6 +46,7 @@ pub mod models;
 pub mod next_steps;
 pub mod pipeline;
 pub mod progress;
+pub mod prosody;
 pub mod proxy;
 pub mod report;
 pub mod schema;
