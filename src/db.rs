@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
 use crate::metrics::TalkMetrics;
-use crate::models::{Mode, NextSteps, OutcomeResult, RunStatus, Segment, Session, SessionAnalysis, Source, Stage, Status,
+use crate::models::{Mode, NextSteps, OutcomeResult, RoleStatus, RunStatus, Segment, Session, SessionAnalysis, Source, Stage, Status,
                     Step, Verdict, Word};
 
 const SCHEMA: &str = r#"
@@ -19,7 +19,10 @@ CREATE TABLE IF NOT EXISTS roles (
     level TEXT,
     company TEXT,
     jd_text TEXT,
-    profile_json TEXT
+    profile_json TEXT,
+    -- Version 7: where the application stands, and whether it's archived.
+    status TEXT NOT NULL DEFAULT 'interviewing',
+    archived_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -37,7 +40,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     num_speakers INTEGER,
     consent INTEGER,
     status TEXT NOT NULL,
-    error TEXT
+    error TEXT,
+    -- Version 7: archived, in Recently Deleted, and whether its role was set (by filing or by you).
+    archived_at TEXT,
+    deleted_at TEXT,
+    role_set INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -286,10 +293,32 @@ pub struct Db {
 }
 
 /// Schema version; `migrate` brings older databases up to it.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into()))
+}
+
+/// A role you're interviewing for, at a company: the interviews for it are its rounds.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Role {
+    pub id: i64,
+    pub created_at: String,
+    pub title: String,
+    pub company: Option<String>,
+    pub status: RoleStatus,
+    pub archived_at: Option<String>,
+}
+
+fn role_from_row(r: &Row) -> rusqlite::Result<Role> {
+    Ok(Role {
+        id: r.get("id")?,
+        created_at: r.get("created_at")?,
+        title: r.get("title")?,
+        company: r.get("company")?,
+        status: parse(r.get("status")?)?,
+        archived_at: r.get("archived_at")?,
+    })
 }
 
 fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
@@ -309,6 +338,9 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         consent: r.get("consent")?,
         status: parse(r.get("status")?)?,
         error: r.get("error")?,
+        archived_at: r.get("archived_at")?,
+        deleted_at: r.get("deleted_at")?,
+        role_set: r.get("role_set")?,
     })
 }
 
@@ -393,6 +425,17 @@ impl Db {
                 crate::steps::backfill(self, &session)?;
             }
         }
+        // Version 7: archive, Recently Deleted, filing, and where each application stands.
+        for (table, column) in [("sessions", "archived_at TEXT"), ("sessions", "deleted_at TEXT"),
+                                ("sessions", "role_set INTEGER NOT NULL DEFAULT 0"),
+                                ("roles", "status TEXT NOT NULL DEFAULT 'interviewing'"), ("roles", "archived_at TEXT")] {
+            let name = column.split(' ').next().expect("named");
+            let has: bool = self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [name], |r| r.get(0))?;
+            if !has {
+                self.conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};"))?;
+            }
+        }
         // Version 6: report versions record their inputs; transcripts are kept per revision.
         for column in ["inputs_key TEXT", "inputs_json TEXT", "parent_id INTEGER"] {
             let name = column.split(' ').next().expect("named");
@@ -411,6 +454,12 @@ impl Db {
                 if let (Some(run), false) = (current, segments.is_empty()) {
                     self.save_transcript_revision(run.id, session.id, &segments)?;
                 }
+            }
+        }
+        if version < 7 {
+            // File each analysed interview under the company and role its current report inferred.
+            for session in self.list_sessions()? {
+                crate::library::file_from_report(self, session.id)?;
             }
         }
         self.conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
@@ -448,14 +497,139 @@ impl Db {
     }
 
     /// Write every mutable field of `s` back to the database.
+    /// Saves the pipeline's own fields. The title, company, role, round, archive and delete state
+    /// are yours, changed only through their setters, so a long-running stage holding an older copy
+    /// never overwrites an edit made meanwhile.
     pub fn save_session(&self, s: &Session) -> Result<()> {
         self.conn.execute(
-            "UPDATE sessions SET title = ?2, company = ?3, stage = ?4, role_id = ?5, source_path = ?6, dir = ?7,
-             duration_s = ?8, num_speakers = ?9, consent = ?10, status = ?11, error = ?12 WHERE id = ?1",
-            params![s.id, s.title, s.company, s.stage.map(|x| x.as_str()), s.role_id, s.source_path, s.dir,
-                    s.duration_s, s.num_speakers, s.consent, s.status.as_str(), s.error],
+            "UPDATE sessions SET source_path = ?2, dir = ?3, duration_s = ?4, num_speakers = ?5, consent = ?6,
+             status = ?7, error = ?8 WHERE id = ?1",
+            params![s.id, s.source_path, s.dir, s.duration_s, s.num_speakers, s.consent, s.status.as_str(), s.error],
         )?;
         Ok(())
+    }
+
+    pub fn set_title(&self, id: i64, title: &str) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET title = ?2 WHERE id = ?1", params![id, title])?;
+        Ok(())
+    }
+
+    pub fn set_company(&self, id: i64, company: Option<&str>) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET company = ?2 WHERE id = ?1", params![id, company])?;
+        Ok(())
+    }
+
+    pub fn set_stage(&self, id: i64, stage: Option<Stage>) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET stage = ?2 WHERE id = ?1", params![id, stage.map(|s| s.as_str())])?;
+        Ok(())
+    }
+
+    /// The round a report detected, kept only when none is set (yours, or an earlier report's).
+    pub fn set_stage_if_unset(&self, id: i64, stage: Stage) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET stage = ?2 WHERE id = ?1 AND stage IS NULL", params![id, stage.as_str()])?;
+        Ok(())
+    }
+
+    /// File an interview under a role (or none). Either way it's settled: reports won't re-file it.
+    pub fn set_session_role(&self, id: i64, role_id: Option<i64>) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET role_id = ?2, role_set = 1 WHERE id = ?1", params![id, role_id])?;
+        Ok(())
+    }
+
+    pub fn set_archived(&self, id: i64, archived: bool) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET archived_at = CASE WHEN ?2 THEN coalesce(archived_at, ?3) END WHERE id = ?1",
+                          params![id, archived, now_iso()])?;
+        Ok(())
+    }
+
+    pub fn set_deleted(&self, id: i64, deleted: bool) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET deleted_at = CASE WHEN ?2 THEN coalesce(deleted_at, ?3) END WHERE id = ?1",
+                          params![id, deleted, now_iso()])?;
+        Ok(())
+    }
+
+    /// Remove an interview and everything stored with it (its folder is the caller's to remove).
+    pub fn erase_session(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// (session id, start, text) of transcript lines containing `query` (lowercase), at most `limit`.
+    pub fn search_segments(&self, query: &str, limit: i64) -> Result<Vec<(i64, f64, String)>> {
+        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, start_s, text FROM segments WHERE lower(text) LIKE '%' || ?1 || '%' ESCAPE '\\'
+             ORDER BY session_id, idx LIMIT ?2")?;
+        let rows = stmt.query_map(params![escaped, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- roles ---------------------------------------------------------------------------------
+
+    pub fn roles(&self) -> Result<Vec<Role>> {
+        let mut stmt = self.conn.prepare("SELECT * FROM roles ORDER BY id")?;
+        let rows = stmt.query_map([], role_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn role(&self, id: i64) -> Result<Role> {
+        self.conn
+            .query_row("SELECT * FROM roles WHERE id = ?1", [id], role_from_row)
+            .optional()?
+            .ok_or_else(|| anyhow!("No role with id {id}. See: ic role list"))
+    }
+
+    /// The role with this title at this company (ignoring case and spacing), created if it's new.
+    pub fn find_or_create_role(&self, company: Option<&str>, title: &str) -> Result<Role> {
+        let key = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let company = company.map(str::trim).filter(|c| !c.is_empty());
+        if let Some(found) = self.roles()?.into_iter().find(|r| {
+            key(&r.title) == key(title) && r.company.as_deref().map(key) == company.map(key)
+        }) {
+            return Ok(found);
+        }
+        self.conn.execute("INSERT INTO roles (created_at, title, company) VALUES (?1, ?2, ?3)",
+                          params![now_iso(), title.trim(), company])?;
+        self.role(self.conn.last_insert_rowid())
+    }
+
+    pub fn set_role_status(&self, id: i64, status: RoleStatus) -> Result<()> {
+        self.conn.execute("UPDATE roles SET status = ?2 WHERE id = ?1", params![id, status.as_str()])?;
+        Ok(())
+    }
+
+    pub fn rename_role(&self, id: i64, title: &str) -> Result<()> {
+        self.conn.execute("UPDATE roles SET title = ?2 WHERE id = ?1", params![id, title.trim()])?;
+        Ok(())
+    }
+
+    pub fn set_role_archived(&self, id: i64, archived: bool) -> Result<()> {
+        self.conn.execute("UPDATE roles SET archived_at = CASE WHEN ?2 THEN coalesce(archived_at, ?3) END WHERE id = ?1",
+                          params![id, archived, now_iso()])?;
+        Ok(())
+    }
+
+    /// Move every interview of one role to another, then remove the empty role.
+    pub fn merge_role(&self, from: i64, into: i64) -> Result<()> {
+        if from == into {
+            return Ok(());
+        }
+        self.role(into)?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE sessions SET role_id = ?2, role_set = 1 WHERE role_id = ?1", params![from, into])?;
+        tx.execute("DELETE FROM roles WHERE id = ?1", [from])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Rename a company everywhere you entered it: its roles and its interviews.
+    pub fn rename_company(&self, old: &str, new: &str) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let same = "lower(trim(company)) = lower(trim(?1))";
+        let n = tx.execute(&format!("UPDATE roles SET company = ?2 WHERE {same}"), params![old, new.trim()])?
+            + tx.execute(&format!("UPDATE sessions SET company = ?2 WHERE {same}"), params![old, new.trim()])?;
+        tx.commit()?;
+        Ok(n)
     }
 
     pub fn set_status(&self, id: i64, status: Status, error: Option<String>) -> Result<()> {
@@ -898,6 +1072,7 @@ mod tests {
         s.duration_s = Some(61.5);
         s.stage = Some(Stage::HiringManager);
         db.save_session(&s)?;
+        db.set_stage(1, s.stage)?; // the round is yours: saved by its own setter, never by save_session
         assert_eq!(db.get_session(1)?, s);
 
         let segs = vec![

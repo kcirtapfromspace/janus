@@ -55,6 +55,8 @@ struct VerdictBadge: View {
 
 struct SessionRow: View {
     let session: SessionSummary
+    /// Under its role in the sidebar: the round leads, since the company and role are above it.
+    var inRole = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -65,7 +67,9 @@ struct SessionRow: View {
                 Spacer(minLength: 6)
                 VerdictBadge(session: session)
             }
-            Text([session.company, session.date, formatDuration(session.durationS)].compactMap { $0 }.joined(separator: " · "))
+            Text([inRole ? session.stage : nil, session.date, formatDuration(session.durationS),
+                  session.isDeleted ? "\(session.deletedDaysLeft ?? 0)d left" : nil, session.archived ? "archived" : nil]
+                .compactMap { $0 }.joined(separator: " · "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let outcome = session.outcomeLabel {

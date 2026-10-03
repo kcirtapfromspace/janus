@@ -49,9 +49,11 @@ pub struct Manifest {
     /// The transcript run it was built on, and that transcript's sha.
     pub transcript_run_id: i64,
     pub transcript_sha: String,
-    /// The interview's title, which the analysis sees.
+    /// The interview's title and the company you entered, which the analysis sees.
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub company: Option<String>,
     pub model: String,
     pub prompt_version: String,
     pub timeline_method: String,
@@ -75,6 +77,9 @@ pub fn changes(parent: Option<&Manifest>, this: &Manifest) -> Vec<String> {
     }
     if parent.title != this.title {
         out.push("the title".into());
+    }
+    if parent.company != this.company {
+        out.push("the company".into());
     }
     if parent.prompt_version != this.prompt_version {
         out.push(format!("prompt {} → {}", parent.prompt_version, this.prompt_version));
@@ -148,7 +153,7 @@ mod tests {
     }
 
     fn manifest(key: &str, sha: &str, model: &str) -> Manifest {
-        Manifest { key: key.into(), transcript_run_id: 1, transcript_sha: sha.into(), title: "HM screen".into(), model: model.into(),
+        Manifest { key: key.into(), transcript_run_id: 1, transcript_sha: sha.into(), title: "HM screen".into(), company: None, model: model.into(),
                    prompt_version: "session-v2".into(), timeline_method: "timeline-v1".into(), timeline_scorer: None,
                    answer_checker: None, app_version: "0.1.0".into() }
     }

@@ -133,6 +133,12 @@ pub struct Session {
     pub consent: Option<bool>,
     pub status: Status,
     pub error: Option<String>,
+    /// Hidden from the main list (still searchable, and shown with "Show archived").
+    pub archived_at: Option<String>,
+    /// In Recently Deleted since then; erased for good 30 days later.
+    pub deleted_at: Option<String>,
+    /// The role was set (by filing or by you), so reports don't file it again.
+    pub role_set: bool,
 }
 
 pub fn speaker_label(speaker: &str) -> String {
@@ -198,6 +204,26 @@ text_enum! {
         RecruiterScreen => "recruiter_screen", HiringManager => "hiring_manager", Technical => "technical",
         Behavioral => "behavioral", Case => "case", Panel => "panel", Final => "final",
         Informational => "informational", Other => "other",
+    }
+}
+
+text_enum! {
+    /// Where an application for a role stands.
+    pub enum RoleStatus {
+        Interviewing => "interviewing", Offer => "offer", Accepted => "accepted", Rejected => "rejected",
+        Withdrawn => "withdrawn",
+    }
+}
+
+impl RoleStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            RoleStatus::Interviewing => "Interviewing",
+            RoleStatus::Offer => "Offer",
+            RoleStatus::Accepted => "Accepted",
+            RoleStatus::Rejected => "Rejected",
+            RoleStatus::Withdrawn => "Withdrawn",
+        }
     }
 }
 

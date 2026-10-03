@@ -12,20 +12,17 @@ struct MainWindow: View {
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
-            List(model.sessions, selection: $model.selection) { session in
-                SessionRow(session: session).tag(session.id)
-            }
-            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
-            .overlay {
-                if model.sessions.isEmpty {
-                    ContentUnavailableView("No interviews yet", systemImage: "waveform",
-                                           description: Text("Record one with the Record button, or import a recording."))
-                }
-            }
+            LibrarySidebar()
+                .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 400)
         } detail: {
             Group {
-                if let detail = model.detail, detail.session.id == model.selection {
-                    PipelineView(detail: detail)
+                if model.listSelection.count > 1 {
+                    BatchView()
+                } else if let detail = model.detail, detail.session.id == model.selection {
+                    VStack(spacing: 0) {
+                        if let session = model.selectedSession, session.isDeleted { DeletedBanner(session: session) }
+                        PipelineView(detail: detail)
+                    }
                 } else if model.selection != nil {
                     ProgressView()
                 } else {

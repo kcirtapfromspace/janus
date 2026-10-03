@@ -29,6 +29,20 @@ enum Snapshots {
                 }
                 model.selectedStage = .report
             }
+            if let path = env["IC_SNAPSHOT_LIBRARY"], let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+               let library = try? ICClient.decode(Library.self, from: data) {
+                model.library = library
+                await render(LibrarySidebar().environment(model), size: CGSize(width: 300, height: 640), name: "sidebar", to: out)
+                model.filter.showArchived = true
+                await render(LibrarySidebar().environment(model), size: CGSize(width: 300, height: 700), name: "sidebar-archived", to: out)
+                model.filter.showArchived = false
+                model.listSelection = [1, 2, 4]
+                await render(BatchView().environment(model), size: CGSize(width: 520, height: 300), name: "batch", to: out)
+                model.listSelection = []
+                if let one = library.sessions.first {
+                    await render(EditDetailsSheet(session: one).environment(model), size: CGSize(width: 440, height: 0), name: "edit", to: out)
+                }
+            }
             for width in [820.0, 1100] {
                 await renderWindow(MainWindow().environment(model), size: CGSize(width: width, height: 560),
                                    name: "window-\(Int(width))", to: out)

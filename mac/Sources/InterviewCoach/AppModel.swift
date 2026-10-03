@@ -19,7 +19,18 @@ final class AppModel {
     var phase: Phase = .idle {
         didSet { if phase == .idle { updater.installIfIdle() } }  // a waiting update installs between interviews
     }
-    var sessions: [SessionSummary] = []
+    /// Every interview (archived and deleted ones flagged) and every role: the sidebar.
+    var library = Library()
+    var filter = LibraryFilter()
+    /// The interviews in the main list (not archived or deleted): the menu bar's Recent Interviews.
+    var sessions: [SessionSummary] { library.sessions.filter { !$0.archived && !$0.isDeleted } }
+    /// The sidebar's selection. One interview shows its stages; several show what you can do with all.
+    var listSelection: Set<Int> = [] {
+        didSet {
+            let one = listSelection.count == 1 ? listSelection.first : nil
+            if selection != one { selection = one }
+        }
+    }
     /// What this Mac still needs (`ic setup status`), shown in the Setup window.
     var setup: SetupStatus?
     /// The setup step running now (one at a time), with its live progress.
@@ -33,7 +44,15 @@ final class AppModel {
     var micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
     /// Setup opens by itself at most once per launch.
     @ObservationIgnored var setupPromptShown = false
-    var selection: SessionSummary.ID?
+    var selection: SessionSummary.ID? {
+        didSet {
+            if let id = selection, listSelection != [id] {
+                listSelection = [id]
+            } else if selection == nil, listSelection.count == 1 {
+                listSelection = []
+            }
+        }
+    }
     var lastError: String?
     var title = ""
     var company = ""
@@ -59,7 +78,11 @@ final class AppModel {
         updater.isIdle = { [unowned self] in phase == .idle }
         updater.onReady = { [unowned self] version in updateReady = version }
         updater.start()
-        Task { await refresh() }
+        Task {
+            await refresh()
+            // Erase what has been in Recently Deleted for 30 days.
+            if let ic, (try? await ic.run(["empty-deleted"])) != nil { await refresh() }
+        }
         // The menu is native, so there's no "menu opened" moment to refresh on: keep the interview
         // list current every 10 s (a quick local read) and setup every minute (it checks Docker,
         // the proxy and the sign-in).
@@ -74,7 +97,7 @@ final class AppModel {
         }
     }
 
-    var selectedSession: SessionSummary? { sessions.first { $0.id == selection } }
+    var selectedSession: SessionSummary? { library.sessions.first { $0.id == selection } }
 
     /// Load the selected session's stages, transcript, reports, and next steps.
     func loadDetail() async {
@@ -133,7 +156,8 @@ final class AppModel {
             return
         }
         do {
-            sessions = try await ic.decode([SessionSummary].self, ["list", "--json"])
+            library = try await ic.decode(Library.self, ["list", "--json", "--all"])
+            forgetVanished()
             setup = try await ic.decode(SetupStatus.self, ["setup", "status", "--json"])
             micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
         } catch {
@@ -144,8 +168,9 @@ final class AppModel {
     /// A background refresh: never shows an error (the next user action will, if it persists).
     private func refreshQuietly(setupToo: Bool) async {
         guard let ic else { return }
-        if let list = try? await ic.decode([SessionSummary].self, ["list", "--json"]), list != sessions {
-            sessions = list
+        if let loaded = try? await ic.decode(Library.self, ["list", "--json", "--all"]), loaded != library {
+            library = loaded
+            forgetVanished()
         }
         if setupToo, let status = try? await ic.decode(SetupStatus.self, ["setup", "status", "--json"]), status != setup {
             setup = status
@@ -357,6 +382,85 @@ final class AppModel {
 
     func revealInFinder(_ session: SessionSummary) {
         NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: session.dir, isDirectory: true)])
+    }
+
+    /// Drop selected interviews that no longer exist (erased from Recently Deleted).
+    private func forgetVanished() {
+        let ids = Set(library.sessions.map(\.id))
+        if !listSelection.isSubset(of: ids) { listSelection = listSelection.intersection(ids) }
+    }
+
+    // MARK: Managing interviews
+
+    /// Run quick `ic` commands one after another (they don't block recording), then reload.
+    private func manage(_ commands: [[String]]) {
+        guard let ic else { return }
+        lastError = nil
+        Task {
+            for args in commands {
+                do {
+                    _ = try await ic.run(args)
+                } catch {
+                    lastError = error.localizedDescription
+                    break
+                }
+            }
+            await refresh()
+            await loadDetail()
+        }
+    }
+
+    func archive(_ ids: [Int], undo: Bool = false) { manage([["archive"] + ids.map(String.init) + (undo ? ["--undo"] : [])]) }
+    func delete(_ ids: [Int]) { manage([["delete"] + ids.map(String.init)]) }
+    func restore(_ ids: [Int]) { manage([["restore"] + ids.map(String.init)]) }
+    /// Erase interviews in Recently Deleted for good.
+    func erase(_ ids: [Int]) { manage([["erase"] + ids.map(String.init)]) }
+    func emptyRecentlyDeleted() { manage([["empty-deleted", "--now"]]) }
+
+    /// Move interviews to a role (by id), a new role (by title) or out of their role (both nil).
+    func move(_ ids: [Int], toRole roleID: Int? = nil, newRole title: String? = nil) {
+        let target: [String] = if let roleID { ["--role-id", "\(roleID)"] } else if let title { ["--role", title] } else { ["--no-role"] }
+        manage(ids.map { ["edit", "\($0)"] + target })
+    }
+
+    /// Save the Edit Details sheet: only what changed (nil = unchanged). The role is a role id, a
+    /// new role's title, or neither (out of its role).
+    func editDetails(_ id: Int, title: String?, company: String?, role: (id: Int?, newTitle: String?)?, round: String??) {
+        var commands: [[String]] = []
+        var first = ["edit", "\(id)"]
+        if let title { first += ["--title", title] }
+        if let company { first += company.trimmingCharacters(in: .whitespaces).isEmpty ? ["--no-company"] : ["--company", company] }
+        if let round { first += ["--round", round ?? "none"] }
+        if first.count > 2 { commands.append(first) }
+        if let role {
+            if let newTitle = role.newTitle?.trimmingCharacters(in: .whitespaces), !newTitle.isEmpty {
+                commands.append(["edit", "\(id)", "--role", newTitle])
+            } else if let roleID = role.id {
+                commands.append(["edit", "\(id)", "--role-id", "\(roleID)"])
+            } else {
+                commands.append(["edit", "\(id)", "--no-role"])
+            }
+        }
+        if !commands.isEmpty { manage(commands) }
+    }
+
+    func setRoleStatus(_ roleID: Int, _ status: String) { manage([["role", "status", "\(roleID)", status]]) }
+    func renameRole(_ roleID: Int, _ title: String) { manage([["role", "rename", "\(roleID)", title]]) }
+    func archiveRole(_ roleID: Int, undo: Bool = false) { manage([["role", "archive", "\(roleID)"] + (undo ? ["--undo"] : [])]) }
+    func mergeRole(_ from: Int, into: Int) { manage([["role", "merge", "\(from)", "\(into)"]]) }
+    func renameCompany(_ old: String, _ new: String) { manage([["company", "rename", old, new]]) }
+    func archiveCompany(_ name: String, undo: Bool = false) { manage([["company", "archive", name] + (undo ? ["--undo"] : [])]) }
+
+    /// Interviews whose transcript mentions the search text (titles and companies match in the sidebar itself).
+    func searchTranscripts(_ query: String) async {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        guard let ic, q.count >= 2 else {
+            filter.searchHits = []
+            return
+        }
+        let hits = (try? await ic.decode([SearchHit].self, ["search", q, "--json"])) ?? []
+        guard filter.query.trimmingCharacters(in: .whitespaces) == q else { return }
+        filter.searchHits = Set(hits.map(\.sessionId))
     }
 
     private func runIC(_ args: [String], label: String, select id: Int? = nil) {

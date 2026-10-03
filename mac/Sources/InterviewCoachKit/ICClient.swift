@@ -110,8 +110,20 @@ public struct SessionSummary: Decodable, Identifiable, Hashable {
     public let reportPath: String?
     public let transcriptPath: String?
     public let error: String?
+    /// Groups spellings of the company together (lowercase, single spaces).
+    public var companyKey: String? = nil
+    /// The company you entered (the report reads it); `company` may be a role's or a report's guess.
+    public var enteredCompany: String? = nil
+    /// The round's id, e.g. `technical`.
+    public var stageId: String? = nil
+    public var roleId: Int? = nil
+    /// Archived itself, or through its role.
+    public var archived: Bool = false
+    /// In Recently Deleted: days until it's erased.
+    public var deletedDaysLeft: Int? = nil
 
     public var date: String { String(createdAt.prefix(10)) }
+    public var isDeleted: Bool { deletedDaysLeft != nil }
     public var isAnalyzed: Bool { reportPath != nil }
 }
 

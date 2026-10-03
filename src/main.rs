@@ -1,7 +1,7 @@
 //! `ic` — the Interview Coach command line.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +18,7 @@ use interview_coach::capture;
 use interview_coach::config::{FileConfig, ModelRef, Provider, ScorerRef, Settings};
 use interview_coach::db::Db;
 use interview_coach::events::JsonEvents;
+use interview_coach::library;
 use interview_coach::llm;
 use interview_coach::merge::to_turns;
 use interview_coach::models::{OutcomeResult, Status, Step, YOU, fmt_ts, speaker_label};
@@ -107,6 +108,76 @@ enum Cmd {
     /// List your interview sessions.
     List {
         /// Machine-readable output (used by the Interview Coach app).
+        #[arg(long)]
+        json: bool,
+        /// Include archived and deleted interviews (and, with --json, every role).
+        #[arg(long)]
+        all: bool,
+    },
+    /// Change an interview's title, company, role or round.
+    Edit {
+        id: i64,
+        #[arg(long)]
+        title: Option<String>,
+        /// The company, as you'd enter it (the report reads it).
+        #[arg(long, conflicts_with = "no_company")]
+        company: Option<String>,
+        #[arg(long)]
+        no_company: bool,
+        /// File it under this role (created if it's new) at its company.
+        #[arg(long, conflicts_with_all = ["role_id", "no_role"])]
+        role: Option<String>,
+        /// File it under an existing role, by id (see: ic role list).
+        #[arg(long, conflicts_with = "no_role")]
+        role_id: Option<i64>,
+        /// Take it out of its role.
+        #[arg(long)]
+        no_role: bool,
+        /// The round: recruiter_screen, hiring_manager, technical, behavioral, case, panel, final,
+        /// informational, other, or none.
+        #[arg(long)]
+        round: Option<String>,
+    },
+    /// Archive interviews (hidden from the main list; --undo brings them back).
+    Archive {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Move interviews to Recently Deleted, where they stay for 30 days.
+    Delete {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Bring interviews back from Recently Deleted.
+    Restore {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Erase interviews in Recently Deleted for good, now.
+    Erase {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Erase interviews deleted more than 30 days ago (--now: everything in Recently Deleted).
+    EmptyDeleted {
+        #[arg(long)]
+        now: bool,
+    },
+    /// The roles you're interviewing for: where each stands, rename, archive, merge.
+    Role {
+        #[command(subcommand)]
+        action: RoleCmd,
+    },
+    /// Rename or archive a company (its roles and interviews).
+    Company {
+        #[command(subcommand)]
+        action: CompanyCmd,
+    },
+    /// Find interviews by title, company, role, or anything said in them.
+    Search {
+        query: String,
         #[arg(long)]
         json: bool,
     },
@@ -218,6 +289,34 @@ enum Cmd {
     Jev {
         #[command(subcommand)]
         action: JevCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RoleCmd {
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// interviewing, offer, accepted, rejected or withdrawn.
+    Status { id: i64, status: String },
+    Rename { id: i64, title: String },
+    Archive {
+        id: i64,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Move every interview of one role into another, and remove the first.
+    Merge { from: i64, into: i64 },
+}
+
+#[derive(Subcommand)]
+enum CompanyCmd {
+    Rename { old: String, new: String },
+    Archive {
+        name: String,
+        #[arg(long)]
+        undo: bool,
     },
 }
 
@@ -694,67 +793,32 @@ fn finish_recording(db: &mut Db, settings: &Settings, id: i64, analyze: bool, st
     after_transcription(db, settings, id, analyze)
 }
 
-/// One row of `ic list --json`.
-#[derive(serde::Serialize)]
-struct SessionRow {
-    id: i64,
-    created_at: String,
-    title: String,
-    company: Option<String>,
-    stage: Option<&'static str>,
-    status: &'static str,
-    mode: &'static str,
-    duration_s: Option<f64>,
-    dir: String,
-    verdict: Option<&'static str>,
-    verdict_label: Option<&'static str>,
-    outcome: Option<&'static str>,
-    outcome_label: Option<&'static str>,
-    report_path: Option<String>,
-    transcript_path: Option<String>,
-    error: Option<String>,
-}
-
-fn list_json(db: &Db) -> Result<()> {
-    let (verdicts, outcomes, companies) = (db.latest_verdicts()?, db.all_outcomes()?, db.latest_companies()?);
-    let existing = |dir: &str, name: &str| {
-        let p = Path::new(dir).join(name);
-        p.exists().then(|| p.display().to_string())
-    };
-    let rows: Vec<SessionRow> = db
-        .list_sessions()?
-        .into_iter()
-        .map(|s| SessionRow {
-            id: s.id,
-            stage: s.stage.map(|st| st.label()),
-            status: s.status.as_str(),
-            mode: s.mode.as_str(),
-            verdict: verdicts.get(&s.id).map(|v| v.as_str()),
-            verdict_label: verdicts.get(&s.id).map(|v| v.label()),
-            outcome: outcomes.get(&s.id).map(|o| o.result.as_str()),
-            outcome_label: outcomes.get(&s.id).map(|o| o.result.label()),
-            report_path: existing(&s.dir, "report.html"),
-            transcript_path: existing(&s.dir, "transcript.md"),
-            created_at: s.created_at,
-            title: s.title,
-            company: s.company.or_else(|| companies.get(&s.id).cloned()),
-            duration_s: s.duration_s,
-            dir: s.dir,
-            error: s.error,
-        })
-        .collect();
-    outln!("{}", serde_json::to_string(&rows)?);
+/// `ic list --json`: the interviews in the main list (not archived or deleted). With `--all`, every
+/// interview (flagged) and every role, as the app shows them.
+fn list_json(db: &Db, all: bool) -> Result<()> {
+    let lib = library::library(db)?;
+    if all {
+        outln!("{}", serde_json::to_string(&lib)?);
+    } else {
+        let shown: Vec<_> = lib.sessions.into_iter().filter(|s| !s.archived && s.deleted_days_left.is_none()).collect();
+        outln!("{}", serde_json::to_string(&shown)?);
+    }
     Ok(())
 }
 
-fn list(settings: &Settings, json: bool) -> Result<()> {
+fn list(settings: &Settings, json: bool, all: bool) -> Result<()> {
     let db = open_db(settings)?;
     if json {
-        return list_json(&db);
+        return list_json(&db, all);
     }
-    let sessions = db.list_sessions()?;
+    let sessions: Vec<_> = db.list_sessions()?.into_iter()
+        .filter(|s| all || (s.archived_at.is_none() && s.deleted_at.is_none())).collect();
     if sessions.is_empty() {
-        outln!("No sessions yet. Try: ic record   or   ic import path/to/interview.m4a");
+        if db.list_sessions()?.is_empty() {
+            outln!("No sessions yet. Try: ic record   or   ic import path/to/interview.m4a");
+        } else {
+            outln!("Everything is archived or in Recently Deleted. See them with: ic list --all");
+        }
         return Ok(());
     }
     let (verdicts, outcomes, companies) = (db.latest_verdicts()?, db.all_outcomes()?, db.latest_companies()?);
@@ -857,6 +921,102 @@ fn list_models(settings: &Settings, json: bool) -> Result<()> {
                                interview_coach::catalog::TYPICAL_INPUT_TOKENS / 1000.0,
                                interview_coach::catalog::TYPICAL_OUTPUT_TOKENS / 1000.0)).dim());
     outln!("{}", style("Re-run a report with one: ic run report <id> --model <model>   (or --model cheapest)").dim());
+    Ok(())
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+struct EditArgs {
+    title: Option<String>,
+    company: Option<String>,
+    no_company: bool,
+    role: Option<String>,
+    role_id: Option<i64>,
+    no_role: bool,
+    round: Option<String>,
+}
+
+fn edit(db: &Db, id: i64, a: EditArgs) -> Result<()> {
+    let before = db.get_session(id)?;
+    let mut changed = vec![];
+    if let Some(title) = a.title.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != before.title) {
+        db.set_title(id, title)?;
+        changed.push("title");
+    }
+    let company = if a.no_company { Some(None) } else { a.company.as_deref().map(|c| Some(c.trim()).filter(|c| !c.is_empty())) };
+    if let Some(company) = company.filter(|c| c.map(String::from) != before.company) {
+        db.set_company(id, company)?;
+        changed.push("company");
+        // Its role moves with it: the same title, at the new company.
+        if a.role.is_none() && a.role_id.is_none() && !a.no_role
+            && let Some(role) = before.role_id.map(|r| db.role(r)).transpose()?
+            && role.company.as_deref().map(library::company_key) != company.map(library::company_key)
+        {
+            let moved = db.find_or_create_role(company, &role.title)?;
+            db.set_session_role(id, Some(moved.id))?;
+        }
+    }
+    if a.no_role {
+        db.set_session_role(id, None)?;
+    } else if let Some(role_id) = a.role_id {
+        db.role(role_id)?;
+        db.set_session_role(id, Some(role_id))?;
+    } else if let Some(title) = a.role.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        let session = db.get_session(id)?;
+        let inferred = db.latest_companies()?.remove(&id);
+        let current_role = session.role_id.map(|r| db.role(r)).transpose()?;
+        let company = library::display_company(&session, current_role.as_ref(), inferred.as_deref());
+        let role = db.find_or_create_role(company.as_deref(), title)?;
+        db.set_session_role(id, Some(role.id))?;
+    }
+    if let Some(round) = a.round.as_deref() {
+        let stage = match round {
+            "none" | "" => None,
+            r => Some(r.parse::<interview_coach::models::Stage>().map_err(|e| anyhow::anyhow!(e))?),
+        };
+        db.set_stage(id, stage)?;
+    }
+    outln!("{} Saved.", style("✓").green());
+    if !changed.is_empty() {
+        outln!("{}", style(format!("The report reads the {}, so re-running it will make a new version.", changed.join(" and "))).dim());
+    }
+    Ok(())
+}
+
+fn role_cmd(db: &Db, action: RoleCmd) -> Result<()> {
+    match action {
+        RoleCmd::List { json } => {
+            let lib = library::library(db)?;
+            if json {
+                outln!("{}", serde_json::to_string(&lib.roles)?);
+            } else {
+                for r in &lib.roles {
+                    let n = lib.sessions.iter().filter(|s| s.role_id == Some(r.id) && s.deleted_days_left.is_none()).count();
+                    outln!("{:>4}  {:<28} {:<24} {:<12} {}{}", r.id, r.title, r.company.as_deref().unwrap_or("—"), r.status_label,
+                           plural(n, "interview"), if r.archived { " (archived)" } else { "" });
+                }
+            }
+        }
+        RoleCmd::Status { id, status } => {
+            let status: interview_coach::models::RoleStatus = status.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            db.set_role_status(id, status)?;
+            outln!("{} {} is now {}.", style("✓").green(), db.role(id)?.title, status.label());
+        }
+        RoleCmd::Rename { id, title } => {
+            db.rename_role(id, &title)?;
+            outln!("{} Renamed.", style("✓").green());
+        }
+        RoleCmd::Archive { id, undo } => {
+            db.set_role_archived(id, !undo)?;
+            outln!("{} {} {}.", style("✓").green(), if undo { "Brought back" } else { "Archived" }, db.role(id)?.title);
+        }
+        RoleCmd::Merge { from, into } => {
+            db.merge_role(from, into)?;
+            outln!("{} Merged into {}.", style("✓").green(), db.role(into)?.title);
+        }
+    }
     Ok(())
 }
 
@@ -1258,7 +1418,78 @@ fn run() -> Result<()> {
             after_transcription(&mut db, &settings, session.id, !no_analyze)
         }
         Cmd::Transcribe { id } => run_transcription(&mut open_db(&settings)?, &settings, id),
-        Cmd::List { json } => list(&settings, json),
+        Cmd::List { json, all } => list(&settings, json, all),
+        Cmd::Edit { id, title, company, no_company, role, role_id, no_role, round } => {
+            edit(&open_db(&settings)?, id, EditArgs { title, company, no_company, role, role_id, no_role, round })
+        }
+        Cmd::Archive { ids, undo } => {
+            let db = open_db(&settings)?;
+            for id in &ids {
+                library::archive(&db, *id, !undo)?;
+            }
+            outln!("{} {} {}.", style("✓").green(), if undo { "Brought back" } else { "Archived" }, plural(ids.len(), "interview"));
+            Ok(())
+        }
+        Cmd::Delete { ids } => {
+            let db = open_db(&settings)?;
+            for id in &ids {
+                library::delete(&db, *id)?;
+            }
+            outln!("{} Moved {} to Recently Deleted: restore with ic restore, or it's erased in {} days.",
+                   style("✓").green(), plural(ids.len(), "interview"), library::DELETED_DAYS);
+            Ok(())
+        }
+        Cmd::Restore { ids } => {
+            let db = open_db(&settings)?;
+            for id in &ids {
+                library::restore(&db, *id)?;
+            }
+            outln!("{} Restored {}.", style("✓").green(), plural(ids.len(), "interview"));
+            Ok(())
+        }
+        Cmd::Erase { ids } => {
+            let db = open_db(&settings)?;
+            for id in &ids {
+                library::erase(&db, &settings, *id)?;
+            }
+            outln!("Erased {} for good.", plural(ids.len(), "interview"));
+            Ok(())
+        }
+        Cmd::EmptyDeleted { now } => {
+            let db = open_db(&settings)?;
+            let erased = library::empty_deleted(&db, &settings, if now { 0 } else { library::DELETED_DAYS })?;
+            if !erased.is_empty() {
+                outln!("Erased {} for good.", plural(erased.len(), "interview"));
+            }
+            Ok(())
+        }
+        Cmd::Role { action } => role_cmd(&open_db(&settings)?, action),
+        Cmd::Company { action } => {
+            let db = open_db(&settings)?;
+            match action {
+                CompanyCmd::Rename { old, new } => {
+                    let n = db.rename_company(&old, &new)?;
+                    outln!("{} Renamed {old} to {new} ({n} roles and interviews).", style("✓").green());
+                }
+                CompanyCmd::Archive { name, undo } => {
+                    let n = library::archive_company(&db, &name, !undo)?;
+                    outln!("{} {} {name} ({n} roles and interviews).", style("✓").green(), if undo { "Brought back" } else { "Archived" });
+                }
+            }
+            Ok(())
+        }
+        Cmd::Search { query, json } => {
+            let hits = library::search(&open_db(&settings)?, &query)?;
+            if json {
+                outln!("{}", serde_json::to_string(&hits)?);
+            } else {
+                for h in &hits {
+                    let at = h.at.map(|a| format!(" {}", fmt_ts(a))).unwrap_or_default();
+                    outln!("{:>4} {:<10}{at} {}", h.session_id, h.kind, h.text);
+                }
+            }
+            Ok(())
+        }
         Cmd::Recording { action } => match action {
             RecordingCmd::Begin { title, company } => {
                 let db = open_db(&settings)?;

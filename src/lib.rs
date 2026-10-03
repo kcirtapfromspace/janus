@@ -41,6 +41,7 @@ pub mod diarize;
 pub mod download;
 pub mod eval;
 pub mod history;
+pub mod library;
 pub mod events;
 pub mod merge;
 pub mod metrics;

@@ -375,6 +375,10 @@ pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i6
                                   stored.answer_checks.first().map(|c| c.scorer.clone()))?;
             db.set_analysis_inputs(stored.id, &inputs)?;
         }
+        // File it under the company and role it inferred, the first time only.
+        if !reused {
+            crate::library::file_from(db, id, &stored)?;
+        }
         let stored = db.analysis_by_id(stored.id)?.unwrap_or(stored);
         let analysis_id = stored.id;
         Ok((stored, Some(analysis_id)))
@@ -457,6 +461,7 @@ fn manifest(db: &Db, session: &Session, model: &ModelRef, timeline_scorer: Optio
         transcript_run_id: steps::current_run(db, session.id, Step::Transcript)?.map(|r| r.id).unwrap_or_default(),
         transcript_sha: versions::transcript_sha(&segments),
         title: session.title.clone(),
+        company: session.company.clone(),
         model: model.to_string(),
         prompt_version: PROMPT_VERSION.into(),
         timeline_method: temperature::METHOD.into(),
@@ -514,8 +519,9 @@ fn analyze_inner(db: &mut Db, llm: &dyn Llm, model: &ModelRef, mut session: Sess
                                  Some(&inputs), parent)?;
     session.status = Status::Analyzed;
     session.error = None;
-    session.stage = Some(analysis.context.stage);
     db.save_session(&session)?;
+    // The round it detected, unless one is set (yours, or an earlier report's).
+    db.set_stage_if_unset(session.id, analysis.context.stage)?;
     std::fs::write(Path::new(&session.dir).join("analysis.json"), serde_json::to_string_pretty(&stored)?)?;
     Ok((stored, warnings))
 }
