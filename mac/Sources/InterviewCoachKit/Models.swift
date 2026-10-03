@@ -5,6 +5,7 @@ public struct ModelOffer: Decodable, Equatable, Identifiable {
     /// `provider/model`, as `--model` takes it.
     public let model: String
     public let provider: String
+    public let displayName: String?
     public let inputPerMtok: Double?
     public let outputPerMtok: Double?
     /// Dollars for a typical report at list price.
@@ -14,7 +15,7 @@ public struct ModelOffer: Decodable, Equatable, Identifiable {
     public var id: String { model }
 
     /// `claude-opus-5-5`, without the provider.
-    public var name: String { model.split(separator: "/", maxSplits: 1).last.map(String.init) ?? model }
+    public var name: String { displayName ?? model.split(separator: "/", maxSplits: 1).last.map(String.init) ?? model }
 
     /// "about $0.06 a report"
     public var priceLabel: String? {

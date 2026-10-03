@@ -13,7 +13,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Find an executable on PATH.
 pub fn which(cmd: &str) -> Option<PathBuf> {
-    env::split_paths(&env::var_os("PATH")?).map(|dir| dir.join(cmd)).find(|p| p.is_file())
+    env::split_paths(&env::var_os("PATH")?)
+        .map(|dir| dir.join(cmd))
+        .find(|p| p.is_file())
 }
 
 /// An LLM provider ic has a native adapter for.
@@ -69,7 +71,9 @@ impl FromStr for Provider {
         match s.to_ascii_lowercase().as_str() {
             "anthropic" => Ok(Provider::Anthropic),
             "openai" => Ok(Provider::OpenAi),
-            other => Err(format!("unknown provider {other:?} (expected anthropic or openai)")),
+            other => Err(format!(
+                "unknown provider {other:?} (expected anthropic or openai)"
+            )),
         }
     }
 }
@@ -90,14 +94,19 @@ pub struct ModelRef {
 impl FromStr for ModelRef {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, String> {
-        let (provider, name) = s
-            .split_once('/')
-            .ok_or_else(|| format!("{s:?} needs a provider prefix, e.g. anthropic/claude-opus-5-5 or openai/gpt-5.6"))?;
+        let (provider, name) = s.split_once('/').ok_or_else(|| {
+            format!(
+                "{s:?} needs a provider prefix, e.g. anthropic/claude-opus-5-5 or openai/gpt-5.6"
+            )
+        })?;
         let name = name.trim();
         if name.is_empty() || name.contains(char::is_whitespace) {
             return Err(format!("{s:?} has an invalid model name"));
         }
-        Ok(ModelRef { provider: provider.trim().parse()?, name: name.to_string() })
+        Ok(ModelRef {
+            provider: provider.trim().parse()?,
+            name: name.to_string(),
+        })
     }
 }
 
@@ -115,7 +124,9 @@ impl Serialize for ModelRef {
 
 impl<'de> Deserialize<'de> for ModelRef {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -136,8 +147,12 @@ impl FromStr for ScorerRef {
         }
         match s.split_once('/') {
             Some(("typesafe", m)) if !m.trim().is_empty() => Ok(ScorerRef::Jev(m.trim().into())),
-            Some(("anthropic", m)) if !m.trim().is_empty() => Ok(ScorerRef::Claude(m.trim().into())),
-            _ => Err(format!("{s:?} isn't a scorer (use typesafe/jev-latest, anthropic/<model>, or off)")),
+            Some(("anthropic", m)) if !m.trim().is_empty() => {
+                Ok(ScorerRef::Claude(m.trim().into()))
+            }
+            _ => Err(format!(
+                "{s:?} isn't a scorer (use typesafe/jev-latest, anthropic/<model>, or off)"
+            )),
         }
     }
 }
@@ -160,18 +175,22 @@ impl Serialize for ScorerRef {
 
 impl<'de> Deserialize<'de> for ScorerRef {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
     }
 }
 
-/// Off until the Jev vs Claude comparison (docs/eval/scorer-decision.md) picks a scorer, so reports
-/// never show answer checks from an unvalidated scorer.
+/// Jev is the core evaluation service; the separate eval command compares scoring quality.
 pub fn default_scorer() -> ScorerRef {
-    ScorerRef::Off
+    ScorerRef::Jev(crate::llm::jev::DEFAULT_MODEL.into())
 }
 
 pub fn default_model() -> ModelRef {
-    ModelRef { provider: Provider::Anthropic, name: "claude-opus-5-5".into() }
+    ModelRef {
+        provider: Provider::Anthropic,
+        name: "claude-opus-5-5".into(),
+    }
 }
 
 /// ~/InterviewCoach/config.toml. Every field is optional; unknown keys are an error.
@@ -197,7 +216,9 @@ pub struct FileConfig {
 impl FileConfig {
     pub fn read(path: &Path) -> Result<Self> {
         match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text).with_context(|| format!("invalid {}", path.display())),
+            Ok(text) => {
+                toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileConfig::default()),
             Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
         }
@@ -213,8 +234,12 @@ impl FileConfig {
 fn validate_language(value: &str) -> Result<Option<String>, String> {
     match value {
         "auto" => Ok(None),
-        v if (2..=3).contains(&v.len()) && v.chars().all(|c| c.is_ascii_lowercase()) => Ok(Some(v.to_string())),
-        v => Err(format!("{v:?} isn't a language code (use e.g. \"en\", or \"auto\")")),
+        v if (2..=3).contains(&v.len()) && v.chars().all(|c| c.is_ascii_lowercase()) => {
+            Ok(Some(v.to_string()))
+        }
+        v => Err(format!(
+            "{v:?} isn't a language code (use e.g. \"en\", or \"auto\")"
+        )),
     }
 }
 
@@ -250,20 +275,35 @@ fn home() -> PathBuf {
 
 impl Settings {
     pub fn load() -> Result<Self> {
-        let data_dir = env::var_os("IC_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| home().join("InterviewCoach"));
+        let data_dir = env::var_os("IC_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join("InterviewCoach"));
         let file = FileConfig::read(&data_dir.join("config.toml"))?;
         let language = match env::var("IC_LANGUAGE") {
             Ok(v) => validate_language(&v).map_err(|e| anyhow!("IC_LANGUAGE: {e}"))?,
-            Err(_) => validate_language(file.language.as_deref().unwrap_or("en")).map_err(|e| anyhow!("config.toml language: {e}"))?,
+            Err(_) => validate_language(file.language.as_deref().unwrap_or("en"))
+                .map_err(|e| anyhow!("config.toml language: {e}"))?,
         };
         Ok(Settings {
-            models_dir: env::var_os("IC_MODELS_DIR").map(PathBuf::from).or(file.models_dir).unwrap_or_else(|| {
-                dirs::cache_dir().unwrap_or_else(|| home().join("Library/Caches")).join("InterviewCoach/models")
-            }),
-            whisper_model: env::var("IC_WHISPER_MODEL").ok().or(file.whisper_model).unwrap_or_else(|| "large-v3-turbo".into()),
+            models_dir: env::var_os("IC_MODELS_DIR")
+                .map(PathBuf::from)
+                .or(file.models_dir)
+                .unwrap_or_else(|| {
+                    dirs::cache_dir()
+                        .unwrap_or_else(|| home().join("Library/Caches"))
+                        .join("InterviewCoach/models")
+                }),
+            whisper_model: env::var("IC_WHISPER_MODEL")
+                .ok()
+                .or(file.whisper_model)
+                .unwrap_or_else(|| "large-v3-turbo".into()),
             language,
-            model: env_parse::<ModelRef>("IC_MODEL")?.or(file.model).unwrap_or_else(default_model),
-            scorer: env_parse::<ScorerRef>("IC_SCORER")?.or(file.scorer).unwrap_or_else(default_scorer),
+            model: env_parse::<ModelRef>("IC_MODEL")?
+                .or(file.model)
+                .unwrap_or_else(default_model),
+            scorer: env_parse::<ScorerRef>("IC_SCORER")?
+                .or(file.scorer)
+                .unwrap_or_else(default_scorer),
             data_dir,
         })
     }
@@ -287,11 +327,24 @@ mod tests {
 
     #[test]
     fn scorers_parse_and_print() {
-        assert_eq!("typesafe/jev-latest".parse::<ScorerRef>(), Ok(ScorerRef::Jev("jev-latest".into())));
-        assert_eq!("anthropic/claude-haiku-4-5-20251001".parse::<ScorerRef>().unwrap().to_string(),
-                   "anthropic/claude-haiku-4-5-20251001");
+        assert_eq!(
+            "typesafe/jev-latest".parse::<ScorerRef>(),
+            Ok(ScorerRef::Jev("jev-latest".into()))
+        );
+        assert_eq!(
+            "anthropic/claude-haiku-4-5-20251001"
+                .parse::<ScorerRef>()
+                .unwrap()
+                .to_string(),
+            "anthropic/claude-haiku-4-5-20251001"
+        );
         assert_eq!("off".parse::<ScorerRef>(), Ok(ScorerRef::Off));
-        assert!("openai/gpt-5".parse::<ScorerRef>().unwrap_err().contains("isn't a scorer"));
+        assert!(
+            "openai/gpt-5"
+                .parse::<ScorerRef>()
+                .unwrap_err()
+                .contains("isn't a scorer")
+        );
     }
 
     #[test]
@@ -299,24 +352,42 @@ mod tests {
         let m: ModelRef = "openai/gpt-5.6".parse().unwrap();
         assert_eq!((m.provider, m.name.as_str()), (Provider::OpenAi, "gpt-5.6"));
         assert_eq!(m.to_string(), "openai/gpt-5.6");
-        assert!("claude-opus-5-5".parse::<ModelRef>().unwrap_err().contains("provider prefix"));
-        assert!("mistral/large".parse::<ModelRef>().unwrap_err().contains("unknown provider"));
+        assert!(
+            "claude-opus-5-5"
+                .parse::<ModelRef>()
+                .unwrap_err()
+                .contains("provider prefix")
+        );
+        assert!(
+            "mistral/large"
+                .parse::<ModelRef>()
+                .unwrap_err()
+                .contains("unknown provider")
+        );
         assert!("anthropic/".parse::<ModelRef>().is_err());
     }
 
     #[test]
     fn config_file_is_typed_and_rejects_unknown_keys() {
-        let ok: FileConfig = toml::from_str("model = \"openai/gpt-5.6\"\nlanguage = \"de\"\n").unwrap();
+        let ok: FileConfig =
+            toml::from_str("model = \"openai/gpt-5.6\"\nlanguage = \"de\"\n").unwrap();
         assert_eq!(ok.model.unwrap().provider, Provider::OpenAi);
-        let typo = toml::from_str::<FileConfig>("modle = \"openai/gpt-5.6\"\n").unwrap_err().to_string();
+        let typo = toml::from_str::<FileConfig>("modle = \"openai/gpt-5.6\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(typo.contains("modle"), "{typo}");
-        let bad_model = toml::from_str::<FileConfig>("model = \"gpt-5.6\"\n").unwrap_err().to_string();
+        let bad_model = toml::from_str::<FileConfig>("model = \"gpt-5.6\"\n")
+            .unwrap_err()
+            .to_string();
         assert!(bad_model.contains("provider prefix"), "{bad_model}");
     }
 
     #[test]
     fn config_roundtrips_through_toml() {
-        let cfg = FileConfig { model: Some("openai/gpt-5.6".parse().unwrap()), ..Default::default() };
+        let cfg = FileConfig {
+            model: Some("openai/gpt-5.6".parse().unwrap()),
+            ..Default::default()
+        };
         let text = toml::to_string_pretty(&cfg).unwrap();
         assert_eq!(text.trim(), "model = \"openai/gpt-5.6\"");
         assert_eq!(toml::from_str::<FileConfig>(&text).unwrap(), cfg);

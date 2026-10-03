@@ -7,8 +7,25 @@ public struct SetupStatus: Decodable, Equatable {
     public let remaining: Int
     public let model: String
     public let checks: [SetupCheck]
+    public let openai: ChatGPTStatus?
 
     public func check(_ id: String) -> SetupCheck? { checks.first { $0.id == id } }
+}
+
+/// Basic account information only; credentials never cross the CLI/app status boundary.
+public struct ChatGPTStatus: Decodable, Equatable {
+    public let active: String?
+    public let email: String?
+    public let signedIn: Bool
+    public let planEnabled: Bool
+    public let usingApiKey: Bool
+    public let accounts: [ChatGPTAccount]
+}
+
+public struct ChatGPTAccount: Decodable, Equatable, Identifiable {
+    public let clientId: String
+    public let label: String
+    public var id: String { clientId }
 }
 
 public struct SetupCheck: Decodable, Equatable, Identifiable {
@@ -33,6 +50,8 @@ public struct SetupAction: Decodable, Equatable {
         case run(step: String)
         case openURL(URL)
         /// `ic login --events`
+        case chatGptSignIn(account: String?, newAccount: Bool, enablePlan: Bool)
+        case chatGptSignOut
         case signIn
         /// `ic login --switch --events`: sign out, then sign in with another account
         case switchAccount
@@ -44,7 +63,7 @@ public struct SetupAction: Decodable, Equatable {
     public let kind: Kind
 
     private enum CodingKeys: String, CodingKey {
-        case label, kind, step, url, target
+        case label, kind, step, url, target, account, newAccount, enablePlan
     }
 
     public init(label: String, kind: Kind) {
@@ -63,6 +82,11 @@ public struct SetupAction: Decodable, Equatable {
                 throw DecodingError.dataCorruptedError(forKey: .url, in: c, debugDescription: "bad URL \(text)")
             }
             kind = .openURL(url)
+        case "chat_gpt_sign_in": kind = .chatGptSignIn(
+            account: try c.decodeIfPresent(String.self, forKey: .account),
+            newAccount: try c.decode(Bool.self, forKey: .newAccount),
+            enablePlan: try c.decode(Bool.self, forKey: .enablePlan))
+        case "chat_gpt_sign_out": kind = .chatGptSignOut
         case "sign_in": kind = .signIn
         case "switch_account": kind = .switchAccount
         case "key": kind = .key(target: try c.decode(String.self, forKey: .target))

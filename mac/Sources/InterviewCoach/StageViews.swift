@@ -300,7 +300,9 @@ struct RerunMenu: View {
             } else {
                 Button("With \(defaultModel.map(shortName) ?? "the default model")") { model.rerun(step) }
             }
-            Button(cheapestLabel) { model.rerun(step, options: ["--model", "cheapest"]) }
+            if model.modelOffers.contains(where: \.cheapest) {
+                Button(cheapestLabel) { model.rerun(step, options: ["--model", "cheapest"]) }
+            }
             Divider()
             if model.modelOffers.isEmpty {
                 Text("Loading your models…")

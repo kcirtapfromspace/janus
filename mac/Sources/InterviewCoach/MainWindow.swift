@@ -57,7 +57,7 @@ struct MainWindow: View {
                 .help("Show this interview's folder in Finder")
                 .disabled(selected == nil)
             Button("Setup", systemImage: "gearshape") { openWindow(id: "setup") }
-                .help("Set up Interview Coach: Docker, the AI proxy, sign-in, models, keys, recording test")
+                .help("Set up Interview Coach: browser sign-in, coaching model, speech models and recording test")
         }
     }
 

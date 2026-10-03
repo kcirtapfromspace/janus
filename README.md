@@ -1,15 +1,19 @@
 # Interview Coach
 
-Record your job interviews, get a full transcript, find out how each one really went, and get
-coached on what to improve. It runs locally on your Mac: audio never leaves the machine, and only
-the transcript text goes to the model you choose (Claude or OpenAI) for analysis.
+Turn every interview into a better next interview. Record or import an interview, review the
+transcript and evidence behind your feedback, and get a focused practice plan for the next round.
+Audio is processed locally on your Mac. Transcript text goes to your chosen coaching provider
+(Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe.
+
+The setup below describes the current source. Published previews may still use the earlier
+native provider setup and required Jev evaluation in preview 11.
 
 ## Install on a Mac
 
 Download the notarized app from **[interview-coach-releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest)**,
-move it to Applications, and open it. Its **Setup** window walks through the rest: Docker Desktop (the
-only thing to install yourself), the local AI proxy, signing in to Claude in your browser, the speech
-models, and a 5-second recording test. ffmpeg and Anthropic's `ant` come inside the app. It updates
+move it to Applications, and open it. Its **Setup** window walks through browser sign-in with
+Claude or ChatGPT, choosing a coaching model, downloading the local speech models, and a 5-second
+recording test. Core coaching does not need Docker. ffmpeg and Anthropic's `ant` come inside the app. It updates
 itself after that. Releasing is described in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Build from source
@@ -19,8 +23,8 @@ mac/build.sh               # builds `ic`, both Mac apps, and the bundled ffmpeg 
 open "mac/build/Interview Coach.app"   # its Setup window does the rest
 ```
 
-From the command line instead: `ic setup status` shows what's left, `ic setup run all` starts Docker,
-sets up the AI proxy and downloads the models, and `ic login` signs you in to Claude.
+From the command line instead: `ic setup status` shows what's left, `ic setup run all` downloads
+the speech models, and `ic login` signs you in to Claude. Use `ic login --provider openai` for ChatGPT.
 (`cargo install --path .` puts `ic` on your PATH; outside the app it uses ffmpeg and `ant` from PATH,
 or `IC_FFMPEG` / `IC_ANT`.)
 
@@ -42,50 +46,78 @@ the app and the command line share the same data in `~/InterviewCoach`.
 
 ### Models: Claude or OpenAI
 
-Analysis works with either provider. The default is `anthropic/claude-opus-5-5`; switch per command
-or permanently:
+Analysis works with either provider. The existing default remains `anthropic/claude-opus-5-5`.
+Sign in and choose a model in Setup, or use the CLI:
 
 ```sh
-ic analyze 3 --model openai/gpt-5.6        # one-off
-ic config set model openai/gpt-5.6         # new default (saved to ~/InterviewCoach/config.toml)
-ic proxy key openai                        # OpenAI needs an API key in the proxy (see below)
+ic login                                  # Claude browser sign-in
+ic login --provider openai                # Continue with ChatGPT
+ic proxy key typesafe                     # required Jev evaluation key
+ic models                                 # account-specific available models
+ic config set model openai/<model>         # choose a model from that list
+ic analyze 3 --model openai/<model>         # one-off
 ```
 
-**Claude uses your browser login — no API key.** `ic login` runs Anthropic's CLI
-(`brew tap anthropics/tap && brew install anthropics/tap/ant`), which opens the browser so you can
-approve access and then keeps the session (a short-lived access token plus a refresh token) in its
-own credential store. Before each Claude request, `ic` asks it for a fresh access token; LiteLLM
-forwards that token to Anthropic. The session is saved as an `interview-coach` profile used only by
-`ic`, so it doesn't change the account other tools (such as Claude Code) use. If the login ever
-expires, `ic doctor` says so; run `ic login` again.
+**ChatGPT browser sign-in** uses OpenAI's documented OAuth/OIDC public-client flow: a local
+`127.0.0.1` callback, PKCE, state and nonce verification, and signature-verified identity tokens.
+Each installation keeps a stable host identifier, and each account/workspace registration keeps
+its issued client ID. Setup offers saved accounts, **Add ChatGPT account**, **Sign out**, and
+**Manage ChatGPT usage**. A new sign-in becomes active only after verification succeeds.
 
-**OpenAI's API has no browser login**, so it's opt-in: `ic proxy key openai` opens OpenAI's key page
-and stores the key in the proxy (never in `ic`).
+Eligible AI requests can use the user's ChatGPT plan when `chatgpt.tokens.use.direct` permission
+is granted. Identity sign-in alone does not authorize inference. Choose **Enable plan usage**
+if permission is missing. OpenAI currently documents this flow for open-source and locally hosted
+apps; eligibility for a paid release remains a launch gate, not an assumption.
+See [OpenAI's integration documentation](https://developers.openai.com/siwc/token-sharing-open-source).
 
-Each provider has a native adapter (Claude's Messages API, OpenAI's Responses API), both behind one
-typed interface: the JSON schema the model must follow is generated from the Rust `SessionAnalysis`
-type, and every answer is parsed and validated back into it, whichever model wrote it. Each stored
-analysis records the `provider/model` that produced it. OpenAI requests are sent with `store: false`,
-so transcripts aren't kept on OpenAI's servers.
+Access tokens refresh near expiry, with a process lock to protect rotating refresh tokens.
+Credentials are atomically saved with owner-only permissions (`0600`) under
+`~/InterviewCoach/auth/openai.json`, in a `0700` directory. They are excluded from setup status,
+logs, and support output. Signing out clears the selected account's tokens and attempts remote
+revocation while retaining its registration and host ID for later sign-in. If remote revocation
+cannot be confirmed, the app asks you to disconnect it in ChatGPT Settings.
 
-### The LLM proxy
+**API billing is an explicit alternative.** `ic proxy key openai` retains its familiar command
+name, but saves the key in private local storage without starting Docker. Adding a key selects
+API billing; signing in with ChatGPT selects plan usage. An expired, denied, or usage-limited
+ChatGPT session never silently switches to a stored API key. Existing OpenAI keys in the legacy
+proxy's local `.env` remain usable until you select ChatGPT sign-in.
 
-Every LLM request goes through a local [LiteLLM](https://docs.litellm.ai) proxy running in Docker
-on `127.0.0.1:4000` (loopback only), using its pass-through routes (`/anthropic/v1/messages`,
-`/openai_passthrough/v1/responses`) so requests reach each provider unchanged. `ic proxy setup`
-(run for you by `ic login`) writes its config to `~/InterviewCoach/litellm/` (secrets in `.env`,
-readable only by you), starts LiteLLM + Postgres, and gives `ic` its own LiteLLM virtual key: a
-local credential between `ic` and the proxy, generated automatically, that you never handle.
-Re-running setup is safe: it only fills in what's missing.
+**Claude uses your browser login.** `ic login` runs Anthropic's bundled CLI, approves access in
+the browser, and keeps the session in its dedicated `interview-coach` profile. Core requests go
+directly to Anthropic's Messages API, with a fresh access token per attempt. Other tools' profiles
+are unaffected. `ic logout` signs out of Claude; `ic logout --provider openai` signs out of ChatGPT.
+
+Both providers use native structured-output adapters. Every stored analysis records its model,
+and every response is validated against the Rust output type. OpenAI uses the public Responses
+API with `store: false` and `stream: true`; success requires a completed response event. Disabling
+response storage does not by itself establish a zero-retention policy. Native model catalogs do
+not estimate prices or label a model cheapest; use the account's available models in Setup.
+
+### Core Jev evaluation
+
+Jev evaluates answer quality and interviewer-reaction signals in every completed analysis.
+Configure your TypeSafe key in Setup, or run:
 
 ```sh
-ic proxy status            # is it up, and what has ic spent through it
-ic proxy stop / start      # containers stop; keys and spend history are kept
+ic proxy key typesafe
 ```
 
-To use a different LiteLLM proxy, set `IC_LLM_URL` and `IC_LLM_KEY`. The Whisper model (~1.6 GB) and
-the speaker-detection models download directly (not via LiteLLM) the first time they're needed,
-into `~/Library/Caches/InterviewCoach/models`. Set `HTTPS_PROXY` if those downloads need a proxy too.
+The command stores the key privately in `auth/typesafe.json`. Jev calls TypeSafe's native
+`/v1/systemone` API directly, so the normal workflow requires no Docker gateway.
+If evaluation fails or returns incomplete checks, the analysis remains unfinished. Recordings,
+transcripts and coaching are preserved; retrying reuses completed work and finishes the checks.
+Jev is the default evaluator. Legacy `off` or Claude scorer settings no longer disable Jev in
+the standard analysis workflow.
+
+### Advanced proxies
+
+Advanced users can set both `IC_LLM_URL` and `IC_LLM_KEY` to use a shared LiteLLM proxy for core
+requests. Remove those overrides to use the native ChatGPT flow. This proxy mode uses its own
+configured OpenAI API billing, rather than forwarding locally saved ChatGPT credentials.
+
+Speech models download into `~/Library/Caches/InterviewCoach/models`. Set `HTTPS_PROXY` if model
+downloads need a network proxy.
 
 ### Settings
 

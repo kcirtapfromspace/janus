@@ -15,6 +15,12 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+fs2 = "0.4"
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+rand = "0.9"
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 clap = { version = "4.6", features = ["derive"] }
 console = "0.16"
@@ -24,7 +30,7 @@ indicatif = "0.18"
 libc = "0.2"
 regex = "1.13"
 rpassword = "7.5"
-reqwest = { version = "0.13", features = ["blocking", "json"] }
+reqwest = { version = "0.13", features = ["blocking", "json", "form"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1.2"
 serde = { version = "1", features = ["derive"] }
@@ -38,4 +44,3 @@ whisper-rs = { version = "0.16", features = ["metal"] }
 
 [dev-dependencies]
 hound = "3.5"
-tempfile = "3"

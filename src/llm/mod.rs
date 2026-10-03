@@ -1,9 +1,7 @@
 //! Provider-neutral LLM layer: one typed interface, a native adapter per provider.
 //!
-//! Every request is brokered by the local LiteLLM proxy through that provider's pass-through route,
-//! so each adapter speaks its provider's own API (keeping provider-specific features) while keys,
-//! spend, and logs stay in LiteLLM. Output types are Rust structs: the JSON schema sent to the
-//! model is derived from the type, and the response is parsed and validated back into it.
+//! Normal requests use native provider APIs; explicitly configured external gateways remain supported.
+//! JSON schemas are derived from Rust output types, then responses are parsed and validated.
 
 pub mod anthropic;
 pub mod jev;
@@ -51,8 +49,16 @@ pub enum LlmError {
     Overloaded,
     #[error("model API error {status}: {message}")]
     Api { status: u16, message: String },
-    #[error("couldn't reach the LLM proxy: {0} — is it running? Try: ic proxy start")]
+    #[error("couldn't reach the AI service: {0} — check your internet connection and try again")]
     Network(String),
+    #[error(
+        "ChatGPT usage limit reached. Review app limits in ChatGPT Settings → Usage (https://chatgpt.com/settings/usage), then try again."
+    )]
+    PlanLimit,
+    #[error(
+        "ChatGPT plan usage is unavailable for this account or workspace. Check your account and permissions in Setup."
+    )]
+    PlanUnavailable,
     #[error("the model declined to analyse this ({0})")]
     Refusal(String),
     #[error("the response was cut off (hit the output-token limit) — try again")]
@@ -87,7 +93,11 @@ pub struct StructuredRequest<'a> {
 /// Anything that can answer a structured request — a provider adapter, or a fake in tests.
 /// `on_progress` receives the number of output characters so far (0 while the model is thinking).
 pub trait Llm {
-    fn structured(&self, req: &StructuredRequest, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError>;
+    fn structured(
+        &self,
+        req: &StructuredRequest,
+        on_progress: &mut dyn FnMut(usize),
+    ) -> Result<String, LlmError>;
 }
 
 /// A type the model can be asked to produce.
@@ -114,33 +124,79 @@ pub struct GenerateOptions {
 impl GenerateOptions {
     /// A long analysis: deep reasoning and room for a full report.
     pub fn analysis(effort: Effort) -> Self {
-        GenerateOptions { effort, max_tokens: 64_000 }
+        GenerateOptions {
+            effort,
+            max_tokens: 64_000,
+        }
     }
 }
 
 /// Ask the model for a `T`: the schema comes from the type, and the answer is parsed and validated.
-pub fn generate<T: StructuredOutput>(llm: &dyn Llm, model: &str, system: &str, user: &str, effort: Effort,
-                                     on_progress: &mut dyn FnMut(usize)) -> anyhow::Result<T> {
-    generate_with(llm, model, system, user, GenerateOptions::analysis(effort), on_progress)
+pub fn generate<T: StructuredOutput>(
+    llm: &dyn Llm,
+    model: &str,
+    system: &str,
+    user: &str,
+    effort: Effort,
+    on_progress: &mut dyn FnMut(usize),
+) -> anyhow::Result<T> {
+    generate_with(
+        llm,
+        model,
+        system,
+        user,
+        GenerateOptions::analysis(effort),
+        on_progress,
+    )
 }
 
-pub fn generate_with<T: StructuredOutput>(llm: &dyn Llm, model: &str, system: &str, user: &str, opts: GenerateOptions,
-                                          on_progress: &mut dyn FnMut(usize)) -> anyhow::Result<T> {
+pub fn generate_with<T: StructuredOutput>(
+    llm: &dyn Llm,
+    model: &str,
+    system: &str,
+    user: &str,
+    opts: GenerateOptions,
+    on_progress: &mut dyn FnMut(usize),
+) -> anyhow::Result<T> {
     let schema = schema_for::<T>();
-    let req = StructuredRequest { model, system, user, schema: &schema, schema_name: T::NAME, effort: opts.effort,
-                                  max_tokens: opts.max_tokens };
+    let req = StructuredRequest {
+        model,
+        system,
+        user,
+        schema: &schema,
+        schema_name: T::NAME,
+        effort: opts.effort,
+        max_tokens: opts.max_tokens,
+    };
     let text = llm.structured(&req, on_progress)?;
-    let value: T = serde_json::from_str(&text).with_context(|| format!("the model's {} didn't match the expected shape", T::NAME))?;
-    value.validate().map_err(|e| anyhow!("the model's {} failed validation: {e}", T::NAME))?;
+    let value: T = serde_json::from_str(&text)
+        .with_context(|| format!("the model's {} didn't match the expected shape", T::NAME))?;
+    value
+        .validate()
+        .map_err(|e| anyhow!("the model's {} failed validation: {e}", T::NAME))?;
     Ok(value)
 }
 
 /// Ask for JSON matching a schema built at runtime (e.g. from a list of checks), parsed but not typed.
-pub fn structured_value(llm: &dyn Llm, model: &str, system: &str, user: &str, schema: &Value, name: &str,
-                        opts: GenerateOptions) -> anyhow::Result<Value> {
+pub fn structured_value(
+    llm: &dyn Llm,
+    model: &str,
+    system: &str,
+    user: &str,
+    schema: &Value,
+    name: &str,
+    opts: GenerateOptions,
+) -> anyhow::Result<Value> {
     let schema = schema::strict(schema);
-    let req = StructuredRequest { model, system, user, schema: &schema, schema_name: name, effort: opts.effort,
-                                  max_tokens: opts.max_tokens };
+    let req = StructuredRequest {
+        model,
+        system,
+        user,
+        schema: &schema,
+        schema_name: name,
+        effort: opts.effort,
+        max_tokens: opts.max_tokens,
+    };
     let text = llm.structured(&req, &mut |_| {})?;
     serde_json::from_str(&text).with_context(|| format!("the model's {name} wasn't valid JSON"))
 }
@@ -153,6 +209,43 @@ pub fn client(model: &ModelRef, endpoint: LlmEndpoint) -> Box<dyn Llm> {
             Box::new(|| crate::auth::access_token().map_err(|e| LlmError::Auth(e.to_string()))),
         )),
         Provider::OpenAi => Box::new(openai::Client::new(endpoint)),
+    }
+}
+
+/// Normal installs use native APIs. Only explicitly configured shared proxies broker core calls.
+pub fn configured_client(
+    settings: &crate::config::Settings,
+    model: &ModelRef,
+) -> anyhow::Result<Box<dyn Llm>> {
+    if crate::proxy::using_external_proxy() {
+        return Ok(client(
+            model,
+            LlmEndpoint::load(settings).context("IC_LLM_URL requires IC_LLM_KEY")?,
+        ));
+    }
+    match model.provider {
+        Provider::Anthropic => Ok(Box::new(anthropic::Client::direct(Box::new(|| {
+            crate::auth::access_token().map_err(|e| LlmError::Auth(e.to_string()))
+        })))),
+        Provider::OpenAi => {
+            let status = crate::openai_auth::status(settings)?;
+            if !status.using_api_key && status.active.is_some() {
+                let settings = settings.clone();
+                Ok(Box::new(openai::Client::direct(Box::new(move |force| {
+                    crate::openai_auth::access_token(&settings, force)
+                        .map_err(|e| LlmError::Auth(e.to_string()))
+                }))))
+            } else {
+                let key = crate::openai_auth::api_key(settings)?
+                    .or_else(|| crate::proxy::legacy_openai_key(settings))
+                    .context(
+                        "Continue with ChatGPT in Setup, or explicitly configure an OpenAI API key",
+                    )?;
+                Ok(Box::new(openai::Client::direct(Box::new(move |_| {
+                    Ok(key.clone())
+                }))))
+            }
+        }
     }
 }
 
@@ -171,10 +264,37 @@ pub(crate) fn http_client() -> reqwest::blocking::Client {
 pub(crate) fn error_from_response(resp: reqwest::blocking::Response) -> LlmError {
     let status = resp.status().as_u16();
     let text = resp.text().unwrap_or_default();
-    let message = serde_json::from_str::<Value>(&text)
-        .ok()
-        .and_then(|v| v["error"]["message"].as_str().map(String::from))
-        .unwrap_or(text);
+    let value = serde_json::from_str::<Value>(&text).unwrap_or_default();
+    let message = value["error"]["message"]
+        .as_str()
+        .or_else(|| value["detail"].as_str())
+        .unwrap_or(&text)
+        .to_string();
+    provider_error(status, value["error"]["code"].as_str(), message)
+}
+
+pub(crate) fn provider_error(status: u16, code: Option<&str>, message: String) -> LlmError {
+    match code.unwrap_or_default() {
+        "subscription_sharing_usage_limit_exceeded" => return LlmError::PlanLimit,
+        "subscription_sharing_user_not_eligible" => return LlmError::PlanUnavailable,
+        "subscription_sharing_usage_unavailable" | "subscription_sharing_user_unavailable" => {
+            return LlmError::Api {
+                status: 503,
+                message,
+            };
+        }
+        "subscription_sharing_unsupported_capability"
+        | "subscription_sharing_route_not_supported"
+        | "chatpass_v2_scope_not_authorized"
+        | "chatpass_v2_invalid_authorization_context" => {
+            return LlmError::Api {
+                status: 400,
+                message,
+            };
+        }
+        "subscription_sharing_invalid_user" => return LlmError::Auth(message),
+        _ => {}
+    }
     match status {
         401 | 403 => LlmError::Auth(message),
         429 => LlmError::RateLimited,
@@ -184,7 +304,9 @@ pub(crate) fn error_from_response(resp: reqwest::blocking::Response) -> LlmError
 }
 
 /// Run `attempt` up to MAX_ATTEMPTS times, backing off on retryable errors.
-pub(crate) fn with_retries<T>(mut attempt: impl FnMut() -> Result<T, LlmError>) -> Result<T, LlmError> {
+pub(crate) fn with_retries<T>(
+    mut attempt: impl FnMut() -> Result<T, LlmError>,
+) -> Result<T, LlmError> {
     let mut n = 1;
     loop {
         match attempt() {
@@ -198,8 +320,10 @@ pub(crate) fn with_retries<T>(mut attempt: impl FnMut() -> Result<T, LlmError>) 
 }
 
 /// Feed each server-sent event's JSON payload to `on_event` until it returns `false`.
-pub(crate) fn for_each_event(reader: impl BufRead, mut on_event: impl FnMut(Value) -> Result<bool, LlmError>)
-    -> Result<(), LlmError> {
+pub(crate) fn for_each_event(
+    reader: impl BufRead,
+    mut on_event: impl FnMut(Value) -> Result<bool, LlmError>,
+) -> Result<(), LlmError> {
     let mut data = String::new();
     for line in reader.lines() {
         let line = line.map_err(|e| LlmError::Network(e.to_string()))?;
@@ -210,8 +334,8 @@ pub(crate) fn for_each_event(reader: impl BufRead, mut on_event: impl FnMut(Valu
         if !line.is_empty() || data.is_empty() {
             continue; // `event:` lines repeat the JSON "type" field
         }
-        let event: Value =
-            serde_json::from_str(&std::mem::take(&mut data)).map_err(|e| LlmError::Protocol(format!("bad event JSON: {e}")))?;
+        let event: Value = serde_json::from_str(&std::mem::take(&mut data))
+            .map_err(|e| LlmError::Protocol(format!("bad event JSON: {e}")))?;
         if !on_event(event)? {
             break;
         }
@@ -221,5 +345,8 @@ pub(crate) fn for_each_event(reader: impl BufRead, mut on_event: impl FnMut(Valu
 
 #[cfg(test)]
 pub(crate) fn sse(events: &[Value]) -> String {
-    events.iter().map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e)).collect()
+    events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e))
+        .collect()
 }

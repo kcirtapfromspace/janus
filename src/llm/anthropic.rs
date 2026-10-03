@@ -1,15 +1,14 @@
-//! Claude via LiteLLM's Anthropic pass-through (`/anthropic/v1/messages`), in Claude's native API:
-//! adaptive thinking, effort, structured outputs, and server-side refusal fallbacks.
-//!
-//! Auth uses your browser login, not an API key: each request carries a fresh OAuth access token
-//! (`Authorization: Bearer`), which LiteLLM forwards to Anthropic, while ic authenticates to the
-//! proxy separately with its virtual key in `x-litellm-api-key`.
+//! Claude's native Messages API, with an optional external LiteLLM pass-through adapter.
+//! Browser authentication supplies fresh OAuth access tokens for each request.
 
 use std::io::BufRead;
 
 use serde_json::{Value, json};
 
-use super::{Llm, LlmError, StructuredRequest, error_from_response, for_each_event, http_client, with_retries};
+use super::{
+    Llm, LlmError, StructuredRequest, error_from_response, for_each_event, http_client,
+    with_retries,
+};
 use crate::proxy::LlmEndpoint;
 
 const MESSAGES_PATH: &str = "/anthropic/v1/messages";
@@ -33,17 +32,33 @@ pub struct Caps {
 pub fn caps(model: &str) -> Caps {
     let older = model.starts_with("claude-haiku-")
         || model.starts_with("claude-3")
-        || ["claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-5", "claude-sonnet-4-0", "claude-sonnet-4-5",
-            "claude-opus-4-2", "claude-sonnet-4-2"]
-            .iter()
-            .any(|prefix| model.starts_with(prefix))
-            || model == "claude-opus-4" || model == "claude-sonnet-4";
-    Caps { adaptive_thinking: !older, effort: !older || model.starts_with("claude-opus-4-5"), fallbacks: !older }
+        || [
+            "claude-opus-4-0",
+            "claude-opus-4-1",
+            "claude-opus-4-5",
+            "claude-sonnet-4-0",
+            "claude-sonnet-4-5",
+            "claude-opus-4-2",
+            "claude-sonnet-4-2",
+        ]
+        .iter()
+        .any(|prefix| model.starts_with(prefix))
+        || model == "claude-opus-4"
+        || model == "claude-sonnet-4";
+    Caps {
+        adaptive_thinking: !older,
+        effort: !older || model.starts_with("claude-opus-4-5"),
+        fallbacks: !older,
+    }
 }
 
 /// Request headers: the OAuth token goes to Anthropic; the virtual key only to the proxy.
 pub fn headers(proxy_key: &str, oauth_token: &str, model: &str) -> Vec<(&'static str, String)> {
-    let betas = if caps(model).fallbacks { format!("{OAUTH_BETA},{FALLBACK_BETA}") } else { OAUTH_BETA.to_string() };
+    let betas = if caps(model).fallbacks {
+        format!("{OAUTH_BETA},{FALLBACK_BETA}")
+    } else {
+        OAUTH_BETA.to_string()
+    };
     vec![
         ("content-type", "application/json".into()),
         ("anthropic-version", "2023-06-01".into()),
@@ -80,21 +95,58 @@ pub struct Client {
     http: reqwest::blocking::Client,
     endpoint: LlmEndpoint,
     token: TokenSource,
+    direct: bool,
 }
 
 impl Client {
     pub fn new(endpoint: LlmEndpoint, token: TokenSource) -> Self {
-        Client { http: http_client(), endpoint, token }
+        Client {
+            http: http_client(),
+            endpoint,
+            token,
+            direct: false,
+        }
     }
 
-    fn attempt(&self, model: &str, body: &Value, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError> {
+    pub fn direct(token: TokenSource) -> Self {
+        Client {
+            http: http_client(),
+            endpoint: LlmEndpoint {
+                base_url: "https://api.anthropic.com".into(),
+                api_key: String::new(),
+            },
+            token,
+            direct: true,
+        }
+    }
+
+    fn attempt(
+        &self,
+        model: &str,
+        body: &Value,
+        on_progress: &mut dyn FnMut(usize),
+    ) -> Result<String, LlmError> {
         // Fetched per attempt: access tokens are short-lived, and a retry may come minutes later.
         let token = (self.token)()?;
-        let mut request = self.http.post(format!("{}{MESSAGES_PATH}", self.endpoint.base_url.trim_end_matches('/')));
+        let path = if self.direct {
+            "/v1/messages"
+        } else {
+            MESSAGES_PATH
+        };
+        let mut request = self.http.post(format!(
+            "{}{path}",
+            self.endpoint.base_url.trim_end_matches('/')
+        ));
         for (name, value) in headers(&self.endpoint.api_key, &token, model) {
+            if self.direct && name == "x-litellm-api-key" {
+                continue;
+            }
             request = request.header(name, value);
         }
-        let resp = request.body(body.to_string()).send().map_err(|e| LlmError::Network(e.to_string()))?;
+        let resp = request
+            .body(body.to_string())
+            .send()
+            .map_err(|e| LlmError::Network(e.to_string()))?;
         if resp.status().as_u16() != 200 {
             return Err(error_from_response(resp));
         }
@@ -103,14 +155,21 @@ impl Client {
 }
 
 impl Llm for Client {
-    fn structured(&self, req: &StructuredRequest, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError> {
+    fn structured(
+        &self,
+        req: &StructuredRequest,
+        on_progress: &mut dyn FnMut(usize),
+    ) -> Result<String, LlmError> {
         let body = request_body(req);
         with_retries(|| self.attempt(req.model, &body, on_progress))
     }
 }
 
 /// Assemble the final text from a Messages API event stream.
-pub fn parse_stream(reader: impl BufRead, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError> {
+pub fn parse_stream(
+    reader: impl BufRead,
+    on_progress: &mut dyn FnMut(usize),
+) -> Result<String, LlmError> {
     let mut text = String::new();
     let mut stop_reason: Option<String> = None;
     let mut refusal_category: Option<String> = None;
@@ -132,19 +191,32 @@ pub fn parse_stream(reader: impl BufRead, on_progress: &mut dyn FnMut(usize)) ->
                 if let Some(reason) = delta["stop_reason"].as_str() {
                     stop_reason = Some(reason.into());
                 }
-                let details = if delta["stop_details"].is_object() { &delta["stop_details"] } else { &event["stop_details"] };
+                let details = if delta["stop_details"].is_object() {
+                    &delta["stop_details"]
+                } else {
+                    &event["stop_details"]
+                };
                 if let Some(category) = details["category"].as_str() {
                     refusal_category = Some(category.into());
                 }
             }
             "error" => {
                 let kind = event["error"]["type"].as_str().unwrap_or_default();
-                let message = event["error"]["message"].as_str().unwrap_or(kind).to_string();
+                let message = event["error"]["message"]
+                    .as_str()
+                    .unwrap_or(kind)
+                    .to_string();
                 return Err(match kind {
                     "overloaded_error" => LlmError::Overloaded,
                     "rate_limit_error" => LlmError::RateLimited,
-                    "api_error" => LlmError::Api { status: 500, message },
-                    _ => LlmError::Api { status: 400, message },
+                    "api_error" => LlmError::Api {
+                        status: 500,
+                        message,
+                    },
+                    _ => LlmError::Api {
+                        status: 400,
+                        message,
+                    },
                 });
             }
             "message_stop" => return Ok(false),
@@ -153,11 +225,18 @@ pub fn parse_stream(reader: impl BufRead, on_progress: &mut dyn FnMut(usize)) ->
         Ok(true)
     })?;
     match stop_reason.as_deref() {
-        Some("refusal") => Err(LlmError::Refusal(format!("category: {}", refusal_category.as_deref().unwrap_or("unspecified")))),
+        Some("refusal") => Err(LlmError::Refusal(format!(
+            "category: {}",
+            refusal_category.as_deref().unwrap_or("unspecified")
+        ))),
         Some("max_tokens") => Err(LlmError::MaxTokens),
         // No stop reason means the connection dropped mid-stream: the text is truncated.
-        None => Err(LlmError::Network("the stream ended before the model finished".into())),
-        _ if text.trim().is_empty() => Err(LlmError::Protocol(format!("no text in the response (stop_reason: {stop_reason:?})"))),
+        None => Err(LlmError::Network(
+            "the stream ended before the model finished".into(),
+        )),
+        _ if text.trim().is_empty() => Err(LlmError::Protocol(format!(
+            "no text in the response (stop_reason: {stop_reason:?})"
+        ))),
         _ => Ok(text),
     }
 }
@@ -180,7 +259,10 @@ mod tests {
             json!({"type": "message_stop"}),
         ]);
         let mut seen = vec![];
-        assert_eq!(parse_stream(stream.as_bytes(), &mut |n| seen.push(n)).unwrap(), "{\"a\":1}");
+        assert_eq!(
+            parse_stream(stream.as_bytes(), &mut |n| seen.push(n)).unwrap(),
+            "{\"a\":1}"
+        );
         assert_eq!(seen.last(), Some(&7));
     }
 
@@ -199,12 +281,19 @@ mod tests {
 
     #[test]
     fn refusal_and_stream_errors_surface() {
-        let refused = sse(&[json!({"type": "message_delta", "delta": {"stop_reason": "refusal",
-                                   "stop_details": {"type": "refusal", "category": "cyber"}}})]);
+        let refused = sse(&[
+            json!({"type": "message_delta", "delta": {"stop_reason": "refusal",
+                                   "stop_details": {"type": "refusal", "category": "cyber"}}}),
+        ]);
         let err = parse_stream(refused.as_bytes(), &mut |_| {}).unwrap_err();
-        assert!(matches!(err, LlmError::Refusal(ref c) if c.contains("cyber")), "{err}");
+        assert!(
+            matches!(err, LlmError::Refusal(ref c) if c.contains("cyber")),
+            "{err}"
+        );
 
-        let overloaded = sse(&[json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}})]);
+        let overloaded = sse(&[
+            json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+        ]);
         let err = parse_stream(overloaded.as_bytes(), &mut |_| {}).unwrap_err();
         assert!(matches!(err, LlmError::Overloaded) && err.retryable());
     }
@@ -216,36 +305,71 @@ mod tests {
             json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "{\"summ"}}),
         ]);
         let err = parse_stream(cut.as_bytes(), &mut |_| {}).unwrap_err();
-        assert!(matches!(err, LlmError::Network(_)) && err.retryable(), "{err}");
+        assert!(
+            matches!(err, LlmError::Network(_)) && err.retryable(),
+            "{err}"
+        );
     }
 
     #[test]
     fn oauth_token_goes_to_anthropic_and_the_virtual_key_to_the_proxy() {
-        let h = headers("sk-litellm-virtual", "sk-ant-oat01-token", "claude-opus-5-5");
+        let h = headers(
+            "sk-litellm-virtual",
+            "sk-ant-oat01-token",
+            "claude-opus-5-5",
+        );
         let get = |name: &str| h.iter().find(|(n, _)| *n == name).map(|(_, v)| v.as_str());
         assert_eq!(get("authorization"), Some("Bearer sk-ant-oat01-token"));
         assert_eq!(get("x-litellm-api-key"), Some("sk-litellm-virtual"));
-        assert_eq!(get("anthropic-beta"), Some("oauth-2025-04-20,server-side-fallback-2026-07-01"));
-        assert_eq!(get("x-api-key"), None, "no static Anthropic key is ever sent");
+        assert_eq!(
+            get("anthropic-beta"),
+            Some("oauth-2025-04-20,server-side-fallback-2026-07-01")
+        );
+        assert_eq!(
+            get("x-api-key"),
+            None,
+            "no static Anthropic key is ever sent"
+        );
     }
 
     #[test]
     fn an_expired_login_fails_before_any_request_is_sent() {
-        let endpoint = LlmEndpoint { base_url: "http://127.0.0.1:9".into(), api_key: "k".into() };
-        let client = Client::new(endpoint, Box::new(|| Err(LlmError::Auth("your Claude login has expired".into()))));
+        let endpoint = LlmEndpoint {
+            base_url: "http://127.0.0.1:9".into(),
+            api_key: "k".into(),
+        };
+        let client = Client::new(
+            endpoint,
+            Box::new(|| Err(LlmError::Auth("your Claude login has expired".into()))),
+        );
         let schema = json!({"type": "object"});
-        let req = StructuredRequest { model: "m", system: "s", user: "u", schema: &schema, schema_name: "x",
-                                      effort: Effort::High, max_tokens: 10 };
+        let req = StructuredRequest {
+            model: "m",
+            system: "s",
+            user: "u",
+            schema: &schema,
+            schema_name: "x",
+            effort: Effort::High,
+            max_tokens: 10,
+        };
         let err = client.structured(&req, &mut |_| {}).unwrap_err();
-        assert!(matches!(err, LlmError::Auth(ref m) if m.contains("expired")), "{err}");
+        assert!(
+            matches!(err, LlmError::Auth(ref m) if m.contains("expired")),
+            "{err}"
+        );
     }
 
     #[test]
     fn request_body_uses_native_claude_features() {
         let schema = json!({"type": "object"});
         let body = request_body(&StructuredRequest {
-            model: "claude-opus-5-5", system: "sys", user: "hi", schema: &schema, schema_name: "x",
-            effort: Effort::High, max_tokens: 64000,
+            model: "claude-opus-5-5",
+            system: "sys",
+            user: "hi",
+            schema: &schema,
+            schema_name: "x",
+            effort: Effort::High,
+            max_tokens: 64000,
         });
         assert_eq!(body["fallbacks"], "default");
         assert_eq!(body["stream"], true);
@@ -260,14 +384,26 @@ mod tests {
     fn older_models_get_only_what_they_accept() {
         let schema = json!({"type": "object"});
         let body = request_body(&StructuredRequest {
-            model: "claude-haiku-4-5-20251001", system: "sys", user: "hi", schema: &schema, schema_name: "x",
-            effort: Effort::Low, max_tokens: 2000,
+            model: "claude-haiku-4-5-20251001",
+            system: "sys",
+            user: "hi",
+            schema: &schema,
+            schema_name: "x",
+            effort: Effort::Low,
+            max_tokens: 2000,
         });
         assert!(body.get("thinking").is_none() && body.get("fallbacks").is_none());
         assert!(body["output_config"].get("effort").is_none());
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         let h = headers("k", "t", "claude-haiku-4-5-20251001");
         assert!(h.contains(&("anthropic-beta", "oauth-2025-04-20".to_string())));
-        assert_eq!(caps("claude-sonnet-5-5"), Caps { adaptive_thinking: true, effort: true, fallbacks: true });
+        assert_eq!(
+            caps("claude-sonnet-5-5"),
+            Caps {
+                adaptive_thinking: true,
+                effort: true,
+                fallbacks: true
+            }
+        );
     }
 }

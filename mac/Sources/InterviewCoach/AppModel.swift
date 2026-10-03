@@ -40,6 +40,7 @@ final class AppModel {
     var selfTest: SelfTestState = .notRun
     /// Models a report can be re-run with (`ic models --json`), loaded when first needed.
     var modelOffers: [ModelOffer] = []
+    var modelOffersError: String?
     private var modelOffersAsked: Date?
     var micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
     /// Setup opens by itself at most once per launch.
@@ -134,14 +135,31 @@ final class AppModel {
         rerun(stale.step, thenLater: true)
     }
 
-    /// The models a report can be written with, and their prices. Quiet on failure: the menu then
-    /// offers the configured default and "cheapest", which ic resolves itself.
-    func loadModelOffers() async {
-        // At most once a minute while it keeps failing (e.g. the proxy isn't running yet).
-        if let asked = modelOffersAsked, Date().timeIntervalSince(asked) < 60 { return }
+    /// Load account-specific choices and surface catalog failures in Setup.
+    func loadModelOffers(force: Bool = false) async {
+        if !force, let asked = modelOffersAsked, Date().timeIntervalSince(asked) < 60 { return }
         modelOffersAsked = Date()
-        guard let ic, let offers = try? await ic.decode([ModelOffer].self, ["models", "--json"]) else { return }
-        modelOffers = offers
+        guard let ic else { return }
+        do {
+            modelOffers = try await ic.decode([ModelOffer].self, ["models", "--json"])
+            modelOffersError = nil
+        } catch {
+            modelOffers = []
+            modelOffersError = error.localizedDescription
+        }
+    }
+
+    func setDefaultModel(_ value: String) {
+        guard let ic, setupActivity == nil, !phase.isBusy else { return }
+        setupActivity = SetupActivity(checkID: "model", message: "Saving the coaching model…")
+        Task {
+            do {
+                _ = try await ic.run(["config", "set", "model", value])
+                setupErrors["model"] = nil
+            } catch { setupErrors["model"] = error.localizedDescription }
+            setupActivity = nil
+            await refresh()
+        }
     }
 
     func swapSpeakers() {
@@ -280,6 +298,18 @@ final class AppModel {
                message: switching ? "Signing out…" : "Approve access in your browser…")
     }
 
+    func signInWithChatGPT(account: String? = nil, newAccount: Bool = false, enablePlan: Bool = false) {
+        var args = ["login", "--provider", "openai", "--events"]
+        if let account { args += ["--account", account] }
+        if newAccount { args += ["--switch"] }
+        if enablePlan { args += ["--enable-plan"] }
+        follow(args, check: "openai", message: "Approve ChatGPT access in your browser…")
+    }
+
+    func signOutOfChatGPT() {
+        follow(["logout", "--provider", "openai", "--events"], check: "openai", message: "Signing out of ChatGPT…")
+    }
+
     /// The code the sign-in page shows when it can't hand the approval back by itself.
     func sendSignInCode(_ code: String) {
         let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -294,11 +324,11 @@ final class AppModel {
         setupStream?.cancel()
     }
 
-    /// Store an API key in the AI proxy. It goes to ic on stdin, never as an argument.
+    /// Store a provider key privately. It goes to ic on stdin, never as an argument.
     func saveKey(_ key: String, target: String, check: String) async {
         guard let ic, setupActivity == nil else { return }
         setupErrors[check] = nil
-        setupActivity = SetupActivity(checkID: check, message: "Saving the key and restarting the AI proxy…")
+        setupActivity = SetupActivity(checkID: check, message: target == "openai" ? "Saving the key and selecting API billing…" : "Saving the TypeSafe key for Jev evaluation…")
         do {
             _ = try await ic.run(["proxy", "key", target, "--stdin"], stdin: key)
         } catch {
@@ -306,6 +336,7 @@ final class AppModel {
         }
         setupActivity = nil
         await refresh()
+        await loadModelOffers(force: true)
     }
 
     func requestMicAccess() {
@@ -347,6 +378,7 @@ final class AppModel {
                 setupStream = nil
                 setupActivity = nil
                 await refresh()
+                await loadModelOffers(force: true)
             }
         } catch {
             setupErrors[check] = error.localizedDescription

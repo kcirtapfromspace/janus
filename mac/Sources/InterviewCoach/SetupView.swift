@@ -15,6 +15,8 @@ struct SetupView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let setup = model.setup {
+                        modelChoice(setup)
+                        Divider()
                         ForEach(setup.checks) { check in
                             CheckRow(check: check)
                             Divider()
@@ -33,6 +35,33 @@ struct SetupView: View {
         .frame(width: 560)
         .frame(minHeight: 420, idealHeight: 640)
         .refreshWhenShown { await model.refresh() }
+        .task { await model.loadModelOffers() }
+    }
+
+    private func modelChoice(_ setup: SetupStatus) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Coaching model").font(.body.weight(.medium))
+                Spacer()
+                Button("Refresh models") { Task { await model.loadModelOffers(force: true) } }
+                    .disabled(model.setupActivity != nil)
+            }
+            Picker("Default model", selection: Binding(get: { setup.model }, set: { model.setDefaultModel($0) })) {
+                if !model.modelOffers.contains(where: { $0.model == setup.model }) {
+                    Text("\(setup.model) (current)").tag(setup.model)
+                }
+                ForEach(model.modelOffers) { offer in
+                    Text("\(offer.provider == "openai" ? "OpenAI" : "Claude") · \(offer.name)").tag(offer.model)
+                }
+            }
+            .disabled(model.setupActivity != nil || model.phase.isBusy)
+            Text("Sign in, refresh the available models, then choose one for new reports. Earlier reports keep their model and version.")
+                .font(.callout).foregroundStyle(.secondary)
+            if let error = model.modelOffersError ?? model.setupErrors["model"] {
+                Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+            }
+        }
+        .padding(18)
     }
 
     private var header: some View {
@@ -77,6 +106,20 @@ private struct CheckRow: View {
                     Text(check.detail).font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if check.id == "openai", let account = model.setup?.openai {
+                    HStack {
+                        Menu("Accounts") {
+                            ForEach(account.accounts) { saved in
+                                Button(saved.label) { model.signInWithChatGPT(account: saved.clientId) }
+                            }
+                            Button("Add ChatGPT account…") { model.signInWithChatGPT(newAccount: true) }
+                            if account.signedIn { Button("Sign out of ChatGPT") { model.signOutOfChatGPT() } }
+                        }
+                        .disabled(model.setupActivity != nil || model.phase.isBusy)
+                        Link("Manage ChatGPT usage", destination: URL(string: "https://chatgpt.com/settings/usage")!)
+                    }
+                    .font(.callout)
+                }
                 if let activity { ActivityView(activity: activity, code: $code) }
                 if enteringKey { keyEntry }
                 if let error = model.setupErrors[check.id] {
@@ -119,7 +162,7 @@ private struct CheckRow: View {
 
     private func interruptsWork(_ action: SetupAction) -> Bool {
         switch action.kind {
-        case .switchAccount, .key, .run(step: "restart-proxy"): true
+        case .switchAccount, .chatGptSignIn, .chatGptSignOut, .key, .run(step: "restart-proxy"): true
         default: false
         }
     }
@@ -152,6 +195,9 @@ private struct CheckRow: View {
         case .signIn:
             code = ""
             model.signIn()
+        case .chatGptSignIn(let account, let newAccount, let enablePlan):
+            model.signInWithChatGPT(account: account, newAccount: newAccount, enablePlan: enablePlan)
+        case .chatGptSignOut: model.signOutOfChatGPT()
         case .switchAccount: confirmingSwitch = true
         case .key: enteringKey = true
         }

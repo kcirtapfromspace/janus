@@ -8,8 +8,10 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 
 use crate::metrics::TalkMetrics;
-use crate::models::{Mode, NextSteps, OutcomeResult, RoleStatus, RunStatus, Segment, Session, SessionAnalysis, Source, Stage, Status,
-                    Step, Verdict, Word};
+use crate::models::{
+    Mode, NextSteps, OutcomeResult, RoleStatus, RunStatus, Segment, Session, SessionAnalysis,
+    Source, Stage, Status, Step, Verdict, Word,
+};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS roles (
@@ -190,7 +192,9 @@ CREATE TABLE IF NOT EXISTS coaching_plans (
 "#;
 
 pub fn now_iso() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S+00:00")
+        .to_string()
 }
 
 /// Fields for a new session; everything else starts empty.
@@ -296,7 +300,9 @@ pub struct Db {
 const SCHEMA_VERSION: i64 = 7;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
-    s.parse().map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into()))
+    s.parse().map_err(|e: String| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into())
+    })
 }
 
 /// A role you're interviewing for, at a company: the interviews for it are its rounds.
@@ -327,7 +333,10 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         created_at: r.get("created_at")?,
         title: r.get("title")?,
         company: r.get("company")?,
-        stage: r.get::<_, Option<String>>("stage")?.map(parse::<Stage>).transpose()?,
+        stage: r
+            .get::<_, Option<String>>("stage")?
+            .map(parse::<Stage>)
+            .transpose()?,
         role_id: r.get("role_id")?,
         source: parse(r.get("source")?)?,
         mode: parse(r.get("mode")?)?,
@@ -345,7 +354,18 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
 }
 
 /// id, session_id, created_at, model, prompt_version, then the three JSON columns.
-type AnalysisRow = (i64, i64, String, String, String, String, String, String, Option<String>, Option<i64>);
+type AnalysisRow = (
+    i64,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+);
 
 fn run_from_row(r: &Row) -> rusqlite::Result<StepRun> {
     let params: String = r.get("params_json")?;
@@ -395,7 +415,10 @@ impl Db {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
         conn.execute_batch(SCHEMA)?;
-        let db = Db { conn, path: path.to_path_buf() };
+        let db = Db {
+            conn,
+            path: path.to_path_buf(),
+        };
         db.migrate()?;
         db.ensure_indexes()?;
         Ok(db)
@@ -410,15 +433,21 @@ impl Db {
     /// they already have, once, so their stages show correctly. Version 3 added run warnings,
     /// version 4 answer checks and version 5 the temperature timeline (new tables, from SCHEMA).
     fn migrate(&self) -> Result<()> {
-        let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version >= SCHEMA_VERSION {
             return Ok(());
         }
         // A v2 database's step_runs predates the column; a new or pre-v2 one just got it from SCHEMA.
         let has_warnings: bool = self.conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('step_runs') WHERE name = 'warnings_json'", [], |r| r.get(0))?;
+            "SELECT COUNT(*) FROM pragma_table_info('step_runs') WHERE name = 'warnings_json'",
+            [],
+            |r| r.get(0),
+        )?;
         if !has_warnings {
-            self.conn.execute_batch("ALTER TABLE step_runs ADD COLUMN warnings_json TEXT;")?;
+            self.conn
+                .execute_batch("ALTER TABLE step_runs ADD COLUMN warnings_json TEXT;")?;
         }
         if version < 2 {
             for session in self.list_sessions()? {
@@ -426,29 +455,43 @@ impl Db {
             }
         }
         // Version 7: archive, Recently Deleted, filing, and where each application stands.
-        for (table, column) in [("sessions", "archived_at TEXT"), ("sessions", "deleted_at TEXT"),
-                                ("sessions", "role_set INTEGER NOT NULL DEFAULT 0"),
-                                ("roles", "status TEXT NOT NULL DEFAULT 'interviewing'"), ("roles", "archived_at TEXT")] {
+        for (table, column) in [
+            ("sessions", "archived_at TEXT"),
+            ("sessions", "deleted_at TEXT"),
+            ("sessions", "role_set INTEGER NOT NULL DEFAULT 0"),
+            ("roles", "status TEXT NOT NULL DEFAULT 'interviewing'"),
+            ("roles", "archived_at TEXT"),
+        ] {
             let name = column.split(' ').next().expect("named");
             let has: bool = self.conn.query_row(
-                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"), [name], |r| r.get(0))?;
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+                [name],
+                |r| r.get(0),
+            )?;
             if !has {
-                self.conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};"))?;
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column};"))?;
             }
         }
         // Version 6: report versions record their inputs; transcripts are kept per revision.
         for column in ["inputs_key TEXT", "inputs_json TEXT", "parent_id INTEGER"] {
             let name = column.split(' ').next().expect("named");
             let has: bool = self.conn.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('analyses') WHERE name = ?1", [name], |r| r.get(0))?;
+                "SELECT COUNT(*) FROM pragma_table_info('analyses') WHERE name = ?1",
+                [name],
+                |r| r.get(0),
+            )?;
             if !has {
-                self.conn.execute_batch(&format!("ALTER TABLE analyses ADD COLUMN {column};"))?;
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE analyses ADD COLUMN {column};"))?;
             }
         }
         if version < 6 {
             // The live transcript is the current transcript run's; earlier ones weren't kept.
             for session in self.list_sessions()? {
-                let current = self.runs(session.id)?.into_iter()
+                let current = self
+                    .runs(session.id)?
+                    .into_iter()
                     .rfind(|r| r.step == Step::Transcript && r.status == RunStatus::Succeeded);
                 let segments = self.get_segments(session.id)?;
                 if let (Some(run), false) = (current, segments.is_empty()) {
@@ -462,12 +505,15 @@ impl Db {
                 crate::library::file_from_report(self, session.id)?;
             }
         }
-        self.conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         Ok(())
     }
 
     fn ensure_indexes(&self) -> Result<()> {
-        self.conn.execute_batch("CREATE INDEX IF NOT EXISTS analyses_by_inputs ON analyses(session_id, inputs_key);")?;
+        self.conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS analyses_by_inputs ON analyses(session_id, inputs_key);",
+        )?;
         Ok(())
     }
 
@@ -485,13 +531,19 @@ impl Db {
 
     pub fn get_session(&self, id: i64) -> Result<Session> {
         self.conn
-            .query_row("SELECT * FROM sessions WHERE id = ?1", [id], session_from_row)
+            .query_row(
+                "SELECT * FROM sessions WHERE id = ?1",
+                [id],
+                session_from_row,
+            )
             .optional()?
             .ok_or_else(|| anyhow!("No session with id {id}. See: ic list"))
     }
 
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM sessions ORDER BY created_at DESC, id DESC")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM sessions ORDER BY created_at DESC, id DESC")?;
         let rows = stmt.query_map([], session_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -510,29 +562,44 @@ impl Db {
     }
 
     pub fn set_title(&self, id: i64, title: &str) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET title = ?2 WHERE id = ?1", params![id, title])?;
+        self.conn.execute(
+            "UPDATE sessions SET title = ?2 WHERE id = ?1",
+            params![id, title],
+        )?;
         Ok(())
     }
 
     pub fn set_company(&self, id: i64, company: Option<&str>) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET company = ?2 WHERE id = ?1", params![id, company])?;
+        self.conn.execute(
+            "UPDATE sessions SET company = ?2 WHERE id = ?1",
+            params![id, company],
+        )?;
         Ok(())
     }
 
     pub fn set_stage(&self, id: i64, stage: Option<Stage>) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET stage = ?2 WHERE id = ?1", params![id, stage.map(|s| s.as_str())])?;
+        self.conn.execute(
+            "UPDATE sessions SET stage = ?2 WHERE id = ?1",
+            params![id, stage.map(|s| s.as_str())],
+        )?;
         Ok(())
     }
 
     /// The round a report detected, kept only when none is set (yours, or an earlier report's).
     pub fn set_stage_if_unset(&self, id: i64, stage: Stage) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET stage = ?2 WHERE id = ?1 AND stage IS NULL", params![id, stage.as_str()])?;
+        self.conn.execute(
+            "UPDATE sessions SET stage = ?2 WHERE id = ?1 AND stage IS NULL",
+            params![id, stage.as_str()],
+        )?;
         Ok(())
     }
 
     /// File an interview under a role (or none). Either way it's settled: reports won't re-file it.
     pub fn set_session_role(&self, id: i64, role_id: Option<i64>) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET role_id = ?2, role_set = 1 WHERE id = ?1", params![id, role_id])?;
+        self.conn.execute(
+            "UPDATE sessions SET role_id = ?2, role_set = 1 WHERE id = ?1",
+            params![id, role_id],
+        )?;
         Ok(())
     }
 
@@ -550,17 +617,23 @@ impl Db {
 
     /// Remove an interview and everything stored with it (its folder is the caller's to remove).
     pub fn erase_session(&self, id: i64) -> Result<()> {
-        self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         Ok(())
     }
 
     /// (session id, start, text) of transcript lines containing `query` (lowercase), at most `limit`.
     pub fn search_segments(&self, query: &str, limit: i64) -> Result<Vec<(i64, f64, String)>> {
-        let escaped = query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         let mut stmt = self.conn.prepare(
             "SELECT session_id, start_s, text FROM segments WHERE lower(text) LIKE '%' || ?1 || '%' ESCAPE '\\'
              ORDER BY session_id, idx LIMIT ?2")?;
-        let rows = stmt.query_map(params![escaped, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = stmt.query_map(params![escaped, limit], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -581,25 +654,38 @@ impl Db {
 
     /// The role with this title at this company (ignoring case and spacing), created if it's new.
     pub fn find_or_create_role(&self, company: Option<&str>, title: &str) -> Result<Role> {
-        let key = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let key = |s: &str| {
+            s.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
         let company = company.map(str::trim).filter(|c| !c.is_empty());
         if let Some(found) = self.roles()?.into_iter().find(|r| {
             key(&r.title) == key(title) && r.company.as_deref().map(key) == company.map(key)
         }) {
             return Ok(found);
         }
-        self.conn.execute("INSERT INTO roles (created_at, title, company) VALUES (?1, ?2, ?3)",
-                          params![now_iso(), title.trim(), company])?;
+        self.conn.execute(
+            "INSERT INTO roles (created_at, title, company) VALUES (?1, ?2, ?3)",
+            params![now_iso(), title.trim(), company],
+        )?;
         self.role(self.conn.last_insert_rowid())
     }
 
     pub fn set_role_status(&self, id: i64, status: RoleStatus) -> Result<()> {
-        self.conn.execute("UPDATE roles SET status = ?2 WHERE id = ?1", params![id, status.as_str()])?;
+        self.conn.execute(
+            "UPDATE roles SET status = ?2 WHERE id = ?1",
+            params![id, status.as_str()],
+        )?;
         Ok(())
     }
 
     pub fn rename_role(&self, id: i64, title: &str) -> Result<()> {
-        self.conn.execute("UPDATE roles SET title = ?2 WHERE id = ?1", params![id, title.trim()])?;
+        self.conn.execute(
+            "UPDATE roles SET title = ?2 WHERE id = ?1",
+            params![id, title.trim()],
+        )?;
         Ok(())
     }
 
@@ -616,7 +702,10 @@ impl Db {
         }
         self.role(into)?;
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("UPDATE sessions SET role_id = ?2, role_set = 1 WHERE role_id = ?1", params![from, into])?;
+        tx.execute(
+            "UPDATE sessions SET role_id = ?2, role_set = 1 WHERE role_id = ?1",
+            params![from, into],
+        )?;
         tx.execute("DELETE FROM roles WHERE id = ?1", [from])?;
         tx.commit()?;
         Ok(())
@@ -626,14 +715,22 @@ impl Db {
     pub fn rename_company(&self, old: &str, new: &str) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         let same = "lower(trim(company)) = lower(trim(?1))";
-        let n = tx.execute(&format!("UPDATE roles SET company = ?2 WHERE {same}"), params![old, new.trim()])?
-            + tx.execute(&format!("UPDATE sessions SET company = ?2 WHERE {same}"), params![old, new.trim()])?;
+        let n = tx.execute(
+            &format!("UPDATE roles SET company = ?2 WHERE {same}"),
+            params![old, new.trim()],
+        )? + tx.execute(
+            &format!("UPDATE sessions SET company = ?2 WHERE {same}"),
+            params![old, new.trim()],
+        )?;
         tx.commit()?;
         Ok(n)
     }
 
     pub fn set_status(&self, id: i64, status: Status, error: Option<String>) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET status = ?2, error = ?3 WHERE id = ?1", params![id, status.as_str(), error])?;
+        self.conn.execute(
+            "UPDATE sessions SET status = ?2, error = ?3 WHERE id = ?1",
+            params![id, status.as_str(), error],
+        )?;
         Ok(())
     }
 
@@ -648,8 +745,12 @@ impl Db {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for (i, s) in segments.iter().enumerate() {
-                let words = (!s.words.is_empty()).then(|| serde_json::to_string(&s.words)).transpose()?;
-                stmt.execute(params![session_id, i as i64, s.start, s.end, s.speaker, s.text, words])?;
+                let words = (!s.words.is_empty())
+                    .then(|| serde_json::to_string(&s.words))
+                    .transpose()?;
+                stmt.execute(params![
+                    session_id, i as i64, s.start, s.end, s.speaker, s.text, words
+                ])?;
             }
         }
         tx.commit()?;
@@ -657,14 +758,32 @@ impl Db {
     }
 
     pub fn get_segments(&self, session_id: i64) -> Result<Vec<Segment>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM segments WHERE session_id = ?1 ORDER BY idx")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM segments WHERE session_id = ?1 ORDER BY idx")?;
         let rows = stmt.query_map([session_id], |r| {
-            Ok((r.get("start_s")?, r.get("end_s")?, r.get("speaker")?, r.get("text")?, r.get::<_, Option<String>>("words_json")?))
+            Ok((
+                r.get("start_s")?,
+                r.get("end_s")?,
+                r.get("speaker")?,
+                r.get("text")?,
+                r.get::<_, Option<String>>("words_json")?,
+            ))
         })?;
         rows.map(|row| {
-            let (start, end, speaker, text, words): (f64, f64, String, String, Option<String>) = row?;
-            let words: Vec<Word> = words.map(|w| serde_json::from_str(&w)).transpose()?.unwrap_or_default();
-            Ok(Segment { start, end, speaker, text, words })
+            let (start, end, speaker, text, words): (f64, f64, String, String, Option<String>) =
+                row?;
+            let words: Vec<Word> = words
+                .map(|w| serde_json::from_str(&w))
+                .transpose()?
+                .unwrap_or_default();
+            Ok(Segment {
+                start,
+                end,
+                speaker,
+                text,
+                words,
+            })
         })
         .collect()
     }
@@ -672,9 +791,17 @@ impl Db {
     // --- analyses ---------------------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
-    pub fn add_analysis(&self, session_id: i64, analysis: &SessionAnalysis, metrics: &TalkMetrics, model: &str,
-                        prompt_version: &str, unverified_quotes: &[String], inputs: Option<&crate::versions::Manifest>,
-                        parent_id: Option<i64>) -> Result<StoredAnalysis> {
+    pub fn add_analysis(
+        &self,
+        session_id: i64,
+        analysis: &SessionAnalysis,
+        metrics: &TalkMetrics,
+        model: &str,
+        prompt_version: &str,
+        unverified_quotes: &[String],
+        inputs: Option<&crate::versions::Manifest>,
+        parent_id: Option<i64>,
+    ) -> Result<StoredAnalysis> {
         self.conn.execute(
             "INSERT INTO analyses (session_id, created_at, model, prompt_version, verdict, analysis_json, metrics_json,
              unverified_quotes_json, inputs_key, inputs_json, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -684,12 +811,15 @@ impl Db {
                     inputs.map(serde_json::to_string).transpose()?, parent_id],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.analysis_where("id = ?1", id)?.ok_or_else(|| anyhow!("analysis {id} vanished"))
+        self.analysis_where("id = ?1", id)?
+            .ok_or_else(|| anyhow!("analysis {id} vanished"))
     }
 
     pub fn set_analysis_inputs(&self, id: i64, inputs: &crate::versions::Manifest) -> Result<()> {
-        self.conn.execute("UPDATE analyses SET inputs_key = ?2, inputs_json = ?3 WHERE id = ?1",
-                          params![id, inputs.key, serde_json::to_string(inputs)?])?;
+        self.conn.execute(
+            "UPDATE analyses SET inputs_key = ?2, inputs_json = ?3 WHERE id = ?1",
+            params![id, inputs.key, serde_json::to_string(inputs)?],
+        )?;
         Ok(())
     }
 
@@ -704,7 +834,12 @@ impl Db {
     }
 
     /// Record the transcript a run produced (a no-op if it's already recorded).
-    pub fn save_transcript_revision(&self, run_id: i64, session_id: i64, segments: &[Segment]) -> Result<()> {
+    pub fn save_transcript_revision(
+        &self,
+        run_id: i64,
+        session_id: i64,
+        segments: &[Segment],
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO transcript_revisions (run_id, session_id, sha256, created_at, segments_json)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -715,18 +850,31 @@ impl Db {
 
     /// (transcript run id, sha256) for every kept transcript of a session, oldest first.
     pub fn transcript_revisions(&self, session_id: i64) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self.conn.prepare("SELECT run_id, sha256 FROM transcript_revisions WHERE session_id = ?1 ORDER BY run_id")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, sha256 FROM transcript_revisions WHERE session_id = ?1 ORDER BY run_id",
+        )?;
         let rows = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn judgment(&self, key: &str) -> Result<Option<crate::scoring::Assessment>> {
-        let json: Option<String> =
-            self.conn.query_row("SELECT assessment_json FROM judgments WHERE key = ?1", [key], |r| r.get(0)).optional()?;
+        let json: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT assessment_json FROM judgments WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()?;
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    pub fn save_judgment(&self, key: &str, scorer: &str, assessment: &crate::scoring::Assessment) -> Result<()> {
+    pub fn save_judgment(
+        &self,
+        key: &str,
+        scorer: &str,
+        assessment: &crate::scoring::Assessment,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO judgments (key, scorer, created_at, assessment_json) VALUES (?1, ?2, ?3, ?4)",
             params![key, scorer, now_iso(), serde_json::to_string(assessment)?],
@@ -741,9 +889,25 @@ impl Db {
     fn analysis_where(&self, clause: &str, arg: i64) -> Result<Option<StoredAnalysis>> {
         let row = self
             .conn
-            .query_row(&format!("SELECT * FROM analyses WHERE {clause}"), [arg], analysis_from_row)
+            .query_row(
+                &format!("SELECT * FROM analyses WHERE {clause}"),
+                [arg],
+                analysis_from_row,
+            )
             .optional()?;
-        let Some((id, session_id, created_at, model, prompt_version, analysis, metrics, unverified, inputs, parent_id)) = row else {
+        let Some((
+            id,
+            session_id,
+            created_at,
+            model,
+            prompt_version,
+            analysis,
+            metrics,
+            unverified,
+            inputs,
+            parent_id,
+        )) = row
+        else {
             return Ok(None);
         };
         let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
@@ -766,10 +930,18 @@ impl Db {
 
     /// Store a report's timeline, replacing any earlier one (excerpts are capped; the transcript
     /// has the full text).
-    pub fn set_turn_signals(&self, session_id: i64, analysis_id: i64, signals: &[crate::temperature::Signal],
-                            scorer: Option<&str>) -> Result<()> {
+    pub fn set_turn_signals(
+        &self,
+        session_id: i64,
+        analysis_id: i64,
+        signals: &[crate::temperature::Signal],
+        scorer: Option<&str>,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM turn_signals WHERE analysis_id = ?1", [analysis_id])?;
+        tx.execute(
+            "DELETE FROM turn_signals WHERE analysis_id = ?1",
+            [analysis_id],
+        )?;
         for s in signals {
             let features = serde_json::json!({
                 "voice": s.voice, "z": s.z, "backchannel_rate": s.backchannel_rate, "latency_s": s.latency_s,
@@ -790,20 +962,33 @@ impl Db {
     }
 
     /// A run's timeline in turn order, and the scorer that judged it.
-    pub fn turn_signals(&self, analysis_id: i64) -> Result<(Vec<crate::temperature::Signal>, Option<String>)> {
+    pub fn turn_signals(
+        &self,
+        analysis_id: i64,
+    ) -> Result<(Vec<crate::temperature::Signal>, Option<String>)> {
         let mut stmt = self.conn.prepare(
             "SELECT turn_idx, speaker, kind, start_s, end_s, excerpt, temperature, scorer, checks_json, features_json
              FROM turn_signals WHERE analysis_id = ?1 ORDER BY turn_idx",
         )?;
         let mut scorer = None;
         let rows = stmt.query_map([analysis_id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?,
-                r.get::<_, String>(5)?, r.get::<_, Option<f64>>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, String>(8)?,
-                r.get::<_, String>(9)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, f64>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, Option<f64>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+                r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?,
+            ))
         })?;
         let mut out = vec![];
         for row in rows {
-            let (idx, speaker, kind, start, end, text, temperature, row_scorer, checks, features) = row?;
+            let (idx, speaker, kind, start, end, text, temperature, row_scorer, checks, features) =
+                row?;
             if scorer.is_none() {
                 scorer = row_scorer;
             }
@@ -827,16 +1012,48 @@ impl Db {
         Ok((out, scorer))
     }
 
-    pub fn add_answer_checks(&self, session_id: i64, analysis_id: i64, checks: &[AnswerCheck]) -> Result<()> {
+    pub fn add_answer_checks(
+        &self,
+        session_id: i64,
+        analysis_id: i64,
+        checks: &[AnswerCheck],
+    ) -> Result<()> {
+        self.write_answer_checks(session_id, analysis_id, checks, false)
+    }
+
+    pub fn replace_answer_checks(
+        &self,
+        session_id: i64,
+        analysis_id: i64,
+        checks: &[AnswerCheck],
+    ) -> Result<()> {
+        self.write_answer_checks(session_id, analysis_id, checks, true)
+    }
+
+    fn write_answer_checks(
+        &self,
+        session_id: i64,
+        analysis_id: i64,
+        checks: &[AnswerCheck],
+        replace: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        if replace {
+            tx.execute(
+                "DELETE FROM answer_checks WHERE analysis_id = ?1",
+                [analysis_id],
+            )?;
+        }
         let now = now_iso();
         for c in checks {
-            self.conn.execute(
+            tx.execute(
                 "INSERT INTO answer_checks (analysis_id, session_id, created_at, answer_idx, answer_start, question, check_id,
                  scorer, pick, value, confidence, verdict) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![analysis_id, session_id, now, c.answer_idx, c.answer_start, c.question, c.check_id, c.scorer, c.pick,
                         c.value, c.confidence, c.verdict],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -867,36 +1084,63 @@ impl Db {
             "SELECT session_id, json_extract(analysis_json, '$.context.company') FROM analyses
              WHERE id IN (SELECT MAX(id) FROM analyses GROUP BY session_id)",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)))?;
-        Ok(rows.filter_map(|r| r.map(|(id, c)| c.map(|c| (id, c))).transpose()).collect::<rusqlite::Result<_>>()?)
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        Ok(rows
+            .filter_map(|r| r.map(|(id, c)| c.map(|c| (id, c))).transpose())
+            .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn latest_verdicts(&self) -> Result<HashMap<i64, Verdict>> {
         let mut stmt = self.conn.prepare(
             "SELECT session_id, verdict FROM analyses WHERE id IN (SELECT MAX(id) FROM analyses GROUP BY session_id)",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, parse::<Verdict>(r.get(1)?)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, parse::<Verdict>(r.get(1)?)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn analyses(&self, session_id: i64) -> Result<Vec<StoredAnalysis>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM analyses WHERE session_id = ?1 ORDER BY id DESC")?;
-        let rows = stmt.query_map([session_id], analysis_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM analyses WHERE session_id = ?1 ORDER BY id DESC")?;
+        let rows = stmt
+            .query_map([session_id], analysis_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|(id, session_id, created_at, model, prompt_version, analysis, metrics, unverified, inputs, parent_id)| {
-                let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
-                Ok(StoredAnalysis {
-                    id, session_id, created_at, model, prompt_version,
-                    analysis: serde_json::from_str(&analysis)?,
-                    metrics: serde_json::from_str(&metrics)?,
-                    unverified_quotes: serde_json::from_str(&unverified)?,
-                    answer_checks: self.answer_checks(id)?,
-                    turn_signals,
-                    timeline_scorer,
-                    inputs: inputs.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+            .map(
+                |(
+                    id,
+                    session_id,
+                    created_at,
+                    model,
+                    prompt_version,
+                    analysis,
+                    metrics,
+                    unverified,
+                    inputs,
                     parent_id,
-                })
-            })
+                )| {
+                    let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
+                    Ok(StoredAnalysis {
+                        id,
+                        session_id,
+                        created_at,
+                        model,
+                        prompt_version,
+                        analysis: serde_json::from_str(&analysis)?,
+                        metrics: serde_json::from_str(&metrics)?,
+                        unverified_quotes: serde_json::from_str(&unverified)?,
+                        answer_checks: self.answer_checks(id)?,
+                        turn_signals,
+                        timeline_scorer,
+                        inputs: inputs.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+                        parent_id,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -906,8 +1150,13 @@ impl Db {
 
     // --- stage runs -------------------------------------------------------------------------
 
-    pub fn start_run(&self, session_id: i64, step: Step, params: &serde_json::Value, input_run_id: Option<i64>)
-        -> Result<i64> {
+    pub fn start_run(
+        &self,
+        session_id: i64,
+        step: Step,
+        params: &serde_json::Value,
+        input_run_id: Option<i64>,
+    ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO step_runs (session_id, step, status, started_at, params_json, input_run_id, pid)
              VALUES (?1, ?2, 'running', ?3, ?4, ?5, ?6)",
@@ -918,9 +1167,17 @@ impl Db {
 
     /// A finished run from history (used to backfill older sessions). One argument per column.
     #[allow(clippy::too_many_arguments)]
-    pub fn insert_finished_run(&self, session_id: i64, step: Step, status: RunStatus, at: &str,
-                               params: &serde_json::Value, input_run_id: Option<i64>, output_id: Option<i64>,
-                               error: Option<&str>) -> Result<i64> {
+    pub fn insert_finished_run(
+        &self,
+        session_id: i64,
+        step: Step,
+        status: RunStatus,
+        at: &str,
+        params: &serde_json::Value,
+        input_run_id: Option<i64>,
+        output_id: Option<i64>,
+        error: Option<&str>,
+    ) -> Result<i64> {
         self.conn.execute(
             "INSERT INTO step_runs (session_id, step, status, started_at, finished_at, params_json, input_run_id,
              output_id, error) VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
@@ -946,32 +1203,51 @@ impl Db {
     }
 
     pub fn set_run_input(&self, id: i64, input_run_id: i64) -> Result<()> {
-        self.conn.execute("UPDATE step_runs SET input_run_id = ?2 WHERE id = ?1", params![id, input_run_id])?;
+        self.conn.execute(
+            "UPDATE step_runs SET input_run_id = ?2 WHERE id = ?1",
+            params![id, input_run_id],
+        )?;
         Ok(())
     }
 
     pub fn set_run_warnings(&self, id: i64, warnings: &[String]) -> Result<()> {
-        let json = (!warnings.is_empty()).then(|| serde_json::to_string(warnings).expect("strings serialize"));
-        self.conn.execute("UPDATE step_runs SET warnings_json = ?2 WHERE id = ?1", params![id, json])?;
+        let json = (!warnings.is_empty())
+            .then(|| serde_json::to_string(warnings).expect("strings serialize"));
+        self.conn.execute(
+            "UPDATE step_runs SET warnings_json = ?2 WHERE id = ?1",
+            params![id, json],
+        )?;
         Ok(())
     }
 
     pub fn set_run_progress(&self, id: i64, progress: Option<f64>, message: &str) -> Result<()> {
-        self.conn.execute("UPDATE step_runs SET progress = ?2, message = ?3 WHERE id = ?1", params![id, progress, message])?;
+        self.conn.execute(
+            "UPDATE step_runs SET progress = ?2, message = ?3 WHERE id = ?1",
+            params![id, progress, message],
+        )?;
         Ok(())
     }
 
     /// Every run for a session, oldest first.
     pub fn runs(&self, session_id: i64) -> Result<Vec<StepRun>> {
-        let mut stmt = self.conn.prepare("SELECT * FROM step_runs WHERE session_id = ?1 ORDER BY id")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT * FROM step_runs WHERE session_id = ?1 ORDER BY id")?;
         let rows = stmt.query_map([session_id], run_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     // --- next steps -------------------------------------------------------------------------
 
-    pub fn add_next_steps(&self, session_id: i64, plan: &NextSteps, model: &str, prompt_version: &str,
-                          analysis_id: Option<i64>, unverified_quotes: &[String]) -> Result<StoredNextSteps> {
+    pub fn add_next_steps(
+        &self,
+        session_id: i64,
+        plan: &NextSteps,
+        model: &str,
+        prompt_version: &str,
+        analysis_id: Option<i64>,
+        unverified_quotes: &[String],
+    ) -> Result<StoredNextSteps> {
         self.conn.execute(
             "INSERT INTO next_steps (session_id, created_at, model, prompt_version, analysis_id, plan_json,
              unverified_quotes_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -979,14 +1255,17 @@ impl Db {
                     serde_json::to_string(unverified_quotes)?],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.next_steps_by_id(id)?.ok_or_else(|| anyhow!("next steps {id} vanished"))
+        self.next_steps_by_id(id)?
+            .ok_or_else(|| anyhow!("next steps {id} vanished"))
     }
 
     /// (id, created_at, model, the report it was planned from) for every next-steps run, oldest first.
     pub fn next_steps_index(&self, session_id: i64) -> Result<Vec<NextStepsEntry>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, model, analysis_id FROM next_steps WHERE session_id = ?1 ORDER BY id")?;
-        let rows = stmt.query_map([session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1001,18 +1280,43 @@ impl Db {
     fn next_steps_where(&self, clause: &str, arg: i64) -> Result<Option<StoredNextSteps>> {
         let row = self
             .conn
-            .query_row(&format!("SELECT * FROM next_steps WHERE {clause}"), [arg], |r| {
-                Ok((r.get::<_, i64>("id")?, r.get::<_, i64>("session_id")?, r.get::<_, String>("created_at")?,
-                    r.get::<_, String>("model")?, r.get::<_, String>("prompt_version")?,
-                    r.get::<_, Option<i64>>("analysis_id")?, r.get::<_, String>("plan_json")?,
-                    r.get::<_, String>("unverified_quotes_json")?))
-            })
+            .query_row(
+                &format!("SELECT * FROM next_steps WHERE {clause}"),
+                [arg],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>("id")?,
+                        r.get::<_, i64>("session_id")?,
+                        r.get::<_, String>("created_at")?,
+                        r.get::<_, String>("model")?,
+                        r.get::<_, String>("prompt_version")?,
+                        r.get::<_, Option<i64>>("analysis_id")?,
+                        r.get::<_, String>("plan_json")?,
+                        r.get::<_, String>("unverified_quotes_json")?,
+                    ))
+                },
+            )
             .optional()?;
-        let Some((id, session_id, created_at, model, prompt_version, analysis_id, plan, unverified)) = row else {
+        let Some((
+            id,
+            session_id,
+            created_at,
+            model,
+            prompt_version,
+            analysis_id,
+            plan,
+            unverified,
+        )) = row
+        else {
             return Ok(None);
         };
         Ok(Some(StoredNextSteps {
-            id, session_id, created_at, model, prompt_version, analysis_id,
+            id,
+            session_id,
+            created_at,
+            model,
+            prompt_version,
+            analysis_id,
             plan: serde_json::from_str(&plan)?,
             unverified_quotes: serde_json::from_str(&unverified)?,
         }))
@@ -1020,7 +1324,12 @@ impl Db {
 
     // --- outcomes ---------------------------------------------------------------------------
 
-    pub fn set_outcome(&self, session_id: i64, result: OutcomeResult, notes: Option<&str>) -> Result<Outcome> {
+    pub fn set_outcome(
+        &self,
+        session_id: i64,
+        result: OutcomeResult,
+        notes: Option<&str>,
+    ) -> Result<Outcome> {
         self.get_session(session_id)?;
         self.conn.execute(
             "INSERT INTO outcomes (session_id, result, notes, updated_at) VALUES (?1, ?2, ?3, ?4)
@@ -1036,9 +1345,16 @@ impl Db {
     }
 
     pub fn all_outcomes(&self) -> Result<HashMap<i64, Outcome>> {
-        let mut stmt = self.conn.prepare("SELECT session_id, result, notes, updated_at FROM outcomes")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id, result, notes, updated_at FROM outcomes")?;
         let rows = stmt.query_map([], |r| {
-            let o = Outcome { session_id: r.get(0)?, result: parse(r.get(1)?)?, notes: r.get(2)?, updated_at: r.get(3)? };
+            let o = Outcome {
+                session_id: r.get(0)?,
+                result: parse(r.get(1)?)?,
+                notes: r.get(2)?,
+                updated_at: r.get(3)?,
+            };
             Ok((o.session_id, o))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1076,14 +1392,24 @@ mod tests {
         assert_eq!(db.get_session(1)?, s);
 
         let segs = vec![
-            Segment { words: vec![Word { start: 0.0, end: 0.5, text: " Hi".into() }], ..Segment::new(0.0, 1.5, "Hi there.", "interviewer") },
+            Segment {
+                words: vec![Word {
+                    start: 0.0,
+                    end: 0.5,
+                    text: " Hi".into(),
+                }],
+                ..Segment::new(0.0, 1.5, "Hi there.", "interviewer")
+            },
             Segment::new(2.0, 3.0, "Hello!", "you"),
         ];
         db.replace_segments(s.id, &segs)?;
         assert_eq!(db.get_segments(s.id)?, segs);
         db.replace_segments(s.id, &segs[..1])?;
         assert_eq!(db.get_segments(s.id)?.len(), 1);
-        assert_eq!(db.list_sessions()?.iter().map(|s| s.id).collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            db.list_sessions()?.iter().map(|s| s.id).collect::<Vec<_>>(),
+            [1]
+        );
         Ok(())
     }
 
@@ -1096,14 +1422,20 @@ mod tests {
             let db = Db::open(&path)?;
             let s = db.create_session(new_session(Mode::Dual))?;
             db.start_run(s.id, Step::Recording, &serde_json::json!({}), None)?;
-            db.conn.execute_batch("ALTER TABLE step_runs DROP COLUMN warnings_json; PRAGMA user_version = 2;")?;
+            db.conn.execute_batch(
+                "ALTER TABLE step_runs DROP COLUMN warnings_json; PRAGMA user_version = 2;",
+            )?;
         }
         let db = Db::open(&path)?;
         let run = db.runs(1)?.pop().expect("the run survives");
         assert!(run.warnings.is_empty());
         db.set_run_warnings(run.id, &["Speaker detection found 1 voice".into()])?;
         assert_eq!(db.runs(1)?[0].warnings, ["Speaker detection found 1 voice"]);
-        assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            SCHEMA_VERSION
+        );
         Ok(())
     }
 
@@ -1118,7 +1450,11 @@ mod tests {
             db.conn.execute_batch("DROP INDEX turn_signals_by_analysis; DROP TABLE turn_signals; PRAGMA user_version = 4;")?;
         }
         let db = Db::open(&path)?;
-        assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            SCHEMA_VERSION
+        );
         assert_eq!(db.turn_signals(1)?, (vec![], None));
         assert!(db.get_session(1).is_ok(), "the session survives");
         Ok(())
@@ -1133,19 +1469,47 @@ mod tests {
         {
             let mut db = Db::open(&path)?;
             let s = db.create_session(new_session(Mode::Dual))?;
-            db.replace_segments(s.id, &[Segment::new(0.0, 2.0, "Tell me about yourself.", crate::models::INTERVIEWER)])?;
-            db.insert_finished_run(s.id, Step::Transcript, RunStatus::Succeeded, "t", &serde_json::json!({}), None, None, None)?;
+            db.replace_segments(
+                s.id,
+                &[Segment::new(
+                    0.0,
+                    2.0,
+                    "Tell me about yourself.",
+                    crate::models::INTERVIEWER,
+                )],
+            )?;
+            db.insert_finished_run(
+                s.id,
+                Step::Transcript,
+                RunStatus::Succeeded,
+                "t",
+                &serde_json::json!({}),
+                None,
+                None,
+                None,
+            )?;
             db.conn.execute_batch(
                 "DROP INDEX analyses_by_inputs; DROP TABLE transcript_revisions; DROP TABLE judgments;
                  ALTER TABLE analyses DROP COLUMN inputs_key; ALTER TABLE analyses DROP COLUMN inputs_json;
                  ALTER TABLE analyses DROP COLUMN parent_id; PRAGMA user_version = 5;")?;
         }
         let db = Db::open(&path)?;
-        assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            SCHEMA_VERSION
+        );
         let revisions = db.transcript_revisions(1)?;
         assert_eq!(revisions.len(), 1, "the live transcript is kept");
-        assert_eq!(revisions[0].1, crate::versions::transcript_sha(&db.get_segments(1)?));
-        assert_eq!(db.analysis_by_key(1, "none")?.map(|a| a.id), None, "the new columns are queryable");
+        assert_eq!(
+            revisions[0].1,
+            crate::versions::transcript_sha(&db.get_segments(1)?)
+        );
+        assert_eq!(
+            db.analysis_by_key(1, "none")?.map(|a| a.id),
+            None,
+            "the new columns are queryable"
+        );
         Ok(())
     }
 
@@ -1154,7 +1518,11 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let db = Db::open(&dir.path().join("coach.db"))?;
         let s = db.create_session(new_session(Mode::Dual))?;
-        db.set_outcome(s.id, OutcomeResult::Pending, Some("Recruiter said next week"))?;
+        db.set_outcome(
+            s.id,
+            OutcomeResult::Pending,
+            Some("Recruiter said next week"),
+        )?;
         let o = db.set_outcome(s.id, OutcomeResult::Advanced, None)?;
         assert_eq!(o.result, OutcomeResult::Advanced);
         assert_eq!(o.notes.as_deref(), Some("Recruiter said next week"));

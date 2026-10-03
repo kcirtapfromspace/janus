@@ -13,7 +13,6 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use interview_coach::auth;
-use interview_coach::{errln, out, outln};
 use interview_coach::capture;
 use interview_coach::config::{FileConfig, ModelRef, Provider, ScorerRef, Settings};
 use interview_coach::db::Db;
@@ -26,14 +25,19 @@ use interview_coach::pipeline;
 use interview_coach::progress::Progress;
 use interview_coach::proxy::{self, KeyTarget, LlmEndpoint};
 use interview_coach::report;
-use interview_coach::scoring::{ClaudeScorer, JevScorer, Scorer};
+use interview_coach::scoring::{JevScorer, Scorer};
 use interview_coach::session_view;
 use interview_coach::setup;
 use interview_coach::steps::{self, StageStatus};
 use interview_coach::tools::{Origin, Tool};
+use interview_coach::{errln, out, outln};
 
 #[derive(Parser)]
-#[command(name = "ic", about = "Interview Coach — record, transcribe, and get coached on your interviews.", version)]
+#[command(
+    name = "ic",
+    about = "Interview Coach — record, transcribe, and get coached on your interviews.",
+    version
+)]
 struct Cli {
     /// Model for analysis, e.g. anthropic/claude-opus-5-5 or openai/gpt-5.6, or "cheapest" for the
     /// cheapest one available (by list price; see `ic models`). Overrides the configured default.
@@ -250,17 +254,31 @@ enum Cmd {
         #[arg(long)]
         notes: Option<String>,
     },
-    /// Sign in to Claude through your browser (no API key needed).
+    /// Sign in to Claude or ChatGPT through your browser (no API key needed).
     Login {
+        /// Browser sign-in provider. OpenAI uses Sign in with ChatGPT.
+        #[arg(long, default_value = "anthropic")]
+        provider: Provider,
+        /// Reauthorize a saved ChatGPT registration (its issued client ID).
+        #[arg(long)]
+        account: Option<String>,
+        /// Explicitly request permission to use your ChatGPT plan.
+        #[arg(long)]
+        enable_plan: bool,
         /// JSON-lines events for the app (the sign-in URL, a code prompt); a code is read from stdin.
         #[arg(long, hide = true)]
         events: bool,
-        /// Sign out first, to sign in with a different account.
+        /// Claude: sign out first. OpenAI: add a separate account, keeping existing registrations.
         #[arg(long)]
         switch: bool,
     },
-    /// Sign out of Claude (only Interview Coach's sign-in; other tools keep theirs).
-    Logout,
+    /// Sign out of the selected provider (only Interview Coach's session).
+    Logout {
+        #[arg(long, default_value = "anthropic")]
+        provider: Provider,
+        #[arg(long, hide = true)]
+        events: bool,
+    },
     /// What this Mac still needs before Interview Coach works, and the steps that set it up.
     Setup {
         #[command(subcommand)]
@@ -299,20 +317,32 @@ enum RoleCmd {
         json: bool,
     },
     /// interviewing, offer, accepted, rejected or withdrawn.
-    Status { id: i64, status: String },
-    Rename { id: i64, title: String },
+    Status {
+        id: i64,
+        status: String,
+    },
+    Rename {
+        id: i64,
+        title: String,
+    },
     Archive {
         id: i64,
         #[arg(long)]
         undo: bool,
     },
     /// Move every interview of one role into another, and remove the first.
-    Merge { from: i64, into: i64 },
+    Merge {
+        from: i64,
+        into: i64,
+    },
 }
 
 #[derive(Subcommand)]
 enum CompanyCmd {
-    Rename { old: String, new: String },
+    Rename {
+        old: String,
+        new: String,
+    },
     Archive {
         name: String,
         #[arg(long)]
@@ -455,7 +485,8 @@ enum ProxyCmd {
 }
 
 fn parse_step(s: &str) -> Result<Step, String> {
-    s.parse().map_err(|_| "expected one of: recording, transcript, report, next".to_string())
+    s.parse()
+        .map_err(|_| "expected one of: recording, transcript, report, next".to_string())
 }
 
 fn parse_outcome(s: &str) -> Result<OutcomeResult, String> {
@@ -486,7 +517,8 @@ impl Ui {
 
 impl Progress for Ui {
     fn stage(&mut self, message: &str) {
-        self.bar.set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap());
+        self.bar
+            .set_style(ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap());
         self.bar.set_message(message.to_string());
         self.last_step = 0;
     }
@@ -501,7 +533,11 @@ impl Progress for Ui {
         } else {
             "{spinner:.cyan} {msg} [{bar:30.cyan/dim}] {percent}%"
         };
-        self.bar.set_style(ProgressStyle::with_template(template).unwrap().progress_chars("━╸─"));
+        self.bar.set_style(
+            ProgressStyle::with_template(template)
+                .unwrap()
+                .progress_chars("━╸─"),
+        );
         self.bar.set_length(total);
         self.bar.set_position(done);
     }
@@ -523,60 +559,78 @@ fn run_transcription(db: &mut Db, settings: &Settings, id: i64) -> Result<()> {
     for w in &result.warnings {
         warn(w);
     }
-    outln!("{} {} turns. View it with {}", style(format!("Transcribed session {id}:")).green(),
-             to_turns(&result.segments).len(), style(format!("ic transcript {id}")).bold());
+    outln!(
+        "{} {} turns. View it with {}",
+        style(format!("Transcribed session {id}:")).green(),
+        to_turns(&result.segments).len(),
+        style(format!("ic transcript {id}")).bold()
+    );
     Ok(())
 }
 
 /// Why the default model can't be used with the current setup, if it can't.
 fn analysis_blocker(settings: &Settings) -> Option<String> {
-    blocker_for(settings, &settings.model)
+    blocker_for(settings, &settings.model).or_else(||
+        (!proxy::using_external_proxy() && !interview_coach::jev_auth::has_key(settings))
+            .then(|| "Jev evaluation requires a TypeSafe key. Add it in Setup (or: ic proxy key typesafe)".into()))
 }
 
 /// Why `model` can't be used with the current setup, if it can't.
 fn blocker_for(settings: &Settings, model: &ModelRef) -> Option<String> {
-    if LlmEndpoint::load(settings).is_none() {
-        return Some("the AI proxy isn't set up yet — open Setup in the app (or run: ic proxy setup)".into());
+    if proxy::using_external_proxy() && LlmEndpoint::load(settings).is_none() {
+        return Some(
+            "IC_LLM_URL requires IC_LLM_KEY; configure both or remove the proxy override".into(),
+        );
     }
     match model.provider {
         Provider::Anthropic => (!auth::has_login())
-            .then(|| "you're not signed in to Claude — sign in from Setup in the app (or run: ic login)".to_string()),
-        Provider::OpenAi => (!proxy::using_external_proxy() && !proxy::has_key(settings, KeyTarget::OpenAi))
-            .then(|| format!("the proxy has no OpenAI key, which {model} needs — add one in Setup (or: ic proxy key openai)")),
+            .then(|| "you're not signed in to Claude — sign in from Setup (or: ic login)".into()),
+        Provider::OpenAi if proxy::using_external_proxy() => None,
+        Provider::OpenAi => match interview_coach::openai_auth::status(settings) {
+            Err(e) => Some(e.to_string()),
+            Ok(status) if !status.using_api_key && status.active.is_some() => {
+                if !status.signed_in { Some("sign in with ChatGPT again in Setup (or: ic login --provider openai)".into()) }
+                else if !status.plan_enabled { Some("enable ChatGPT plan usage in Setup, or explicitly choose an API key".into()) }
+                else { None }
+            }
+            Ok(status) => (!status.api_key && proxy::legacy_openai_key(settings).is_none())
+                .then(|| "Continue with ChatGPT in Setup (or: ic login --provider openai), or add an API key".into()),
+        },
     }
 }
 
-fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, open: bool, full: bool) -> Result<()> {
+fn run_analysis(
+    db: &mut Db,
+    settings: &Settings,
+    model: &ModelRef,
+    id: i64,
+    open: bool,
+    full: bool,
+) -> Result<()> {
     if let Some(reason) = blocker_for(settings, model) {
         bail!("Can't analyse yet: {reason}\nThen run: ic run report {id}");
     }
-    let mut ui = Ui::new();
-    if let Err(e) = proxy::ensure_running(settings, &mut ui) {
-        ui.finish();
-        return Err(e);
+    if !proxy::using_external_proxy() && !interview_coach::jev_auth::has_key(settings) {
+        bail!(
+            "Jev evaluation requires a TypeSafe key. Add it in Setup (or: ic proxy key typesafe), then rerun the report. Your recording and transcript are kept."
+        );
     }
-    let endpoint = LlmEndpoint::load(settings).expect("checked above");
-    let client = llm::client(model, endpoint.clone());
-    // The answer-by-answer checks, when their scorer is available, and Jev for the room's timeline
-    // whenever its key is there.
-    let jev_client = interview_coach::llm::jev::Client::new(endpoint.clone());
-    let has_jev = proxy::using_external_proxy() || proxy::has_key(settings, KeyTarget::TypeSafe);
-    let timeline_scorer = JevScorer { client: &jev_client, model: interview_coach::llm::jev::DEFAULT_MODEL.into() };
-    let (jev_scorer, claude_llm);
-    let claude_scorer;
-    let checker: Option<&dyn Scorer> = match &settings.scorer {
-        ScorerRef::Jev(m) if has_jev => {
-            jev_scorer = JevScorer { client: &jev_client, model: m.clone() };
-            Some(&jev_scorer)
-        }
-        ScorerRef::Claude(m) if auth::has_login() => {
-            claude_llm = llm::client(&ModelRef { provider: Provider::Anthropic, name: m.clone() }, endpoint);
-            claude_scorer = ClaudeScorer { llm: claude_llm.as_ref(), model: m.clone(), effort: llm::Effort::Low };
-            Some(&claude_scorer)
-        }
-        _ => None,
+    let mut ui = Ui::new();
+    let client = llm::configured_client(settings, model)?;
+    let jev_client = interview_coach::llm::jev::Client::configured(settings)?;
+    let evaluator = JevScorer {
+        client: &jev_client,
+        model: match &settings.scorer {
+            ScorerRef::Jev(model) => model.clone(),
+            // Legacy off/Claude settings no longer disable the standard product's Jev evaluations.
+            _ => interview_coach::llm::jev::DEFAULT_MODEL.into(),
+        },
     };
-    let extras = pipeline::ReportExtras { checker, timeline: has_jev.then_some(&timeline_scorer as &dyn Scorer) };
+    let extras = pipeline::ReportExtras {
+        checker: Some(&evaluator),
+        timeline: Some(&evaluator),
+        require_evaluation: true,
+    };
     let stored = pipeline::analyze_session_with(db, client.as_ref(), model, id, extras, &mut ui);
     ui.finish();
     let stored = stored?;
@@ -596,12 +650,7 @@ fn run_next(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, show: b
         bail!("Can't plan next steps yet: {reason}\nThen run: ic run next {id}");
     }
     let mut ui = Ui::new();
-    if let Err(e) = proxy::ensure_running(settings, &mut ui) {
-        ui.finish();
-        return Err(e);
-    }
-    let endpoint = LlmEndpoint::load(settings).expect("checked above");
-    let client = llm::client(model, endpoint);
+    let client = llm::configured_client(settings, model)?;
     let stored = pipeline::plan_next_steps(db, client.as_ref(), model, id, &mut ui);
     ui.finish();
     let stored = stored?;
@@ -621,21 +670,46 @@ fn after_transcription(db: &mut Db, settings: &Settings, id: i64, analyze: bool)
         None => {
             run_analysis(db, settings, &settings.model, id, false, false)?;
             run_next(db, settings, &settings.model, id, false)?;
-            outln!("{}", style(format!("What to do next: ic next {id} · All stages: ic steps {id}")).dim());
+            outln!(
+                "{}",
+                style(format!(
+                    "What to do next: ic next {id} · All stages: ic steps {id}"
+                ))
+                .dim()
+            );
         }
-        Some(reason) => outln!("{}", style(format!("Skipping analysis: {reason}, then: ic run report {id} --then-later")).dim()),
+        Some(reason) => outln!(
+            "{}",
+            style(format!(
+                "Skipping analysis: {reason}, then: ic run report {id} --then-later"
+            ))
+            .dim()
+        ),
     }
     Ok(())
 }
 
 /// Re-run one stage; with `then_later`, also update every later stage that's out of date.
-fn run_step(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model: Option<&ModelRef>,
-            speakers: Option<i64>, then_later: bool) -> Result<()> {
+fn run_step(
+    db: &mut Db,
+    settings: &Settings,
+    step: Step,
+    id: i64,
+    explicit_model: Option<&ModelRef>,
+    speakers: Option<i64>,
+    then_later: bool,
+) -> Result<()> {
     run_one(db, settings, step, id, explicit_model, speakers)?;
     if then_later {
         for later in Step::ALL.iter().copied().skip_while(|s| *s != step).skip(1) {
-            let state = steps::flow(db, id)?.into_iter().find(|s| s.step == later).expect("every stage has a state");
-            if matches!(state.status, StageStatus::OutOfDate | StageStatus::NotRun | StageStatus::Failed) {
+            let state = steps::flow(db, id)?
+                .into_iter()
+                .find(|s| s.step == later)
+                .expect("every stage has a state");
+            if matches!(
+                state.status,
+                StageStatus::OutOfDate | StageStatus::NotRun | StageStatus::Failed
+            ) {
                 run_one(db, settings, later, id, explicit_model, None)?;
             }
         }
@@ -644,15 +718,24 @@ fn run_step(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_mode
     print_steps(db, id)
 }
 
-fn run_one(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model: Option<&ModelRef>,
-           speakers: Option<i64>) -> Result<()> {
+fn run_one(
+    db: &mut Db,
+    settings: &Settings,
+    step: Step,
+    id: i64,
+    explicit_model: Option<&ModelRef>,
+    speakers: Option<i64>,
+) -> Result<()> {
     match step {
         Step::Recording => {
             let mut ui = Ui::new();
             let result = pipeline::reprocess_audio(db, id, &mut ui);
             ui.finish();
             result?;
-            outln!("{} Re-processed the audio for session {id}.", style("✓").green());
+            outln!(
+                "{} Re-processed the audio for session {id}.",
+                style("✓").green()
+            );
         }
         Step::Transcript => {
             if let Some(n) = speakers {
@@ -663,7 +746,9 @@ fn run_one(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model
             run_transcription(db, settings, id)?;
         }
         Step::Report => {
-            let model = explicit_model.cloned().unwrap_or_else(|| settings.model.clone());
+            let model = explicit_model
+                .cloned()
+                .unwrap_or_else(|| settings.model.clone());
             run_analysis(db, settings, &model, id, false, false)?;
         }
         Step::Next => {
@@ -692,19 +777,38 @@ fn print_steps(db: &Db, id: i64) -> Result<()> {
                 })
                 .cyan(),
             ),
-            StageStatus::OutOfDate => (style("⚠").yellow(), style("out of date".to_string()).yellow()),
+            StageStatus::OutOfDate => (
+                style("⚠").yellow(),
+                style("out of date".to_string()).yellow(),
+            ),
             StageStatus::Failed => (style("✗").red(), style("failed".to_string()).red()),
             StageStatus::NotRun => (style("○").dim(), style("not run".to_string()).dim()),
         };
-        let when = stage.last_run_at.as_deref().map(|t| t.chars().take(16).collect::<String>().replace('T', " "));
-        outln!(" {mark} {:<20} {:<12} {}  {}", stage.label, status.to_string(), stage.summary.as_deref().unwrap_or(""),
-                 style(when.unwrap_or_default()).dim());
+        let when = stage
+            .last_run_at
+            .as_deref()
+            .map(|t| t.chars().take(16).collect::<String>().replace('T', " "));
+        outln!(
+            " {mark} {:<20} {:<12} {}  {}",
+            stage.label,
+            status.to_string(),
+            stage.summary.as_deref().unwrap_or(""),
+            style(when.unwrap_or_default()).dim()
+        );
         if let Some(error) = &stage.error {
             outln!("     {}", style(error).red());
         }
     }
-    if let Some(first) = view.stages.iter().find(|s| s.status == StageStatus::OutOfDate) {
-        let upstream = first.step.upstream().map(|u| u.as_str()).unwrap_or("recording");
+    if let Some(first) = view
+        .stages
+        .iter()
+        .find(|s| s.status == StageStatus::OutOfDate)
+    {
+        let upstream = first
+            .step
+            .upstream()
+            .map(|u| u.as_str())
+            .unwrap_or("recording");
         outln!("{}", style(format!("Update later stages: ic run {} {id} --then-later   (or just: ic run {} {id} --then-later)",
                                      first.step, upstream)).dim());
     }
@@ -719,19 +823,32 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-fn record(settings: &Settings, title: Option<String>, company: Option<String>, aec: bool, duration: Option<u32>,
-          yes: bool, analyze: bool) -> Result<()> {
+fn record(
+    settings: &Settings,
+    title: Option<String>,
+    company: Option<String>,
+    aec: bool,
+    duration: Option<u32>,
+    yes: bool,
+    analyze: bool,
+) -> Result<()> {
     if !yes && !confirm("Has everyone on the call agreed to be recorded?")? {
         bail!("Not recording. Some places require everyone's consent to record a call.");
     }
     let mut db = open_db(settings)?;
-    let title = title.unwrap_or_else(|| chrono::Local::now().format("Interview %Y-%m-%d %H:%M").to_string());
+    let title = title.unwrap_or_else(|| {
+        chrono::Local::now()
+            .format("Interview %Y-%m-%d %H:%M")
+            .to_string()
+    });
     let session = pipeline::create_recording_session(&db, settings, &title, company)?;
     let dir = PathBuf::from(&session.dir);
 
     let started = capture::launch(&dir, duration, aec).and_then(|_| {
         let spinner = Ui::new();
-        spinner.bar.set_message("Starting recorder — if macOS asks for permission, click Allow…");
+        spinner
+            .bar
+            .set_message("Starting recorder — if macOS asks for permission, click Allow…");
         let r = capture::wait_started(&dir, Duration::from_secs(90));
         spinner.finish();
         r
@@ -747,8 +864,11 @@ fn record(settings: &Settings, title: Option<String>, company: Option<String>, a
     let ui = Ui::new();
     let t0 = Instant::now();
     while capture::is_running(&dir) && !stop.load(Ordering::SeqCst) {
-        ui.bar.set_message(format!("{} Recording {} — press Ctrl+C to stop", style("●").red(),
-                                   fmt_ts(t0.elapsed().as_secs_f64())));
+        ui.bar.set_message(format!(
+            "{} Recording {} — press Ctrl+C to stop",
+            style("●").red(),
+            fmt_ts(t0.elapsed().as_secs_f64())
+        ));
         std::thread::sleep(Duration::from_millis(250));
     }
     ui.finish();
@@ -757,7 +877,13 @@ fn record(settings: &Settings, title: Option<String>, company: Option<String>, a
 
 /// `stop_recorder`: signal ICRecorder.app to stop first (the CLI flow). The Interview Coach app
 /// stops its own in-process recording before calling `ic recording finish`.
-fn finish_recording(db: &mut Db, settings: &Settings, id: i64, analyze: bool, stop_recorder: bool) -> Result<()> {
+fn finish_recording(
+    db: &mut Db,
+    settings: &Settings,
+    id: i64,
+    analyze: bool,
+    stop_recorder: bool,
+) -> Result<()> {
     let mut session = db.get_session(id)?;
     let dir = PathBuf::from(&session.dir);
     if stop_recorder {
@@ -766,7 +892,10 @@ fn finish_recording(db: &mut Db, settings: &Settings, id: i64, analyze: bool, st
         bail!("session {id} is still recording");
     } else if capture::read_report(&dir).is_none() {
         db.set_status(id, Status::Failed, Some("No recording was made".into()))?;
-        bail!("session {id} has no finished recording (no recorder.json in {})", dir.display());
+        bail!(
+            "session {id} has no finished recording (no recorder.json in {})",
+            dir.display()
+        );
     }
     let ui = Ui::new();
     ui.bar.set_message("Saving recording…");
@@ -780,16 +909,33 @@ fn finish_recording(db: &mut Db, settings: &Settings, id: i64, analyze: bool, st
     }
     let (mic, system) = (dir.join("mic.wav"), dir.join("system.wav"));
     if !mic.exists() || !system.exists() {
-        db.set_status(id, Status::Failed, Some("Recorder produced no audio files".into()))?;
-        bail!("The recorder produced no audio. See {}", dir.join("recorder.log").display());
+        db.set_status(
+            id,
+            Status::Failed,
+            Some("Recorder produced no audio files".into()),
+        )?;
+        bail!(
+            "The recorder produced no audio. See {}",
+            dir.join("recorder.log").display()
+        );
     }
     // The raw 48 kHz WAVs stay next to the FLACs for now: they're what we'd inspect if the recorder
     // misbehaves. Revisit deleting them once real calls have validated the recorder.
     let mut ui = Ui::new();
     let processed = pipeline::process_recording(db, id, &mic, &system, &mut ui);
     ui.finish();
-    session = processed.with_context(|| format!("Couldn't process the recording; the raw audio is still in {}", dir.display()))?;
-    outln!("Saved session {} ({}) → {}", style(id).bold(), fmt_ts(session.duration_s.unwrap_or(0.0)), dir.display());
+    session = processed.with_context(|| {
+        format!(
+            "Couldn't process the recording; the raw audio is still in {}",
+            dir.display()
+        )
+    })?;
+    outln!(
+        "Saved session {} ({}) → {}",
+        style(id).bold(),
+        fmt_ts(session.duration_s.unwrap_or(0.0)),
+        dir.display()
+    );
     after_transcription(db, settings, id, analyze)
 }
 
@@ -800,7 +946,11 @@ fn list_json(db: &Db, all: bool) -> Result<()> {
     if all {
         outln!("{}", serde_json::to_string(&lib)?);
     } else {
-        let shown: Vec<_> = lib.sessions.into_iter().filter(|s| !s.archived && s.deleted_days_left.is_none()).collect();
+        let shown: Vec<_> = lib
+            .sessions
+            .into_iter()
+            .filter(|s| !s.archived && s.deleted_days_left.is_none())
+            .collect();
         outln!("{}", serde_json::to_string(&shown)?);
     }
     Ok(())
@@ -811,8 +961,11 @@ fn list(settings: &Settings, json: bool, all: bool) -> Result<()> {
     if json {
         return list_json(&db, all);
     }
-    let sessions: Vec<_> = db.list_sessions()?.into_iter()
-        .filter(|s| all || (s.archived_at.is_none() && s.deleted_at.is_none())).collect();
+    let sessions: Vec<_> = db
+        .list_sessions()?
+        .into_iter()
+        .filter(|s| all || (s.archived_at.is_none() && s.deleted_at.is_none()))
+        .collect();
     if sessions.is_empty() {
         if db.list_sessions()?.is_empty() {
             outln!("No sessions yet. Try: ic record   or   ic import path/to/interview.m4a");
@@ -821,8 +974,14 @@ fn list(settings: &Settings, json: bool, all: bool) -> Result<()> {
         }
         return Ok(());
     }
-    let (verdicts, outcomes, companies) = (db.latest_verdicts()?, db.all_outcomes()?, db.latest_companies()?);
-    let header = ["ID", "Date", "Title", "Company", "Length", "Status", "Verdict", "Outcome"];
+    let (verdicts, outcomes, companies) = (
+        db.latest_verdicts()?,
+        db.all_outcomes()?,
+        db.latest_companies()?,
+    );
+    let header = [
+        "ID", "Date", "Title", "Company", "Length", "Status", "Verdict", "Outcome",
+    ];
     let rows: Vec<[String; 8]> = sessions
         .iter()
         .map(|s| {
@@ -830,26 +989,54 @@ fn list(settings: &Settings, json: bool, all: bool) -> Result<()> {
                 s.id.to_string(),
                 s.created_at.chars().take(10).collect(),
                 s.title.clone(),
-                s.company.clone().or_else(|| companies.get(&s.id).cloned()).unwrap_or_default(),
+                s.company
+                    .clone()
+                    .or_else(|| companies.get(&s.id).cloned())
+                    .unwrap_or_default(),
                 fmt_ts(s.duration_s.unwrap_or(0.0)),
                 s.status.to_string(),
-                verdicts.get(&s.id).map(|v| v.label().to_string()).unwrap_or_default(),
-                outcomes.get(&s.id).map(|o| o.result.label().to_string()).unwrap_or_default(),
+                verdicts
+                    .get(&s.id)
+                    .map(|v| v.label().to_string())
+                    .unwrap_or_default(),
+                outcomes
+                    .get(&s.id)
+                    .map(|o| o.result.label().to_string())
+                    .unwrap_or_default(),
             ]
         })
         .collect();
     let widths: Vec<usize> = (0..header.len())
-        .map(|i| rows.iter().map(|r| console::measure_text_width(&r[i])).chain([header[i].len()]).max().unwrap_or(0))
+        .map(|i| {
+            rows.iter()
+                .map(|r| console::measure_text_width(&r[i]))
+                .chain([header[i].len()])
+                .max()
+                .unwrap_or(0)
+        })
         .collect();
     let line = |cells: Vec<String>| {
-        cells.iter().zip(&widths).map(|(c, w)| console::pad_str(c, *w, console::Alignment::Left, None).into_owned())
+        cells
+            .iter()
+            .zip(&widths)
+            .map(|(c, w)| console::pad_str(c, *w, console::Alignment::Left, None).into_owned())
             .collect::<Vec<_>>()
             .join("  ")
     };
-    outln!("{}", style(line(header.iter().map(|h| h.to_string()).collect())).bold());
+    outln!(
+        "{}",
+        style(line(header.iter().map(|h| h.to_string()).collect())).bold()
+    );
     for (row, s) in rows.iter().zip(&sessions) {
         let text = line(row.to_vec());
-        outln!("{}", if s.status == Status::Failed { style(text).red().to_string() } else { text });
+        outln!(
+            "{}",
+            if s.status == Status::Failed {
+                style(text).red().to_string()
+            } else {
+                text
+            }
+        );
     }
     Ok(())
 }
@@ -859,18 +1046,39 @@ fn transcript(settings: &Settings, id: i64, json: bool) -> Result<()> {
     let session = db.get_session(id)?;
     let segments = db.get_segments(id)?;
     if segments.is_empty() {
-        let hint = session.error.map(|e| format!(" Error: {e}")).unwrap_or_else(|| format!(" Run: ic transcribe {id}"));
-        bail!("Session {id} has no transcript yet ({}).{hint}", session.status);
+        let hint = session
+            .error
+            .map(|e| format!(" Error: {e}"))
+            .unwrap_or_else(|| format!(" Run: ic transcribe {id}"));
+        bail!(
+            "Session {id} has no transcript yet ({}).{hint}",
+            session.status
+        );
     }
     if json {
-        let plain: Vec<_> = segments.into_iter().map(|s| interview_coach::models::Segment { words: vec![], ..s }).collect();
+        let plain: Vec<_> = segments
+            .into_iter()
+            .map(|s| interview_coach::models::Segment { words: vec![], ..s })
+            .collect();
         outln!("{}", serde_json::to_string_pretty(&plain)?);
         return Ok(());
     }
-    outln!("{}\n", style(format!("━━ {} · {} ━━", session.title, fmt_ts(session.duration_s.unwrap_or(0.0)))).bold());
+    outln!(
+        "{}\n",
+        style(format!(
+            "━━ {} · {} ━━",
+            session.title,
+            fmt_ts(session.duration_s.unwrap_or(0.0))
+        ))
+        .bold()
+    );
     for t in to_turns(&segments) {
         let name = speaker_label(&t.speaker);
-        let name = if t.speaker == YOU { style(format!("{name}:")).cyan().bold() } else { style(format!("{name}:")).magenta().bold() };
+        let name = if t.speaker == YOU {
+            style(format!("{name}:")).cyan().bold()
+        } else {
+            style(format!("{name}:")).magenta().bold()
+        };
         outln!("{} {name} {}\n", style(fmt_ts(t.start)).dim(), t.text);
     }
     Ok(())
@@ -901,26 +1109,44 @@ fn show_report(settings: &Settings, id: i64, open: bool, full: bool) -> Result<(
 }
 
 fn list_models(settings: &Settings, json: bool) -> Result<()> {
-    // Only asks a running proxy: listing models (the app does it to fill a menu) never starts Docker.
-    if !proxy::using_external_proxy() && !proxy::is_ready(settings) {
-        bail!("The AI proxy isn't running. Start it from Setup in the app (or run: ic proxy start).");
-    }
     let offers = interview_coach::catalog::fetch(settings)?;
     if json {
         outln!("{}", serde_json::to_string(&offers)?);
         return Ok(());
     }
     let money = |v: Option<f64>| v.map_or("—".to_string(), |v| format!("${v:.2}"));
-    outln!("{}", style(format!("{:<44} {:>9} {:>9} {:>14}", "Model", "In /M", "Out /M", "Typical report")).bold());
+    outln!(
+        "{}",
+        style(format!(
+            "{:<44} {:>9} {:>9} {:>14}",
+            "Model", "In /M", "Out /M", "Typical report"
+        ))
+        .bold()
+    );
     for o in &offers {
-        let mark = if o.cheapest { style(" ← cheapest").green().to_string() } else { String::new() };
-        outln!("{:<44} {:>9} {:>9} {:>14}{mark}", o.model, money(o.input_per_mtok), money(o.output_per_mtok), money(o.typical_report));
+        let mark = if o.cheapest {
+            style(" ← cheapest").green().to_string()
+        } else {
+            String::new()
+        };
+        outln!(
+            "{:<44} {:>9} {:>9} {:>14}{mark}",
+            o.model,
+            money(o.input_per_mtok),
+            money(o.output_per_mtok),
+            money(o.typical_report)
+        );
     }
-    outln!("{}", style(format!("List prices from LiteLLM; a typical report is about {}k tokens in and {}k out. Claude through \
-                                your sign-in may be billed to your plan instead.",
-                               interview_coach::catalog::TYPICAL_INPUT_TOKENS / 1000.0,
-                               interview_coach::catalog::TYPICAL_OUTPUT_TOKENS / 1000.0)).dim());
-    outln!("{}", style("Re-run a report with one: ic run report <id> --model <model>   (or --model cheapest)").dim());
+    outln!("{}", style(if proxy::using_external_proxy() {
+        "List prices from LiteLLM are estimates; subscription usage can be billed differently."
+    } else { "Native model choices come from your accounts. Prices are not estimated; ChatGPT usage is managed in ChatGPT Settings." }).dim());
+    outln!(
+        "{}",
+        style(
+            "Re-run a report with one: ic run report <id> --model <model>   (or --model cheapest)"
+        )
+        .dim()
+    );
     Ok(())
 }
 
@@ -941,18 +1167,32 @@ struct EditArgs {
 fn edit(db: &Db, id: i64, a: EditArgs) -> Result<()> {
     let before = db.get_session(id)?;
     let mut changed = vec![];
-    if let Some(title) = a.title.as_deref().map(str::trim).filter(|t| !t.is_empty() && *t != before.title) {
+    if let Some(title) = a
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && *t != before.title)
+    {
         db.set_title(id, title)?;
         changed.push("title");
     }
-    let company = if a.no_company { Some(None) } else { a.company.as_deref().map(|c| Some(c.trim()).filter(|c| !c.is_empty())) };
+    let company = if a.no_company {
+        Some(None)
+    } else {
+        a.company
+            .as_deref()
+            .map(|c| Some(c.trim()).filter(|c| !c.is_empty()))
+    };
     if let Some(company) = company.filter(|c| c.map(String::from) != before.company) {
         db.set_company(id, company)?;
         changed.push("company");
         // Its role moves with it: the same title, at the new company.
-        if a.role.is_none() && a.role_id.is_none() && !a.no_role
+        if a.role.is_none()
+            && a.role_id.is_none()
+            && !a.no_role
             && let Some(role) = before.role_id.map(|r| db.role(r)).transpose()?
-            && role.company.as_deref().map(library::company_key) != company.map(library::company_key)
+            && role.company.as_deref().map(library::company_key)
+                != company.map(library::company_key)
         {
             let moved = db.find_or_create_role(company, &role.title)?;
             db.set_session_role(id, Some(moved.id))?;
@@ -967,20 +1207,31 @@ fn edit(db: &Db, id: i64, a: EditArgs) -> Result<()> {
         let session = db.get_session(id)?;
         let inferred = db.latest_companies()?.remove(&id);
         let current_role = session.role_id.map(|r| db.role(r)).transpose()?;
-        let company = library::display_company(&session, current_role.as_ref(), inferred.as_deref());
+        let company =
+            library::display_company(&session, current_role.as_ref(), inferred.as_deref());
         let role = db.find_or_create_role(company.as_deref(), title)?;
         db.set_session_role(id, Some(role.id))?;
     }
     if let Some(round) = a.round.as_deref() {
         let stage = match round {
             "none" | "" => None,
-            r => Some(r.parse::<interview_coach::models::Stage>().map_err(|e| anyhow::anyhow!(e))?),
+            r => Some(
+                r.parse::<interview_coach::models::Stage>()
+                    .map_err(|e| anyhow::anyhow!(e))?,
+            ),
         };
         db.set_stage(id, stage)?;
     }
     outln!("{} Saved.", style("✓").green());
     if !changed.is_empty() {
-        outln!("{}", style(format!("The report reads the {}, so re-running it will make a new version.", changed.join(" and "))).dim());
+        outln!(
+            "{}",
+            style(format!(
+                "The report reads the {}, so re-running it will make a new version.",
+                changed.join(" and ")
+            ))
+            .dim()
+        );
     }
     Ok(())
 }
@@ -993,16 +1244,33 @@ fn role_cmd(db: &Db, action: RoleCmd) -> Result<()> {
                 outln!("{}", serde_json::to_string(&lib.roles)?);
             } else {
                 for r in &lib.roles {
-                    let n = lib.sessions.iter().filter(|s| s.role_id == Some(r.id) && s.deleted_days_left.is_none()).count();
-                    outln!("{:>4}  {:<28} {:<24} {:<12} {}{}", r.id, r.title, r.company.as_deref().unwrap_or("—"), r.status_label,
-                           plural(n, "interview"), if r.archived { " (archived)" } else { "" });
+                    let n = lib
+                        .sessions
+                        .iter()
+                        .filter(|s| s.role_id == Some(r.id) && s.deleted_days_left.is_none())
+                        .count();
+                    outln!(
+                        "{:>4}  {:<28} {:<24} {:<12} {}{}",
+                        r.id,
+                        r.title,
+                        r.company.as_deref().unwrap_or("—"),
+                        r.status_label,
+                        plural(n, "interview"),
+                        if r.archived { " (archived)" } else { "" }
+                    );
                 }
             }
         }
         RoleCmd::Status { id, status } => {
-            let status: interview_coach::models::RoleStatus = status.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let status: interview_coach::models::RoleStatus =
+                status.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             db.set_role_status(id, status)?;
-            outln!("{} {} is now {}.", style("✓").green(), db.role(id)?.title, status.label());
+            outln!(
+                "{} {} is now {}.",
+                style("✓").green(),
+                db.role(id)?.title,
+                status.label()
+            );
         }
         RoleCmd::Rename { id, title } => {
             db.rename_role(id, &title)?;
@@ -1010,11 +1278,20 @@ fn role_cmd(db: &Db, action: RoleCmd) -> Result<()> {
         }
         RoleCmd::Archive { id, undo } => {
             db.set_role_archived(id, !undo)?;
-            outln!("{} {} {}.", style("✓").green(), if undo { "Brought back" } else { "Archived" }, db.role(id)?.title);
+            outln!(
+                "{} {} {}.",
+                style("✓").green(),
+                if undo { "Brought back" } else { "Archived" },
+                db.role(id)?.title
+            );
         }
         RoleCmd::Merge { from, into } => {
             db.merge_role(from, into)?;
-            outln!("{} Merged into {}.", style("✓").green(), db.role(into)?.title);
+            outln!(
+                "{} Merged into {}.",
+                style("✓").green(),
+                db.role(into)?.title
+            );
         }
     }
     Ok(())
@@ -1023,22 +1300,20 @@ fn role_cmd(db: &Db, action: RoleCmd) -> Result<()> {
 fn refresh_timeline(settings: &Settings, id: i64) -> Result<()> {
     let mut db = open_db(settings)?;
     let mut ui = Ui::new();
-    let has_jev = proxy::using_external_proxy() || proxy::has_key(settings, KeyTarget::TypeSafe);
-    let (jev_client, jev_scorer);
-    let scorer: Option<&dyn Scorer> = if has_jev {
-        if let Err(e) = proxy::ensure_running(settings, &mut ui) {
-            ui.finish();
-            return Err(e);
-        }
-        jev_client = interview_coach::llm::jev::Client::new(LlmEndpoint::load(settings).context("the proxy isn't set up")?);
-        jev_scorer = JevScorer { client: &jev_client, model: interview_coach::llm::jev::DEFAULT_MODEL.into() };
-        Some(&jev_scorer)
-    } else {
-        None
+    let jev_client = interview_coach::llm::jev::Client::configured(settings)?;
+    let jev_scorer = JevScorer {
+        client: &jev_client,
+        model: interview_coach::llm::jev::DEFAULT_MODEL.into(),
     };
+    let scorer: Option<&dyn Scorer> = Some(&jev_scorer);
     let result = pipeline::refresh_timeline(&mut db, id, scorer, &mut ui);
     ui.finish();
     let (stored, warnings) = result?;
+    if !pipeline::interviewer_evaluation_complete(&stored) {
+        bail!(
+            "Jev interviewer evaluation is incomplete. Saved results are kept; retry ic timeline {id} after restoring evaluation access."
+        );
+    }
     for w in &warnings {
         errln!("{} {w}", style("Warning:").yellow());
     }
@@ -1053,17 +1328,28 @@ fn refresh_timeline(settings: &Settings, id: i64) -> Result<()> {
     Ok(())
 }
 
-fn outcome(settings: &Settings, id: i64, result: OutcomeResult, notes: Option<String>) -> Result<()> {
+fn outcome(
+    settings: &Settings,
+    id: i64,
+    result: OutcomeResult,
+    notes: Option<String>,
+) -> Result<()> {
     let db = open_db(settings)?;
     let outcome = db.set_outcome(id, result, notes.as_deref())?;
     let session = db.get_session(id)?;
     report::write_pages(&db, &session, Some(&outcome))?; // every report page shows the outcome
     match pipeline::current_report(&db, id)?.or(db.latest_analysis(id)?) {
         Some(stored) => {
-            outln!("Recorded {} for session {id} (the analysis predicted: {}).", style(outcome.result.label()).bold(),
-                     stored.analysis.outlook.verdict.label());
+            outln!(
+                "Recorded {} for session {id} (the analysis predicted: {}).",
+                style(outcome.result.label()).bold(),
+                stored.analysis.outlook.verdict.label()
+            );
         }
-        None => outln!("Recorded {} for session {id}.", style(outcome.result.label()).bold()),
+        None => outln!(
+            "Recorded {} for session {id}.",
+            style(outcome.result.label()).bold()
+        ),
     }
     Ok(())
 }
@@ -1074,11 +1360,21 @@ fn read_key(target: KeyTarget, from_stdin: bool) -> Result<String> {
         std::io::stdin().read_line(&mut line)?;
         line
     } else if let Ok(key) = std::env::var(target.env_var()) {
-        outln!("Using the {} key from ${}.", target.label(), target.env_var());
+        outln!(
+            "Using the {} key from ${}.",
+            target.label(),
+            target.env_var()
+        );
         key
     } else {
-        outln!("Opening {} — create a {} API key there (or copy an existing one).", target.keys_url(), target.label());
-        let _ = Command::new("/usr/bin/open").arg(target.keys_url()).status();
+        outln!(
+            "Opening {} — create a {} API key there (or copy an existing one).",
+            target.keys_url(),
+            target.label()
+        );
+        let _ = Command::new("/usr/bin/open")
+            .arg(target.keys_url())
+            .status();
         let prompt = format!("Paste your {} API key (input hidden): ", target.label());
         rpassword::prompt_password(&prompt).or_else(|_| {
             // No terminal to hide input on (e.g. piped): read a plain line instead.
@@ -1090,7 +1386,9 @@ fn read_key(target: KeyTarget, from_stdin: bool) -> Result<String> {
         })?
     };
     let key = key.trim().to_string();
-    target.check(&key).map_err(|reason| anyhow::anyhow!("{reason} Nothing was changed."))?;
+    target
+        .check(&key)
+        .map_err(|reason| anyhow::anyhow!("{reason} Nothing was changed."))?;
     Ok(key)
 }
 
@@ -1099,28 +1397,43 @@ fn proxy_setup(settings: &Settings) -> Result<()> {
     let result = proxy::setup(settings, &mut ui);
     ui.finish();
     result?;
-    outln!("{} AI proxy running at {}.", style("✓").green(), proxy::base_url(settings));
-    outln!("{}", style(format!("Config: {} · Spend: ic proxy status", proxy::dir(settings).display())).dim());
+    outln!(
+        "{} AI proxy running at {}.",
+        style("✓").green(),
+        proxy::base_url(settings)
+    );
+    outln!(
+        "{}",
+        style(format!(
+            "Config: {} · Spend: ic proxy status",
+            proxy::dir(settings).display()
+        ))
+        .dim()
+    );
     Ok(())
 }
 
 fn proxy_key(settings: &Settings, target: KeyTarget, from_stdin: bool) -> Result<()> {
     if proxy::using_external_proxy() {
-        bail!("ic is using the shared proxy at IC_LLM_URL; add the {} key there.", target.label());
+        bail!(
+            "ic is using the shared proxy at IC_LLM_URL; add the {} key there.",
+            target.label()
+        );
     }
     let key = read_key(target, from_stdin)?;
-    let mut ui = Ui::new();
-    let ready = proxy::ensure_running(settings, &mut ui);
-    ui.finish();
-    ready?;
-    proxy::write_files(settings, Some((target, &key)))?;
-    proxy::restart_with_new_env(settings)?;
-    proxy::wait_ready(&proxy::base_url(settings), Duration::from_secs(300))?;
-    proxy::ensure_key(settings)?;
-    outln!("{} The AI proxy now holds your {} key.", style("✓").green(), target.label());
     if target == KeyTarget::OpenAi {
-        outln!("Use it with --model openai/<model>, or make it the default: ic config set model openai/<model>");
+        interview_coach::openai_auth::save_api_key(settings, &key)?;
+        outln!(
+            "{} OpenAI API key saved privately on this Mac. API billing is now selected.",
+            style("✓").green()
+        );
+        return Ok(());
     }
+    interview_coach::jev_auth::save_key(settings, &key)?;
+    outln!(
+        "{} TypeSafe key saved privately on this Mac. Jev evaluation connects directly; Docker is not required.",
+        style("✓").green()
+    );
     Ok(())
 }
 
@@ -1154,16 +1467,109 @@ fn login(events: bool, switch: bool) -> Result<()> {
     if switch {
         let account = auth::account();
         auth::logout()?;
-        outln!("Signed out{}. Sign in with the account you want: if your browser picks the wrong one, switch accounts at \
-                claude.ai first.", account.map(|a| format!(" of {a}")).unwrap_or_default());
+        outln!(
+            "Signed out{}. Sign in with the account you want: if your browser picks the wrong one, switch accounts at \
+                claude.ai first.",
+            account.map(|a| format!(" of {a}")).unwrap_or_default()
+        );
     }
-    outln!("{} — a browser window will open. Approve access there, then come back here.", style("Claude sign-in").bold());
-    outln!("{}", style("If the page shows a code instead of closing, paste it at the Code: prompt below.").dim());
+    outln!(
+        "{} — a browser window will open. Approve access there, then come back here.",
+        style("Claude sign-in").bold()
+    );
+    outln!(
+        "{}",
+        style("If the page shows a code instead of closing, paste it at the Code: prompt below.")
+            .dim()
+    );
     auth::login(None)?;
     auth::access_token()?; // prove the session works before saying so
-    outln!("{} Signed in to Claude{} — no API key stored. ic gets short-lived tokens from this session as needed.",
-             style("✓").green(), auth::account().map(|a| format!(" as {a}")).unwrap_or_default());
+    outln!(
+        "{} Signed in to Claude{} — no API key stored. ic gets short-lived tokens from this session as needed.",
+        style("✓").green(),
+        auth::account()
+            .map(|a| format!(" as {a}"))
+            .unwrap_or_default()
+    );
     Ok(())
+}
+
+fn chatgpt_login(
+    settings: &Settings,
+    events: bool,
+    new_account: bool,
+    account: Option<&str>,
+    enable_plan: bool,
+) -> Result<()> {
+    let mut out = JsonEvents::new();
+    let result = interview_coach::openai_auth::login(
+        settings,
+        new_account,
+        account,
+        enable_plan,
+        &mut |event| {
+            if events {
+                match event {
+                    auth::LoginEvent::OpenUrl(url) => out.open_url(&url),
+                    auth::LoginEvent::Log(message) => out.stage(&message),
+                    auth::LoginEvent::NeedCode => {}
+                }
+            } else if let auth::LoginEvent::Log(message) = event {
+                outln!("{message}");
+            }
+        },
+    );
+    match result {
+        Ok(plan) => {
+            if events {
+                out.stage(if plan { "Signed in with ChatGPT. Choose an available OpenAI model in Setup." }
+                          else { "Signed in. ChatGPT plan usage was not granted; enable it in Setup or choose an API key." });
+                out.done();
+            } else {
+                outln!(
+                    "Signed in with ChatGPT. {}",
+                    if plan {
+                        "Plan usage is enabled. Select an available model with ic models and ic config set model openai/<model>."
+                    } else {
+                        "Plan usage is not enabled. Enable it in Setup, or explicitly choose an API key."
+                    }
+                );
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if events {
+                out.error(&e.to_string());
+            }
+            Err(e)
+        }
+    }
+}
+
+fn chatgpt_logout(settings: &Settings, events: bool) -> Result<()> {
+    let mut out = JsonEvents::new();
+    match interview_coach::openai_auth::logout(settings) {
+        Ok(confirmed) => {
+            let message = if confirmed {
+                "Signed out of ChatGPT. Local session tokens have been cleared."
+            } else {
+                "Signed out locally. Remote revocation could not be confirmed; disconnect Interview Coach in ChatGPT Settings."
+            };
+            if events {
+                out.stage(message);
+                out.done();
+            } else {
+                outln!("{message}");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if events {
+                out.error(&e.to_string());
+            }
+            Err(e)
+        }
+    }
 }
 
 fn setup_run(settings: &Settings, step: setup::Step, events: bool) -> Result<()> {
@@ -1185,9 +1591,15 @@ fn setup_run(settings: &Settings, step: setup::Step, events: bool) -> Result<()>
 }
 
 fn config_show(settings: &Settings) {
-    outln!("{}", style(format!("Config file: {}", settings.config_path().display())).dim());
+    outln!(
+        "{}",
+        style(format!("Config file: {}", settings.config_path().display())).dim()
+    );
     outln!("model          {}", settings.model);
-    outln!("language       {}", settings.language.as_deref().unwrap_or("auto"));
+    outln!(
+        "language       {}",
+        settings.language.as_deref().unwrap_or("auto")
+    );
     outln!("whisper_model  {}", settings.whisper_model);
     outln!("scorer         {}", settings.scorer);
     outln!("models_dir     {}", settings.models_dir.display());
@@ -1198,10 +1610,25 @@ fn config_set(settings: &Settings, key: ConfigKey, value: &str) -> Result<()> {
     let path = settings.config_path();
     let mut file = FileConfig::read(&path)?;
     match key {
-        ConfigKey::Model => file.model = Some(value.parse().map_err(|e: String| anyhow::anyhow!("model: {e}"))?),
+        ConfigKey::Model => {
+            file.model = Some(
+                value
+                    .parse()
+                    .map_err(|e: String| anyhow::anyhow!("model: {e}"))?,
+            )
+        }
         ConfigKey::Language => file.language = Some(value.to_string()),
         ConfigKey::WhisperModel => file.whisper_model = Some(value.to_string()),
-        ConfigKey::Scorer => file.scorer = Some(value.parse().map_err(|e: String| anyhow::anyhow!("scorer: {e}"))?),
+        ConfigKey::Scorer => {
+            let scorer = value
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!("scorer: {e}"))?;
+            anyhow::ensure!(
+                matches!(scorer, ScorerRef::Jev(_)),
+                "Jev is required for standard reports. Use typesafe/<model>; compare Claude separately with ic eval scorers."
+            );
+            file.scorer = Some(scorer);
+        }
     }
     let previous = std::fs::read_to_string(&path).ok();
     file.write(&path)?;
@@ -1222,43 +1649,69 @@ fn proxy_status(settings: &Settings) -> Result<()> {
         bail!("The LLM proxy isn't set up yet. Run: ic proxy setup");
     };
     match proxy::readiness(&endpoint.base_url) {
-        Ok(r) => outln!("{} Proxy up at {} (database {})", style("✓").green(), endpoint.base_url,
-                          r["db"].as_str().unwrap_or("unknown")),
-        Err(_) => bail!("The proxy at {} isn't responding. Start it with: ic proxy start", endpoint.base_url),
+        Ok(r) => outln!(
+            "{} Proxy up at {} (database {})",
+            style("✓").green(),
+            endpoint.base_url,
+            r["db"].as_str().unwrap_or("unknown")
+        ),
+        Err(_) => bail!(
+            "The proxy at {} isn't responding. Start it with: ic proxy start",
+            endpoint.base_url
+        ),
     }
     let info = proxy::key_info(&endpoint)?;
-    outln!("{} ic's key: {} · spent so far: ${:.4}", style("✓").green(),
-             info["key_alias"].as_str().unwrap_or("?"), info["spend"].as_f64().unwrap_or(0.0));
+    outln!(
+        "{} ic's key: {} · spent so far: ${:.4}",
+        style("✓").green(),
+        info["key_alias"].as_str().unwrap_or("?"),
+        info["spend"].as_f64().unwrap_or(0.0)
+    );
     Ok(())
-}
-
-fn ai_endpoint(settings: &Settings) -> Result<LlmEndpoint> {
-    let mut ui = Ui::new();
-    let ready = proxy::ensure_running(settings, &mut ui);
-    ui.finish();
-    ready?;
-    LlmEndpoint::load(settings).context("The AI proxy isn't set up yet. Open Setup in the app (or run: ic proxy setup).")
 }
 
 fn jev_ping(settings: &Settings) -> Result<()> {
     use interview_coach::llm::jev::{self, Question, SystemOne};
-    if !proxy::using_external_proxy() && !proxy::has_key(settings, KeyTarget::TypeSafe) {
-        bail!("The AI proxy has no TypeSafe key yet. Add it in Setup, or run: ic proxy key typesafe");
+    if !proxy::using_external_proxy() && !interview_coach::jev_auth::has_key(settings) {
+        bail!(
+            "Jev evaluation requires a TypeSafe key. Add it in Setup, or run: ic proxy key typesafe"
+        );
     }
-    let client = jev::Client::new(ai_endpoint(settings)?);
+    let client = jev::Client::configured(settings)?;
     let req = jev::Request {
         state: serde_json::json!("Help! My payouts have been failing for 3 days."),
         model: jev::DEFAULT_MODEL.into(),
-        questions: vec![("is_urgent".into(), Question::Noul { instructions: "Does this convey urgency?".into(), yes: None, no: None })],
+        questions: vec![(
+            "is_urgent".into(),
+            Question::Noul {
+                instructions: "Does this convey urgency?".into(),
+                yes: None,
+                no: None,
+            },
+        )],
     };
     let resp = client.ask(&req)?;
-    outln!("{} {} answered in {} ms: {:?}", style("✓").green(), resp.model, resp.latency_ms, resp.answers["is_urgent"]);
+    outln!(
+        "{} {} answered in {} ms: {:?}",
+        style("✓").green(),
+        resp.model,
+        resp.latency_ms,
+        resp.answers["is_urgent"]
+    );
     Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn eval_scorers(settings: &Settings, which: EvalSet, items_path: Option<PathBuf>, arm_names: &[String], runs: usize,
-                out: Option<PathBuf>, limit: Option<usize>, concurrency: usize) -> Result<()> {
+fn eval_scorers(
+    settings: &Settings,
+    which: EvalSet,
+    items_path: Option<PathBuf>,
+    arm_names: &[String],
+    runs: usize,
+    out: Option<PathBuf>,
+    limit: Option<usize>,
+    concurrency: usize,
+) -> Result<()> {
     use interview_coach::eval;
     let set = which.check_set();
     let out = out.unwrap_or_else(|| which.default_out());
@@ -1267,43 +1720,93 @@ fn eval_scorers(settings: &Settings, which: EvalSet, items_path: Option<PathBuf>
     if let Some(n) = limit {
         items.truncate(n);
     }
-    let arms: Vec<eval::Arm> = arm_names.iter().map(|a| eval::Arm::parse(a)).collect::<Result<_, _>>().map_err(|e| anyhow::anyhow!(e))?;
-    if arms.iter().any(|a| a.name == "jev") && !proxy::using_external_proxy() && !proxy::has_key(settings, KeyTarget::TypeSafe) {
-        bail!("The AI proxy has no TypeSafe key yet. Add it in Setup, or run: ic proxy key typesafe");
+    let arms: Vec<eval::Arm> = arm_names
+        .iter()
+        .map(|a| eval::Arm::parse(a))
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!(e))?;
+    if arms.iter().any(|a| a.name == "jev")
+        && !proxy::using_external_proxy()
+        && !interview_coach::jev_auth::has_key(settings)
+    {
+        bail!(
+            "Jev evaluation requires a TypeSafe key. Add it in Setup, or run: ic proxy key typesafe"
+        );
     }
     if arms.iter().any(|a| a.name != "jev") && !auth::has_login() {
         bail!("The Claude arms need you signed in to Claude (Setup in the app, or: ic login).");
     }
-    let endpoint = ai_endpoint(settings)?;
-    outln!("Scoring {} {} × {runs} runs with {} → {}", items.len(), if set.id == "answers" { "answers" } else { "turns" },
-             arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "), out.display());
+    outln!(
+        "Scoring {} {} × {runs} runs with {} → {}",
+        items.len(),
+        if set.id == "answers" {
+            "answers"
+        } else {
+            "turns"
+        },
+        arms.iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        out.display()
+    );
     let results = eval::run(
-        &eval::Plan { set: &set, items: &items, arms: &arms, runs, concurrency, out_dir: out },
-        &endpoint,
+        &eval::Plan {
+            set: &set,
+            items: &items,
+            arms: &arms,
+            runs,
+            concurrency,
+            out_dir: out,
+        },
+        settings,
         &|r, done, total| {
             let status = match &r.result {
                 Ok(a) => format!("{} ms", a.latency_ms),
                 Err(e) => format!("failed: {}", e.lines().next().unwrap_or_default()),
             };
-            errln!("[{done}/{total}] {:<6} {:<28} run {} {status}", r.arm, r.item, r.run);
+            errln!(
+                "[{done}/{total}] {:<6} {:<28} run {} {status}",
+                r.arm,
+                r.item,
+                r.run
+            );
         },
     )?;
     let stats = eval::summarize(&results, &items, &arms, &set);
     let decisions = eval::decide(&stats, &arms, &set);
-    let fallback = arms.iter().filter(|a| a.name != "jev").min_by_key(|a| a.cost_rank()).map(|a| a.name.clone());
+    let fallback = arms
+        .iter()
+        .filter(|a| a.name != "jev")
+        .min_by_key(|a| a.cost_rank())
+        .map(|a| a.name.clone());
     let cascade_rows = match (&fallback, arms.iter().any(|a| a.name == "jev")) {
         (Some(f), true) => eval::cascade(&results, &items, f, &set),
         _ => vec![],
     };
-    let mut md = eval::markdown(&stats, &decisions, &cascade_rows, fallback.as_deref().unwrap_or("-"), items.len(), runs, &set);
+    let mut md = eval::markdown(
+        &stats,
+        &decisions,
+        &cascade_rows,
+        fallback.as_deref().unwrap_or("-"),
+        items.len(),
+        runs,
+        &set,
+    );
     md += &eval::disagreements(&results, &items, &arms, &set);
     let path = eval::write_summary(out, &stats, &decisions, &md)?;
     for d in &decisions {
-        outln!("{:<22} {}", d.check, match (&d.winner, &d.fallback) {
-            (Some(w), _) => style(w.clone()).green().to_string(),
-            (None, Some(f)) => style(format!("none qualifies (most accurate: {f})")).yellow().to_string(),
-            (None, None) => style("none qualifies".to_string()).yellow().to_string(),
-        });
+        outln!(
+            "{:<22} {}",
+            d.check,
+            match (&d.winner, &d.fallback) {
+                (Some(w), _) => style(w.clone()).green().to_string(),
+                (None, Some(f)) => style(format!("none qualifies (most accurate: {f})"))
+                    .yellow()
+                    .to_string(),
+                (None, None) => style("none qualifies".to_string()).yellow().to_string(),
+            }
+        );
     }
     outln!("Summary: {}", path.display());
     Ok(())
@@ -1335,22 +1838,47 @@ fn setup_status(settings: &Settings, json: bool) -> Result<()> {
                 Origin::Override => "from IC_* override",
                 Origin::System => "installed on this Mac",
             };
-            outln!("{}", style(format!("  {} {} ({origin})", tool.name(), found.path.display())).dim());
+            outln!(
+                "{}",
+                style(format!(
+                    "  {} {} ({origin})",
+                    tool.name(),
+                    found.path.display()
+                ))
+                .dim()
+            );
         }
     }
     let app = capture::app_path();
     if !app.exists() {
-        outln!("{} Recorder app not found ({}) — `ic record` needs it; the app records by itself",
-                 style("•").yellow(), app.display());
+        outln!(
+            "{} Recorder app not found ({}) — `ic record` needs it; the app records by itself",
+            style("•").yellow(),
+            app.display()
+        );
     }
     if status.ready {
-        outln!("{} Ready. Analysis model: {}", style("✓").green(), settings.model);
+        outln!(
+            "{} Ready. Analysis model: {}",
+            style("✓").green(),
+            settings.model
+        );
     } else {
-        outln!("{} {} thing(s) left — open Setup in the app, or: ic setup run all, then ic login",
-                 style("•").yellow(), status.remaining);
+        outln!(
+            "{} {} thing(s) left — open Setup in the app, or: ic setup run all, then ic login",
+            style("•").yellow(),
+            status.remaining
+        );
     }
-    outln!("{}", style(format!("Data folder: {} · Models: {}", settings.data_dir.display(),
-                                 settings.models_dir.display())).dim());
+    outln!(
+        "{}",
+        style(format!(
+            "Data folder: {} · Models: {}",
+            settings.data_dir.display(),
+            settings.models_dir.display()
+        ))
+        .dim()
+    );
     Ok(())
 }
 
@@ -1361,9 +1889,11 @@ fn run() -> Result<()> {
     let explicit_model: Option<ModelRef> = match cli.model.as_deref() {
         None => None,
         Some("cheapest") => {
-            proxy::ensure_running(&settings, &mut Ui::new())?;
             let model = interview_coach::catalog::cheapest(&settings)?;
-            errln!("{}", style(format!("Cheapest available by list price: {model}")).dim());
+            errln!(
+                "{}",
+                style(format!("Cheapest available by list price: {model}")).dim()
+            );
             Some(model)
         }
         Some(text) => Some(text.parse().map_err(|e: String| anyhow::anyhow!(e))?),
@@ -1372,12 +1902,21 @@ fn run() -> Result<()> {
         settings.model = model.clone();
     }
     match cli.command {
-        Cmd::Record { title, company, aec, duration, yes, no_analyze } => {
-            record(&settings, title, company, aec, duration, yes, !no_analyze)
-        }
+        Cmd::Record {
+            title,
+            company,
+            aec,
+            duration,
+            yes,
+            no_analyze,
+        } => record(&settings, title, company, aec, duration, yes, !no_analyze),
         Cmd::Stop { no_analyze } => {
             let mut db = open_db(&settings)?;
-            let active: Vec<_> = db.list_sessions()?.into_iter().filter(|s| s.status == Status::Recording).collect();
+            let active: Vec<_> = db
+                .list_sessions()?
+                .into_iter()
+                .filter(|s| s.status == Status::Recording)
+                .collect();
             if active.is_empty() {
                 outln!("Nothing is recording.");
             }
@@ -1388,30 +1927,62 @@ fn run() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Import { path, mic, system, title, company, speakers, no_transcribe, no_analyze } => {
+        Cmd::Import {
+            path,
+            mic,
+            system,
+            title,
+            company,
+            speakers,
+            no_transcribe,
+            no_analyze,
+        } => {
             let mut db = open_db(&settings)?;
             let session = match (path, mic, system) {
                 (Some(path), None, None) => {
-                    let title = title.unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into());
+                    let title = title.unwrap_or_else(|| {
+                        path.file_stem()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into()
+                    });
                     let mut ui = Ui::new();
-                    let session = pipeline::ingest_file(&mut db, &settings, &path, &title, company, Some(speakers), &mut ui);
+                    let session = pipeline::ingest_file(
+                        &mut db,
+                        &settings,
+                        &path,
+                        &title,
+                        company,
+                        Some(speakers),
+                        &mut ui,
+                    );
                     ui.finish();
                     session?
                 }
                 (None, Some(mic), Some(system)) => {
                     let title = title.unwrap_or_else(|| {
-                        mic.canonicalize().ok().and_then(|p| Some(p.parent()?.file_name()?.to_string_lossy().into_owned()))
+                        mic.canonicalize()
+                            .ok()
+                            .and_then(|p| {
+                                Some(p.parent()?.file_name()?.to_string_lossy().into_owned())
+                            })
                             .unwrap_or_else(|| "Interview".into())
                     });
                     let mut ui = Ui::new();
-                    let session = pipeline::ingest_tracks(&mut db, &settings, &mic, &system, &title, company, &mut ui);
+                    let session = pipeline::ingest_tracks(
+                        &mut db, &settings, &mic, &system, &title, company, &mut ui,
+                    );
                     ui.finish();
                     session?
                 }
                 _ => bail!("Pass a recording file, or both --mic and --system tracks."),
             };
-            outln!("Imported as session {} ({}) → {}", style(session.id).bold(),
-                     fmt_ts(session.duration_s.unwrap_or(0.0)), session.dir);
+            outln!(
+                "Imported as session {} ({}) → {}",
+                style(session.id).bold(),
+                fmt_ts(session.duration_s.unwrap_or(0.0)),
+                session.dir
+            );
             if no_transcribe {
                 return Ok(());
             }
@@ -1419,15 +1990,39 @@ fn run() -> Result<()> {
         }
         Cmd::Transcribe { id } => run_transcription(&mut open_db(&settings)?, &settings, id),
         Cmd::List { json, all } => list(&settings, json, all),
-        Cmd::Edit { id, title, company, no_company, role, role_id, no_role, round } => {
-            edit(&open_db(&settings)?, id, EditArgs { title, company, no_company, role, role_id, no_role, round })
-        }
+        Cmd::Edit {
+            id,
+            title,
+            company,
+            no_company,
+            role,
+            role_id,
+            no_role,
+            round,
+        } => edit(
+            &open_db(&settings)?,
+            id,
+            EditArgs {
+                title,
+                company,
+                no_company,
+                role,
+                role_id,
+                no_role,
+                round,
+            },
+        ),
         Cmd::Archive { ids, undo } => {
             let db = open_db(&settings)?;
             for id in &ids {
                 library::archive(&db, *id, !undo)?;
             }
-            outln!("{} {} {}.", style("✓").green(), if undo { "Brought back" } else { "Archived" }, plural(ids.len(), "interview"));
+            outln!(
+                "{} {} {}.",
+                style("✓").green(),
+                if undo { "Brought back" } else { "Archived" },
+                plural(ids.len(), "interview")
+            );
             Ok(())
         }
         Cmd::Delete { ids } => {
@@ -1435,8 +2030,12 @@ fn run() -> Result<()> {
             for id in &ids {
                 library::delete(&db, *id)?;
             }
-            outln!("{} Moved {} to Recently Deleted: restore with ic restore, or it's erased in {} days.",
-                   style("✓").green(), plural(ids.len(), "interview"), library::DELETED_DAYS);
+            outln!(
+                "{} Moved {} to Recently Deleted: restore with ic restore, or it's erased in {} days.",
+                style("✓").green(),
+                plural(ids.len(), "interview"),
+                library::DELETED_DAYS
+            );
             Ok(())
         }
         Cmd::Restore { ids } => {
@@ -1444,7 +2043,11 @@ fn run() -> Result<()> {
             for id in &ids {
                 library::restore(&db, *id)?;
             }
-            outln!("{} Restored {}.", style("✓").green(), plural(ids.len(), "interview"));
+            outln!(
+                "{} Restored {}.",
+                style("✓").green(),
+                plural(ids.len(), "interview")
+            );
             Ok(())
         }
         Cmd::Erase { ids } => {
@@ -1457,7 +2060,11 @@ fn run() -> Result<()> {
         }
         Cmd::EmptyDeleted { now } => {
             let db = open_db(&settings)?;
-            let erased = library::empty_deleted(&db, &settings, if now { 0 } else { library::DELETED_DAYS })?;
+            let erased = library::empty_deleted(
+                &db,
+                &settings,
+                if now { 0 } else { library::DELETED_DAYS },
+            )?;
             if !erased.is_empty() {
                 outln!("Erased {} for good.", plural(erased.len(), "interview"));
             }
@@ -1469,11 +2076,18 @@ fn run() -> Result<()> {
             match action {
                 CompanyCmd::Rename { old, new } => {
                     let n = db.rename_company(&old, &new)?;
-                    outln!("{} Renamed {old} to {new} ({n} roles and interviews).", style("✓").green());
+                    outln!(
+                        "{} Renamed {old} to {new} ({n} roles and interviews).",
+                        style("✓").green()
+                    );
                 }
                 CompanyCmd::Archive { name, undo } => {
                     let n = library::archive_company(&db, &name, !undo)?;
-                    outln!("{} {} {name} ({n} roles and interviews).", style("✓").green(), if undo { "Brought back" } else { "Archived" });
+                    outln!(
+                        "{} {} {name} ({n} roles and interviews).",
+                        style("✓").green(),
+                        if undo { "Brought back" } else { "Archived" }
+                    );
                 }
             }
             Ok(())
@@ -1493,9 +2107,16 @@ fn run() -> Result<()> {
         Cmd::Recording { action } => match action {
             RecordingCmd::Begin { title, company } => {
                 let db = open_db(&settings)?;
-                let title = title.unwrap_or_else(|| chrono::Local::now().format("Interview %Y-%m-%d %H:%M").to_string());
+                let title = title.unwrap_or_else(|| {
+                    chrono::Local::now()
+                        .format("Interview %Y-%m-%d %H:%M")
+                        .to_string()
+                });
                 let session = pipeline::create_recording_session(&db, &settings, &title, company)?;
-                outln!("{}", serde_json::json!({"id": session.id, "dir": session.dir}));
+                outln!(
+                    "{}",
+                    serde_json::json!({"id": session.id, "dir": session.dir})
+                );
                 Ok(())
             }
             RecordingCmd::Finish { id, no_analyze } => {
@@ -1504,19 +2125,40 @@ fn run() -> Result<()> {
         },
         Cmd::Transcript { id, json } => transcript(&settings, id, json),
         Cmd::Swap { id } => swap(&settings, id),
-        Cmd::Analyze { id, open, full } => run_analysis(&mut open_db(&settings)?, &settings, &settings.model, id, open, full),
+        Cmd::Analyze { id, open, full } => run_analysis(
+            &mut open_db(&settings)?,
+            &settings,
+            &settings.model,
+            id,
+            open,
+            full,
+        ),
         Cmd::Steps { id, json } => {
             let db = open_db(&settings)?;
             if json {
-                outln!("{}", serde_json::to_string_pretty(&session_view::build(&db, id)?.stages)?);
+                outln!(
+                    "{}",
+                    serde_json::to_string_pretty(&session_view::build(&db, id)?.stages)?
+                );
                 Ok(())
             } else {
                 print_steps(&db, id)
             }
         }
-        Cmd::Run { step, id, speakers, then_later } => {
-            run_step(&mut open_db(&settings)?, &settings, step, id, explicit_model.as_ref(), speakers, then_later)
-        }
+        Cmd::Run {
+            step,
+            id,
+            speakers,
+            then_later,
+        } => run_step(
+            &mut open_db(&settings)?,
+            &settings,
+            step,
+            id,
+            explicit_model.as_ref(),
+            speakers,
+            then_later,
+        ),
         Cmd::Next { id } => {
             let db = open_db(&settings)?;
             let Some(next) = db.latest_next_steps(id)? else {
@@ -1526,7 +2168,10 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Session { id } => {
-            outln!("{}", serde_json::to_string(&session_view::build(&open_db(&settings)?, id)?)?);
+            outln!(
+                "{}",
+                serde_json::to_string(&session_view::build(&open_db(&settings)?, id)?)?
+            );
             Ok(())
         }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
@@ -1547,17 +2192,49 @@ fn run() -> Result<()> {
                 let result = proxy::ensure_running(&settings, &mut ui);
                 ui.finish();
                 result?;
-                outln!("{} AI proxy running at {}", style("✓").green(), proxy::base_url(&settings));
+                outln!(
+                    "{} AI proxy running at {}",
+                    style("✓").green(),
+                    proxy::base_url(&settings)
+                );
                 Ok(())
             }
             ProxyCmd::Stop => proxy::stop(&settings),
             ProxyCmd::Status => proxy_status(&settings),
         },
-        Cmd::Login { events, switch } => login(events, switch),
-        Cmd::Logout => {
+        Cmd::Login {
+            events,
+            switch,
+            provider,
+            account,
+            enable_plan,
+        } => match provider {
+            Provider::Anthropic => {
+                anyhow::ensure!(
+                    account.is_none() && !enable_plan,
+                    "--account and --enable-plan are for OpenAI sign-in"
+                );
+                login(events, switch)
+            }
+            Provider::OpenAi => {
+                chatgpt_login(&settings, events, switch, account.as_deref(), enable_plan)
+            }
+        },
+        Cmd::Logout {
+            provider: Provider::OpenAi,
+            events,
+        } => chatgpt_logout(&settings, events),
+        Cmd::Logout {
+            provider: Provider::Anthropic,
+            ..
+        } => {
             let account = auth::account();
             auth::logout()?;
-            outln!("{} Signed out of Claude{}.", style("✓").green(), account.map(|a| format!(" ({a})")).unwrap_or_default());
+            outln!(
+                "{} Signed out of Claude{}.",
+                style("✓").green(),
+                account.map(|a| format!(" ({a})")).unwrap_or_default()
+            );
             Ok(())
         }
         Cmd::Setup { action } => match action {
@@ -1572,10 +2249,21 @@ fn run() -> Result<()> {
             ConfigCmd::Set { key, value } => config_set(&settings, key, &value),
         },
         Cmd::Doctor => setup_status(&settings, false),
-        Cmd::Eval { action: EvalCmd::Scorers { set, items, arms, runs, out, limit, concurrency } } => {
-            eval_scorers(&settings, set, items, &arms, runs, out, limit, concurrency)
-        }
-        Cmd::Jev { action: JevCmd::Ping } => jev_ping(&settings),
+        Cmd::Eval {
+            action:
+                EvalCmd::Scorers {
+                    set,
+                    items,
+                    arms,
+                    runs,
+                    out,
+                    limit,
+                    concurrency,
+                },
+        } => eval_scorers(&settings, set, items, &arms, runs, out, limit, concurrency),
+        Cmd::Jev {
+            action: JevCmd::Ping,
+        } => jev_ping(&settings),
     }
 }
 

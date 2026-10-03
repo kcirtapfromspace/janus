@@ -15,9 +15,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::config::Settings;
 use crate::llm::{self, Effort};
-use crate::proxy::LlmEndpoint;
-use crate::scoring::{Assessment, CheckKind, CheckSet, ClaudeScorer, JevScorer, ScoreInput, Scorer};
+use crate::scoring::{
+    Assessment, CheckKind, CheckSet, ClaudeScorer, JevScorer, ScoreInput, Scorer,
+};
 
 // --- the labelled set ----------------------------------------------------------------------------
 
@@ -52,7 +54,9 @@ pub fn load_items(path: &Path) -> Result<Vec<Item>> {
         .with_context(|| format!("reading {}", path.display()))?
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).with_context(|| format!("bad line in {}: {l}", path.display())))
+        .map(|l| {
+            serde_json::from_str(l).with_context(|| format!("bad line in {}: {l}", path.display()))
+        })
         .collect()
 }
 
@@ -74,18 +78,39 @@ pub struct Arm {
 impl Arm {
     pub fn parse(name: &str) -> Result<Arm, String> {
         let kind = match name {
-            "jev" => ArmKind::Jev { model: crate::llm::jev::DEFAULT_MODEL.into() },
-            "haiku" => ArmKind::Claude { model: "claude-haiku-4-5-20251001".into(), effort: Effort::Low },
-            "sonnet" => ArmKind::Claude { model: "claude-sonnet-5-5".into(), effort: Effort::Low },
-            "opus" => ArmKind::Claude { model: "claude-opus-5-5".into(), effort: Effort::Low },
-            other => return Err(format!("unknown arm {other:?} (expected jev, haiku, sonnet, opus)")),
+            "jev" => ArmKind::Jev {
+                model: crate::llm::jev::DEFAULT_MODEL.into(),
+            },
+            "haiku" => ArmKind::Claude {
+                model: "claude-haiku-4-5-20251001".into(),
+                effort: Effort::Low,
+            },
+            "sonnet" => ArmKind::Claude {
+                model: "claude-sonnet-5-5".into(),
+                effort: Effort::Low,
+            },
+            "opus" => ArmKind::Claude {
+                model: "claude-opus-5-5".into(),
+                effort: Effort::Low,
+            },
+            other => {
+                return Err(format!(
+                    "unknown arm {other:?} (expected jev, haiku, sonnet, opus)"
+                ));
+            }
         };
-        Ok(Arm { name: name.into(), kind })
+        Ok(Arm {
+            name: name.into(),
+            kind,
+        })
     }
 
     /// Cheapest and fastest first: the decision rule prefers earlier arms when several qualify.
     pub fn cost_rank(&self) -> usize {
-        ["jev", "haiku", "sonnet", "opus"].iter().position(|n| *n == self.name).unwrap_or(9)
+        ["jev", "haiku", "sonnet", "opus"]
+            .iter()
+            .position(|n| *n == self.name)
+            .unwrap_or(9)
     }
 
     fn model(&self) -> &str {
@@ -96,16 +121,33 @@ impl Arm {
 }
 
 /// Run one arm on one item, building its client in the calling thread.
-fn assess(arm: &Arm, endpoint: &LlmEndpoint, input: &dyn ScoreInput, set: &CheckSet, rotation: usize) -> Result<Assessment> {
+fn assess(
+    arm: &Arm,
+    settings: &Settings,
+    input: &dyn ScoreInput,
+    set: &CheckSet,
+    rotation: usize,
+) -> Result<Assessment> {
     match &arm.kind {
         ArmKind::Jev { model } => {
-            let client = crate::llm::jev::Client::new(endpoint.clone());
-            JevScorer { client: &client, model: model.clone() }.assess(input, set, rotation)
+            let client = crate::llm::jev::Client::configured(settings)?;
+            JevScorer {
+                client: &client,
+                model: model.clone(),
+            }
+            .assess(input, set, rotation)
         }
         ArmKind::Claude { model, effort } => {
-            let model_ref = format!("anthropic/{model}").parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            let client = llm::client(&model_ref, endpoint.clone());
-            ClaudeScorer { llm: client.as_ref(), model: model.clone(), effort: *effort }.assess(input, set, rotation)
+            let model_ref = format!("anthropic/{model}")
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
+            let client = llm::configured_client(settings, &model_ref)?;
+            ClaudeScorer {
+                llm: client.as_ref(),
+                model: model.clone(),
+                effort: *effort,
+            }
+            .assess(input, set, rotation)
         }
     }
 }
@@ -126,16 +168,31 @@ pub struct RawResult {
 fn cache_key(arm: &Arm, item: &Item, run: usize, set: &CheckSet) -> String {
     let mut h = Sha256::new();
     if set.id == "answers" {
-        let field = |k: &str| item.input.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let field = |k: &str| {
+            item.input
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
         h.update(field("question").as_bytes());
         h.update(field("answer").as_bytes());
     } else {
-        h.update(serde_json::to_string(&item.input).unwrap_or_default().as_bytes());
+        h.update(
+            serde_json::to_string(&item.input)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
     }
     for c in &set.checks {
         h.update(format!("{c:?}").as_bytes());
     }
-    let digest: String = h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let digest: String = h
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
     format!("{}|{}|{}|run{run}|{digest}", arm.name, arm.model(), item.id)
 }
 
@@ -149,7 +206,11 @@ pub struct Plan<'a> {
 }
 
 /// Score everything not already cached in `out_dir/raw.jsonl`; returns every result (cached + new).
-pub fn run(plan: &Plan, endpoint: &LlmEndpoint, on_result: &(dyn Fn(&RawResult, usize, usize) + Sync)) -> Result<Vec<RawResult>> {
+pub fn run(
+    plan: &Plan,
+    settings: &Settings,
+    on_result: &(dyn Fn(&RawResult, usize, usize) + Sync),
+) -> Result<Vec<RawResult>> {
     std::fs::create_dir_all(plan.out_dir)?;
     let raw_path = plan.out_dir.join("raw.jsonl");
     let set = plan.set;
@@ -178,21 +239,38 @@ pub fn run(plan: &Plan, endpoint: &LlmEndpoint, on_result: &(dyn Fn(&RawResult, 
     }
     let total = todo.len();
     let queue = Mutex::new(todo);
-    let out = Mutex::new((std::fs::OpenOptions::new().create(true).append(true).open(&raw_path)?, results, 0usize));
+    let out = Mutex::new((
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&raw_path)?,
+        results,
+        0usize,
+    ));
     std::thread::scope(|scope| {
         for _ in 0..plan.concurrency.max(1) {
-            scope.spawn(|| loop {
-                let Some((arm, item, run, key)) = queue.lock().unwrap().pop_front() else { return };
-                let result = (set.input_from)(&item.input)
-                    .and_then(|input| assess(&arm, endpoint, input.as_ref(), set, run))
-                    .map_err(|e| format!("{e:#}"));
-                let raw = RawResult { key, arm: arm.name.clone(), item: item.id.clone(), run, result };
-                let mut guard = out.lock().unwrap();
-                let (file, results, done) = &mut *guard;
-                let _ = writeln!(file, "{}", serde_json::to_string(&raw).unwrap_or_default());
-                *done += 1;
-                on_result(&raw, *done, total);
-                results.push(raw);
+            scope.spawn(|| {
+                loop {
+                    let Some((arm, item, run, key)) = queue.lock().unwrap().pop_front() else {
+                        return;
+                    };
+                    let result = (set.input_from)(&item.input)
+                        .and_then(|input| assess(&arm, settings, input.as_ref(), set, run))
+                        .map_err(|e| format!("{e:#}"));
+                    let raw = RawResult {
+                        key,
+                        arm: arm.name.clone(),
+                        item: item.id.clone(),
+                        run,
+                        result,
+                    };
+                    let mut guard = out.lock().unwrap();
+                    let (file, results, done) = &mut *guard;
+                    let _ = writeln!(file, "{}", serde_json::to_string(&raw).unwrap_or_default());
+                    *done += 1;
+                    on_result(&raw, *done, total);
+                    results.push(raw);
+                }
             });
         }
     });
@@ -227,7 +305,8 @@ pub fn balanced_accuracy(preds: &[Prediction]) -> Option<f64> {
 }
 
 pub fn accuracy(preds: &[Prediction]) -> Option<f64> {
-    (!preds.is_empty()).then(|| preds.iter().filter(|p| p.pick == p.expected).count() as f64 / preds.len() as f64)
+    (!preds.is_empty())
+        .then(|| preds.iter().filter(|p| p.pick == p.expected).count() as f64 / preds.len() as f64)
 }
 
 /// Macro-averaged F1 over the classes that appear in the labels.
@@ -236,10 +315,23 @@ pub fn macro_f1(preds: &[Prediction]) -> Option<f64> {
     let f1s: Vec<f64> = classes
         .iter()
         .map(|c| {
-            let tp = preds.iter().filter(|p| p.pick == *c && p.expected == *c).count() as f64;
-            let fp = preds.iter().filter(|p| p.pick == *c && p.expected != *c).count() as f64;
-            let fn_ = preds.iter().filter(|p| p.pick != *c && p.expected == *c).count() as f64;
-            if tp == 0.0 { 0.0 } else { 2.0 * tp / (2.0 * tp + fp + fn_) }
+            let tp = preds
+                .iter()
+                .filter(|p| p.pick == *c && p.expected == *c)
+                .count() as f64;
+            let fp = preds
+                .iter()
+                .filter(|p| p.pick == *c && p.expected != *c)
+                .count() as f64;
+            let fn_ = preds
+                .iter()
+                .filter(|p| p.pick != *c && p.expected == *c)
+                .count() as f64;
+            if tp == 0.0 {
+                0.0
+            } else {
+                2.0 * tp / (2.0 * tp + fp + fn_)
+            }
         })
         .collect();
     (!f1s.is_empty()).then(|| f1s.iter().sum::<f64>() / f1s.len() as f64)
@@ -250,13 +342,22 @@ fn level(s: &str) -> Option<f64> {
 }
 
 pub fn within_one(preds: &[Prediction]) -> Option<f64> {
-    let pairs: Vec<(f64, f64)> = preds.iter().filter_map(|p| Some((level(&p.pick)?, level(&p.expected)?))).collect();
-    (!pairs.is_empty()).then(|| pairs.iter().filter(|(a, b)| (a - b).abs() <= 1.0).count() as f64 / pairs.len() as f64)
+    let pairs: Vec<(f64, f64)> = preds
+        .iter()
+        .filter_map(|p| Some((level(&p.pick)?, level(&p.expected)?)))
+        .collect();
+    (!pairs.is_empty()).then(|| {
+        pairs.iter().filter(|(a, b)| (a - b).abs() <= 1.0).count() as f64 / pairs.len() as f64
+    })
 }
 
 pub fn mean_abs_error(preds: &[Prediction]) -> Option<f64> {
-    let pairs: Vec<(f64, f64)> = preds.iter().filter_map(|p| Some((level(&p.pick)?, level(&p.expected)?))).collect();
-    (!pairs.is_empty()).then(|| pairs.iter().map(|(a, b)| (a - b).abs()).sum::<f64>() / pairs.len() as f64)
+    let pairs: Vec<(f64, f64)> = preds
+        .iter()
+        .filter_map(|p| Some((level(&p.pick)?, level(&p.expected)?)))
+        .collect();
+    (!pairs.is_empty())
+        .then(|| pairs.iter().map(|(a, b)| (a - b).abs()).sum::<f64>() / pairs.len() as f64)
 }
 
 fn ranks(values: &[f64]) -> Vec<f64> {
@@ -280,7 +381,10 @@ fn ranks(values: &[f64]) -> Vec<f64> {
 
 /// Spearman's rank correlation between predicted and expected levels.
 pub fn spearman(preds: &[Prediction]) -> Option<f64> {
-    let pairs: Vec<(f64, f64)> = preds.iter().filter_map(|p| Some((level(&p.pick)?, level(&p.expected)?))).collect();
+    let pairs: Vec<(f64, f64)> = preds
+        .iter()
+        .filter_map(|p| Some((level(&p.pick)?, level(&p.expected)?)))
+        .collect();
     if pairs.len() < 3 {
         return None;
     }
@@ -305,14 +409,20 @@ pub fn brier(preds: &[Prediction]) -> Option<f64> {
 
 /// Expected calibration error over 10 bins of the pick's probability.
 pub fn ece(preds: &[Prediction]) -> Option<f64> {
-    let scored: Vec<(f64, bool)> = preds.iter().filter_map(|p| Some((p.p_pick?, p.pick == p.expected))).collect();
+    let scored: Vec<(f64, bool)> = preds
+        .iter()
+        .filter_map(|p| Some((p.p_pick?, p.pick == p.expected)))
+        .collect();
     if scored.is_empty() {
         return None;
     }
     let mut total = 0.0;
     for bin in 0..10 {
         let (lo, hi) = (bin as f64 / 10.0, (bin + 1) as f64 / 10.0);
-        let in_bin: Vec<_> = scored.iter().filter(|(p, _)| *p >= lo && (*p < hi || (bin == 9 && *p <= 1.0))).collect();
+        let in_bin: Vec<_> = scored
+            .iter()
+            .filter(|(p, _)| *p >= lo && (*p < hi || (bin == 9 && *p <= 1.0)))
+            .collect();
         if in_bin.is_empty() {
             continue;
         }
@@ -329,7 +439,9 @@ pub fn stability(preds: &[Prediction]) -> Option<f64> {
     for p in preds {
         by_item.entry(&p.item).or_default().insert(&p.pick);
     }
-    (!by_item.is_empty()).then(|| by_item.values().filter(|picks| picks.len() == 1).count() as f64 / by_item.len() as f64)
+    (!by_item.is_empty()).then(|| {
+        by_item.values().filter(|picks| picks.len() == 1).count() as f64 / by_item.len() as f64
+    })
 }
 
 pub fn percentile(values: &[u64], q: f64) -> Option<u64> {
@@ -367,7 +479,12 @@ pub struct ArmStats {
     pub checks: BTreeMap<String, CheckStats>,
 }
 
-pub fn predictions(results: &[RawResult], items: &[Item], arm: &str, check: &str) -> Vec<Prediction> {
+pub fn predictions(
+    results: &[RawResult],
+    items: &[Item],
+    arm: &str,
+    check: &str,
+) -> Vec<Prediction> {
     let by_id: HashMap<&str, &Item> = items.iter().map(|i| (i.id.as_str(), i)).collect();
     results
         .iter()
@@ -377,33 +494,59 @@ pub fn predictions(results: &[RawResult], items: &[Item], arm: &str, check: &str
             let expected = item.expected(check)?;
             let v = r.result.as_ref().ok()?.verdicts.get(check)?;
             let p_pick = v.probabilities.get(&v.pick).copied();
-            Some(Prediction { item: r.item.clone(), run: r.run, expected, pick: v.pick.clone(), p_pick,
-                              p_yes: v.probabilities.get("yes").copied() })
+            Some(Prediction {
+                item: r.item.clone(),
+                run: r.run,
+                expected,
+                pick: v.pick.clone(),
+                p_pick,
+                p_yes: v.probabilities.get("yes").copied(),
+            })
         })
         .collect()
 }
 
-pub fn summarize(results: &[RawResult], items: &[Item], arms: &[Arm], set: &CheckSet) -> Vec<ArmStats> {
+pub fn summarize(
+    results: &[RawResult],
+    items: &[Item],
+    arms: &[Arm],
+    set: &CheckSet,
+) -> Vec<ArmStats> {
     let checks = &set.checks;
     arms.iter()
         .map(|arm| {
             let mine: Vec<_> = results.iter().filter(|r| r.arm == arm.name).collect();
             let ok: Vec<&Assessment> = mine.iter().filter_map(|r| r.result.as_ref().ok()).collect();
             let latencies: Vec<u64> = ok.iter().map(|a| a.latency_ms).collect();
-            let tokens: Vec<u64> = ok.iter().map(|a| a.input_tokens).filter(|t| *t > 0).collect();
-            let model = ok.first().map(|a| a.scorer.clone()).unwrap_or_else(|| arm.model().to_string());
+            let tokens: Vec<u64> = ok
+                .iter()
+                .map(|a| a.input_tokens)
+                .filter(|t| *t > 0)
+                .collect();
+            let model = ok
+                .first()
+                .map(|a| a.scorer.clone())
+                .unwrap_or_else(|| arm.model().to_string());
             let mut stats = BTreeMap::new();
             for check in checks {
                 let preds = predictions(results, items, &arm.name, check.id);
                 let is_level = matches!(check.kind, CheckKind::Level { .. });
                 let s = CheckStats {
                     n: preds.len(),
-                    score: if is_level { within_one(&preds) } else { balanced_accuracy(&preds) },
+                    score: if is_level {
+                        within_one(&preds)
+                    } else {
+                        balanced_accuracy(&preds)
+                    },
                     accuracy: accuracy(&preds),
                     macro_f1: if is_level { None } else { macro_f1(&preds) },
                     within_one: if is_level { within_one(&preds) } else { None },
                     spearman: if is_level { spearman(&preds) } else { None },
-                    mae: if is_level { mean_abs_error(&preds) } else { None },
+                    mae: if is_level {
+                        mean_abs_error(&preds)
+                    } else {
+                        None
+                    },
                     brier: brier(&preds),
                     ece: ece(&preds),
                     stability: stability(&preds),
@@ -417,7 +560,8 @@ pub fn summarize(results: &[RawResult], items: &[Item], arms: &[Arm], set: &Chec
                 errors: mine.len() - ok.len(),
                 p50_ms: percentile(&latencies, 0.5),
                 p95_ms: percentile(&latencies, 0.95),
-                input_tokens_per_answer: (!tokens.is_empty()).then(|| tokens.iter().sum::<u64>() as f64 / tokens.len() as f64),
+                input_tokens_per_answer: (!tokens.is_empty())
+                    .then(|| tokens.iter().sum::<u64>() as f64 / tokens.len() as f64),
                 checks: stats,
             }
         })
@@ -436,28 +580,54 @@ pub struct Decision {
 }
 
 pub fn decide(stats: &[ArmStats], arms: &[Arm], set: &CheckSet) -> Vec<Decision> {
-    let rank = |name: &str| arms.iter().find(|a| a.name == name).map(Arm::cost_rank).unwrap_or(9);
+    let rank = |name: &str| {
+        arms.iter()
+            .find(|a| a.name == name)
+            .map(Arm::cost_rank)
+            .unwrap_or(9)
+    };
     let rule = &set.rule;
     set.checks
         .iter()
         .map(|check| {
             let is_level = matches!(check.kind, CheckKind::Level { .. });
-            let best = stats.iter().filter_map(|s| s.checks.get(check.id)?.score).fold(0.0, f64::max);
+            let best = stats
+                .iter()
+                .filter_map(|s| s.checks.get(check.id)?.score)
+                .fold(0.0, f64::max);
             let mut reasons = BTreeMap::new();
             let mut qualified = vec![];
             for s in stats {
-                let Some(c) = s.checks.get(check.id) else { continue };
+                let Some(c) = s.checks.get(check.id) else {
+                    continue;
+                };
                 let mut why = vec![];
                 let score = c.score.unwrap_or(0.0);
-                let floor = if is_level { rule.min_within_one } else { rule.min_score_for(check.id) };
+                let floor = if is_level {
+                    rule.min_within_one
+                } else {
+                    rule.min_score_for(check.id)
+                };
                 if score < floor {
-                    why.push(format!("{} {:.2} < {floor}", if is_level { "within-1" } else { "balanced accuracy" }, score));
+                    why.push(format!(
+                        "{} {:.2} < {floor}",
+                        if is_level {
+                            "within-1"
+                        } else {
+                            "balanced accuracy"
+                        },
+                        score
+                    ));
                 }
                 if !is_level && best - score > rule.max_behind_best {
                     why.push(format!("{:.2} behind the best arm", best - score));
                 }
                 if c.stability.unwrap_or(0.0) < rule.min_stability {
-                    why.push(format!("stability {:.2} < {}", c.stability.unwrap_or(0.0), rule.min_stability));
+                    why.push(format!(
+                        "stability {:.2} < {}",
+                        c.stability.unwrap_or(0.0),
+                        rule.min_stability
+                    ));
                 }
                 if let Some(max) = rule.max_p95_ms
                     && s.p95_ms.unwrap_or(u64::MAX) > max
@@ -483,12 +653,21 @@ pub fn decide(stats: &[ArmStats], arms: &[Arm], set: &CheckSet) -> Vec<Decision>
                 stats
                     .iter()
                     .filter_map(|s| Some((s.arm.clone(), s.checks.get(check.id)?.score?)))
-                    .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| rank(&b.0).cmp(&rank(&a.0))))
+                    .max_by(|a, b| {
+                        a.1.total_cmp(&b.1)
+                            .then_with(|| rank(&b.0).cmp(&rank(&a.0)))
+                    })
                     .map(|(arm, _)| arm)
             } else {
                 None
             };
-            Decision { check: check.id.to_string(), winner: qualified.first().cloned(), fallback, qualified, reasons }
+            Decision {
+                check: check.id.to_string(),
+                winner: qualified.first().cloned(),
+                fallback,
+                qualified,
+                reasons,
+            }
         })
         .collect()
 }
@@ -500,15 +679,23 @@ pub const CASCADE_MAX_BEHIND_BEST: f64 = 0.02;
 /// 25% of answers (the rule's cascade condition), if any.
 pub fn cascade_choice(rows: &[(f64, f64, f64)], best: f64) -> Option<(f64, f64, f64)> {
     rows.iter()
-        .filter(|(_, acc, esc)| best - acc <= CASCADE_MAX_BEHIND_BEST && *esc <= CASCADE_MAX_ESCALATION)
+        .filter(|(_, acc, esc)| {
+            best - acc <= CASCADE_MAX_BEHIND_BEST && *esc <= CASCADE_MAX_ESCALATION
+        })
         .min_by(|a, b| a.2.total_cmp(&b.2))
         .copied()
 }
 
 /// "Use Jev when it's confident, otherwise ask `fallback`": accuracy and escalation rate per threshold,
 /// over the yes/no and choice checks.
-pub fn cascade(results: &[RawResult], items: &[Item], fallback: &str, set: &CheckSet) -> Vec<(f64, f64, f64)> {
-    let checks: Vec<&'static str> = set.checks
+pub fn cascade(
+    results: &[RawResult],
+    items: &[Item],
+    fallback: &str,
+    set: &CheckSet,
+) -> Vec<(f64, f64, f64)> {
+    let checks: Vec<&'static str> = set
+        .checks
         .iter()
         .filter(|c| !matches!(c.kind, CheckKind::Level { .. }))
         .map(|c| c.id)
@@ -519,10 +706,17 @@ pub fn cascade(results: &[RawResult], items: &[Item], fallback: &str, set: &Chec
         for check in &checks {
             let jev = predictions(results, items, "jev", check);
             let other: HashMap<(String, usize), Prediction> =
-                predictions(results, items, fallback, check).into_iter().map(|p| ((p.item.clone(), p.run), p)).collect();
+                predictions(results, items, fallback, check)
+                    .into_iter()
+                    .map(|p| ((p.item.clone(), p.run), p))
+                    .collect();
             for p in jev {
                 let confident = p.p_pick.unwrap_or(0.0) >= t;
-                let used = if confident { Some(&p) } else { other.get(&(p.item.clone(), p.run)) };
+                let used = if confident {
+                    Some(&p)
+                } else {
+                    other.get(&(p.item.clone(), p.run))
+                };
                 let Some(used) = used else { continue };
                 total += 1;
                 escalated += usize::from(!confident);
@@ -530,14 +724,19 @@ pub fn cascade(results: &[RawResult], items: &[Item], fallback: &str, set: &Chec
             }
         }
         if total > 0 {
-            rows.push((t, right as f64 / total as f64, escalated as f64 / total as f64));
+            rows.push((
+                t,
+                right as f64 / total as f64,
+                escalated as f64 / total as f64,
+            ));
         }
     }
     rows
 }
 
 fn pct(v: Option<f64>) -> String {
-    v.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into())
+    v.map(|x| format!("{:.0}%", x * 100.0))
+        .unwrap_or_else(|| "—".into())
 }
 
 fn num(v: Option<f64>) -> String {
@@ -546,73 +745,144 @@ fn num(v: Option<f64>) -> String {
 
 /// Items where an arm's most common pick differs from the label, per check: what to re-read
 /// before trusting either the label or the arm.
-pub fn disagreements(results: &[RawResult], items: &[Item], arms: &[Arm], set: &CheckSet) -> String {
-    let mut md = String::from("\n## Disagreements with the labels\n\nThe arm's most common pick across runs, where it differs \
-                               from the label.\n\n| Check | Arm | Item | Label | Picks |\n|---|---|---|---|---|\n");
+pub fn disagreements(
+    results: &[RawResult],
+    items: &[Item],
+    arms: &[Arm],
+    set: &CheckSet,
+) -> String {
+    let mut md = String::from(
+        "\n## Disagreements with the labels\n\nThe arm's most common pick across runs, where it differs \
+                               from the label.\n\n| Check | Arm | Item | Label | Picks |\n|---|---|---|---|---|\n",
+    );
     let mut any = false;
     for check in &set.checks {
         for arm in arms {
             let mut by_item: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
             for p in predictions(results, items, &arm.name, check.id) {
-                by_item.entry(p.item.clone()).or_insert_with(|| (p.expected.clone(), vec![])).1.push(p.pick);
+                by_item
+                    .entry(p.item.clone())
+                    .or_insert_with(|| (p.expected.clone(), vec![]))
+                    .1
+                    .push(p.pick);
             }
             for (item, (expected, picks)) in by_item {
                 let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
                 for p in &picks {
                     *counts.entry(p.as_str()).or_default() += 1;
                 }
-                let top = counts.iter().max_by_key(|(_, n)| **n).map(|(p, _)| *p).unwrap_or_default();
+                let top = counts
+                    .iter()
+                    .max_by_key(|(_, n)| **n)
+                    .map(|(p, _)| *p)
+                    .unwrap_or_default();
                 if top != expected {
                     any = true;
-                    md += &format!("| {} | {} | {item} | {expected} | {} |\n", check.id, arm.name, picks.join(", "));
+                    md += &format!(
+                        "| {} | {} | {item} | {expected} | {} |\n",
+                        check.id,
+                        arm.name,
+                        picks.join(", ")
+                    );
                 }
             }
         }
     }
-    if any { md } else { "\nEvery arm's most common pick matches every label.\n".into() }
+    if any {
+        md
+    } else {
+        "\nEvery arm's most common pick matches every label.\n".into()
+    }
 }
 
-pub fn markdown(stats: &[ArmStats], decisions: &[Decision], cascade_rows: &[(f64, f64, f64)], fallback: &str, items: usize,
-                runs: usize, set: &CheckSet) -> String {
+pub fn markdown(
+    stats: &[ArmStats],
+    decisions: &[Decision],
+    cascade_rows: &[(f64, f64, f64)],
+    fallback: &str,
+    items: usize,
+    runs: usize,
+    set: &CheckSet,
+) -> String {
     let (what, rule_doc) = match set.id {
         "answers" => ("answer", "docs/eval/scorer-decision.md"),
         _ => ("interviewer-turn", "docs/eval/interviewer-decision.md"),
     };
-    let mut md = format!("# Jev vs Claude: {what} checks\n\n{items} labelled items × {runs} runs per arm, choice \
+    let mut md = format!(
+        "# Jev vs Claude: {what} checks\n\n{items} labelled items × {runs} runs per arm, choice \
                           options rotated each run. Rule: {rule_doc}.\n\n## Speed and cost\n\n\
-                          | Arm | Model | Calls | Failed | p50 | p95 | Input tokens / item |\n|---|---|---|---|---|---|---|\n");
+                          | Arm | Model | Calls | Failed | p50 | p95 | Input tokens / item |\n|---|---|---|---|---|---|---|\n"
+    );
     for s in stats {
-        md += &format!("| {} | {} | {} | {} | {} ms | {} ms | {} |\n", s.arm, s.model, s.calls, s.errors,
-                       s.p50_ms.unwrap_or(0), s.p95_ms.unwrap_or(0),
-                       s.input_tokens_per_answer.map(|t| format!("{t:.0}")).unwrap_or_else(|| "—".into()));
+        md += &format!(
+            "| {} | {} | {} | {} | {} ms | {} ms | {} |\n",
+            s.arm,
+            s.model,
+            s.calls,
+            s.errors,
+            s.p50_ms.unwrap_or(0),
+            s.p95_ms.unwrap_or(0),
+            s.input_tokens_per_answer
+                .map(|t| format!("{t:.0}"))
+                .unwrap_or_else(|| "—".into())
+        );
     }
     md += "\n## Accuracy by check\n\nYes/no and choice: balanced accuracy (macro-F1). Levels (1–5): within-1 agreement \
            (exact, Spearman). Stability: same pick on every run.\n\n| Check | Arm | n | Score | Detail | Stability | ECE |\n\
            |---|---|---|---|---|---|---|\n";
     for check in &set.checks {
         for s in stats {
-            let Some(c) = s.checks.get(check.id) else { continue };
+            let Some(c) = s.checks.get(check.id) else {
+                continue;
+            };
             let detail = match check.kind {
-                CheckKind::Level { .. } => format!("exact {}, ρ {}", pct(c.accuracy), num(c.spearman)),
+                CheckKind::Level { .. } => {
+                    format!("exact {}, ρ {}", pct(c.accuracy), num(c.spearman))
+                }
                 _ => format!("F1 {}", num(c.macro_f1)),
             };
-            md += &format!("| {} | {} | {} | {} | {} | {} | {} |\n", check.id, s.arm, c.n, pct(c.score), detail,
-                           pct(c.stability), num(c.ece));
+            md += &format!(
+                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                check.id,
+                s.arm,
+                c.n,
+                pct(c.score),
+                detail,
+                pct(c.stability),
+                num(c.ece)
+            );
         }
     }
-    md += "\n## Decision\n\n| Check | Winner | Qualified | Why others didn't |\n|---|---|---|---|\n";
+    md +=
+        "\n## Decision\n\n| Check | Winner | Qualified | Why others didn't |\n|---|---|---|---|\n";
     for d in decisions {
-        let why: Vec<String> = d.reasons.iter().filter(|(_, r)| !r.is_empty()).map(|(a, r)| format!("{a}: {}", r.join("; "))).collect();
+        let why: Vec<String> = d
+            .reasons
+            .iter()
+            .filter(|(_, r)| !r.is_empty())
+            .map(|(a, r)| format!("{a}: {}", r.join("; ")))
+            .collect();
         let winner = match (&d.winner, &d.fallback) {
             (Some(w), _) => w.clone(),
             (None, Some(f)) => format!("none (most accurate: {f})"),
             (None, None) => "none".into(),
         };
-        md += &format!("| {} | {} | {} | {} |\n", d.check, winner,
-                       if d.qualified.is_empty() { "—".to_string() } else { d.qualified.join(", ") }, why.join("<br>"));
+        md += &format!(
+            "| {} | {} | {} | {} |\n",
+            d.check,
+            winner,
+            if d.qualified.is_empty() {
+                "—".to_string()
+            } else {
+                d.qualified.join(", ")
+            },
+            why.join("<br>")
+        );
     }
     if !cascade_rows.is_empty() {
-        md += &format!("\n## Cascade: Jev when confident, otherwise {fallback}\n\n| Threshold | Accuracy | Escalated |\n|---|---|---|\n");
+        md += &format!(
+            "\n## Cascade: Jev when confident, otherwise {fallback}\n\n| Threshold | Accuracy | Escalated |\n|---|---|---|\n"
+        );
         for (t, acc, esc) in cascade_rows {
             md += &format!("| {t:.2} | {} | {} |\n", pct(Some(*acc)), pct(Some(*esc)));
         }
@@ -620,7 +890,8 @@ pub fn markdown(stats: &[ArmStats], decisions: &[Decision], cascade_rows: &[(f64
         let best = stats
             .iter()
             .map(|s| {
-                let accs: Vec<f64> = set.checks
+                let accs: Vec<f64> = set
+                    .checks
                     .iter()
                     .filter(|c| !matches!(c.kind, CheckKind::Level { .. }))
                     .filter_map(|c| s.checks.get(c.id)?.accuracy)
@@ -629,18 +900,34 @@ pub fn markdown(stats: &[ArmStats], decisions: &[Decision], cascade_rows: &[(f64
             })
             .fold(0.0, f64::max);
         md += &match cascade_choice(cascade_rows, best) {
-            Some((t, acc, esc)) => format!("\nThe cascade qualifies at threshold {t:.2}: {} accurate (best single arm {}), \
-                                            escalating {} of answers.\n", pct(Some(acc)), pct(Some(best)), pct(Some(esc))),
-            None => format!("\nNo threshold qualifies: none is within 2 points of the best single arm ({}) while escalating \
-                             25% or less.\n", pct(Some(best))),
+            Some((t, acc, esc)) => format!(
+                "\nThe cascade qualifies at threshold {t:.2}: {} accurate (best single arm {}), \
+                                            escalating {} of answers.\n",
+                pct(Some(acc)),
+                pct(Some(best)),
+                pct(Some(esc))
+            ),
+            None => format!(
+                "\nNo threshold qualifies: none is within 2 points of the best single arm ({}) while escalating \
+                             25% or less.\n",
+                pct(Some(best))
+            ),
         };
     }
     md
 }
 
 /// Every output of a comparison, written next to the raw results.
-pub fn write_summary(out_dir: &Path, stats: &[ArmStats], decisions: &[Decision], markdown: &str) -> Result<PathBuf> {
-    std::fs::write(out_dir.join("summary.json"), serde_json::to_string_pretty(&json!({"arms": stats, "decisions": decisions}))?)?;
+pub fn write_summary(
+    out_dir: &Path,
+    stats: &[ArmStats],
+    decisions: &[Decision],
+    markdown: &str,
+) -> Result<PathBuf> {
+    std::fs::write(
+        out_dir.join("summary.json"),
+        serde_json::to_string_pretty(&json!({"arms": stats, "decisions": decisions}))?,
+    )?;
     let path = out_dir.join("summary.md");
     std::fs::write(&path, markdown)?;
     Ok(path)
@@ -652,14 +939,22 @@ mod tests {
     use crate::scoring::answer_set;
 
     fn p(item: &str, run: usize, expected: &str, pick: &str, p_pick: Option<f64>) -> Prediction {
-        Prediction { item: item.into(), run, expected: expected.into(), pick: pick.into(), p_pick,
-                     p_yes: p_pick.map(|x| if pick == "yes" { x } else { 1.0 - x }) }
+        Prediction {
+            item: item.into(),
+            run,
+            expected: expected.into(),
+            pick: pick.into(),
+            p_pick,
+            p_yes: p_pick.map(|x| if pick == "yes" { x } else { 1.0 - x }),
+        }
     }
 
     #[test]
     fn balanced_accuracy_weights_each_class_equally() {
         // 9 yes all right, 1 no wrong: plain accuracy 90%, balanced 50%.
-        let mut preds: Vec<_> = (0..9).map(|i| p(&format!("y{i}"), 0, "yes", "yes", None)).collect();
+        let mut preds: Vec<_> = (0..9)
+            .map(|i| p(&format!("y{i}"), 0, "yes", "yes", None))
+            .collect();
         preds.push(p("n0", 0, "no", "yes", None));
         assert_eq!(accuracy(&preds), Some(0.9));
         assert_eq!(balanced_accuracy(&preds), Some(0.5));
@@ -667,82 +962,170 @@ mod tests {
 
     #[test]
     fn macro_f1_and_levels() {
-        let preds = [p("a", 0, "i", "i", None), p("b", 0, "we", "i", None), p("c", 0, "we", "we", None)];
+        let preds = [
+            p("a", 0, "i", "i", None),
+            p("b", 0, "we", "i", None),
+            p("c", 0, "we", "we", None),
+        ];
         // i: tp1 fp1 fn0 → 2/3; we: tp1 fp0 fn1 → 2/3.
         assert!((macro_f1(&preds).unwrap() - 2.0 / 3.0).abs() < 1e-9);
-        let levels = [p("a", 0, "5", "4", None), p("b", 0, "3", "1", None), p("c", 0, "2", "2", None), p("d", 0, "4", "5", None)];
+        let levels = [
+            p("a", 0, "5", "4", None),
+            p("b", 0, "3", "1", None),
+            p("c", 0, "2", "2", None),
+            p("d", 0, "4", "5", None),
+        ];
         assert_eq!(within_one(&levels), Some(0.75));
         assert_eq!(mean_abs_error(&levels), Some(1.0));
-        assert!((spearman(&levels).unwrap() - 0.6).abs() < 1e-9, "ranks differ by 1 on every pair: 1 - 6·4/(4·15)");
+        assert!(
+            (spearman(&levels).unwrap() - 0.6).abs() < 1e-9,
+            "ranks differ by 1 on every pair: 1 - 6·4/(4·15)"
+        );
     }
 
     #[test]
     fn spearman_handles_ties_and_perfect_order() {
-        let same = [p("a", 0, "1", "1", None), p("b", 0, "3", "3", None), p("c", 0, "5", "5", None), p("d", 0, "5", "5", None)];
+        let same = [
+            p("a", 0, "1", "1", None),
+            p("b", 0, "3", "3", None),
+            p("c", 0, "5", "5", None),
+            p("d", 0, "5", "5", None),
+        ];
         assert!((spearman(&same).unwrap() - 1.0).abs() < 1e-9);
-        let reversed = [p("a", 0, "1", "5", None), p("b", 0, "3", "3", None), p("c", 0, "5", "1", None)];
+        let reversed = [
+            p("a", 0, "1", "5", None),
+            p("b", 0, "3", "3", None),
+            p("c", 0, "5", "1", None),
+        ];
         assert!((spearman(&reversed).unwrap() + 1.0).abs() < 1e-9);
     }
 
     #[test]
     fn calibration_and_brier() {
         // Confident and right: well calibrated.
-        let good = [p("a", 0, "yes", "yes", Some(0.95)), p("b", 0, "no", "no", Some(0.95))];
+        let good = [
+            p("a", 0, "yes", "yes", Some(0.95)),
+            p("b", 0, "no", "no", Some(0.95)),
+        ];
         assert!(ece(&good).unwrap() < 0.06);
         assert!(brier(&good).unwrap() < 0.01);
         // Confident and wrong: badly calibrated.
-        let bad = [p("a", 0, "yes", "no", Some(0.95)), p("b", 0, "no", "yes", Some(0.95))];
+        let bad = [
+            p("a", 0, "yes", "no", Some(0.95)),
+            p("b", 0, "no", "yes", Some(0.95)),
+        ];
         assert!(ece(&bad).unwrap() > 0.9);
     }
 
     #[test]
     fn stability_counts_items_with_one_pick_across_runs() {
-        let preds = [p("a", 0, "i", "i", None), p("a", 1, "i", "i", None), p("b", 0, "i", "i", None), p("b", 1, "i", "we", None)];
+        let preds = [
+            p("a", 0, "i", "i", None),
+            p("a", 1, "i", "i", None),
+            p("b", 0, "i", "i", None),
+            p("b", 1, "i", "we", None),
+        ];
         assert_eq!(stability(&preds), Some(0.5));
         assert_eq!(percentile(&[100, 200, 300, 400, 1000], 0.95), Some(1000));
         assert_eq!(percentile(&[100, 200, 300], 0.5), Some(200));
     }
 
     fn stats(arm: &str, score: f64, stability: f64, p95: u64, ece: Option<f64>) -> ArmStats {
-        let checks = answer_set().checks
+        let checks = answer_set()
+            .checks
             .iter()
-            .map(|c| (c.id.to_string(), CheckStats { n: 70, score: Some(score), accuracy: None, macro_f1: None, within_one: None,
-                                                      spearman: None, mae: None, brier: None, ece, stability: Some(stability) }))
+            .map(|c| {
+                (
+                    c.id.to_string(),
+                    CheckStats {
+                        n: 70,
+                        score: Some(score),
+                        accuracy: None,
+                        macro_f1: None,
+                        within_one: None,
+                        spearman: None,
+                        mae: None,
+                        brier: None,
+                        ece,
+                        stability: Some(stability),
+                    },
+                )
+            })
             .collect();
-        ArmStats { arm: arm.into(), model: arm.into(), calls: 210, errors: 0, p50_ms: Some(p95 / 2), p95_ms: Some(p95),
-                   input_tokens_per_answer: None, checks }
+        ArmStats {
+            arm: arm.into(),
+            model: arm.into(),
+            calls: 210,
+            errors: 0,
+            p50_ms: Some(p95 / 2),
+            p95_ms: Some(p95),
+            input_tokens_per_answer: None,
+            checks,
+        }
     }
 
     #[test]
     fn the_rule_picks_the_cheapest_arm_that_qualifies() {
-        let arms: Vec<Arm> = ["jev", "haiku", "opus"].iter().map(|a| Arm::parse(a).unwrap()).collect();
+        let arms: Vec<Arm> = ["jev", "haiku", "opus"]
+            .iter()
+            .map(|a| Arm::parse(a).unwrap())
+            .collect();
         // Jev is accurate and fast; Haiku is as good but slower than the 1 s budget; Opus is best but slow.
-        let s = [stats("jev", 0.93, 0.97, 400, Some(0.05)), stats("haiku", 0.93, 0.99, 1800, None), stats("opus", 0.96, 1.0, 6000, None)];
+        let s = [
+            stats("jev", 0.93, 0.97, 400, Some(0.05)),
+            stats("haiku", 0.93, 0.99, 1800, None),
+            stats("opus", 0.96, 1.0, 6000, None),
+        ];
         let d = decide(&s, &arms, &answer_set());
-        assert!(d.iter().all(|d| d.winner.as_deref() == Some("jev")), "{d:#?}");
+        assert!(
+            d.iter().all(|d| d.winner.as_deref() == Some("jev")),
+            "{d:#?}"
+        );
         // Jev badly calibrated: nobody qualifies (the others are too slow for drills).
-        let s = [stats("jev", 0.93, 0.97, 400, Some(0.3)), stats("haiku", 0.93, 0.99, 1800, None)];
+        let s = [
+            stats("jev", 0.93, 0.97, 400, Some(0.3)),
+            stats("haiku", 0.93, 0.99, 1800, None),
+        ];
         let d = decide(&s, &arms, &answer_set());
         assert!(d.iter().all(|d| d.winner.is_none()));
         assert!(d[0].reasons["jev"][0].contains("ECE"));
         // Jev too far behind the best arm on a yes/no check.
-        let s = [stats("jev", 0.86, 0.97, 400, Some(0.05)), stats("haiku", 0.95, 0.99, 900, None)];
-        assert_eq!(decide(&s, &arms, &answer_set())[0].winner.as_deref(), Some("haiku"));
+        let s = [
+            stats("jev", 0.86, 0.97, 400, Some(0.05)),
+            stats("haiku", 0.95, 0.99, 900, None),
+        ];
+        assert_eq!(
+            decide(&s, &arms, &answer_set())[0].winner.as_deref(),
+            Some("haiku")
+        );
     }
 
     #[test]
     fn a_cascade_qualifies_only_close_to_the_best_and_with_few_escalations() {
         let rows = [(0.5, 0.80, 0.05), (0.7, 0.90, 0.20), (0.9, 0.93, 0.40)];
         assert_eq!(cascade_choice(&rows, 0.91), Some((0.7, 0.90, 0.20)));
-        assert_eq!(cascade_choice(&rows, 0.95), None, "the only close one escalates 40%");
+        assert_eq!(
+            cascade_choice(&rows, 0.95),
+            None,
+            "the only close one escalates 40%"
+        );
     }
 
     #[test]
     fn without_a_qualifier_the_most_accurate_arm_is_the_fallback() {
-        let arms: Vec<Arm> = ["jev", "opus"].iter().map(|a| Arm::parse(a).unwrap()).collect();
-        let s = [stats("jev", 0.70, 0.97, 400, Some(0.05)), stats("opus", 0.96, 1.0, 6000, None)];
+        let arms: Vec<Arm> = ["jev", "opus"]
+            .iter()
+            .map(|a| Arm::parse(a).unwrap())
+            .collect();
+        let s = [
+            stats("jev", 0.70, 0.97, 400, Some(0.05)),
+            stats("opus", 0.96, 1.0, 6000, None),
+        ];
         let d = decide(&s, &arms, &answer_set());
-        assert_eq!((d[0].winner.as_deref(), d[0].fallback.as_deref()), (None, Some("opus")));
+        assert_eq!(
+            (d[0].winner.as_deref(), d[0].fallback.as_deref()),
+            (None, Some("opus"))
+        );
     }
 
     /// docs/eval/interviewer-decision.md: every turn labelled for every check, at least 15
@@ -750,25 +1133,51 @@ mod tests {
     #[test]
     fn the_interviewer_set_matches_its_decision_page() {
         let set = crate::temperature::interviewer_set();
-        let items = load_items(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/interviewer_turns.jsonl").as_path()).unwrap();
+        let items = load_items(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/interviewer_turns.jsonl")
+                .as_path(),
+        )
+        .unwrap();
         assert_eq!(items.len(), 102);
         assert_eq!(items.iter().filter(|i| i.origin == "scripted").count(), 14);
         for item in &items {
             (set.input_from)(&item.input).unwrap_or_else(|e| panic!("{}: {e:#}", item.id));
         }
         for check in &set.checks {
-            let labels: Vec<String> = items.iter().map(|i| i.expected(check.id).unwrap_or_else(|| panic!("{}: no {}", i.id, check.id))).collect();
+            let labels: Vec<String> = items
+                .iter()
+                .map(|i| {
+                    i.expected(check.id)
+                        .unwrap_or_else(|| panic!("{}: no {}", i.id, check.id))
+                })
+                .collect();
             match &check.kind {
                 CheckKind::Choice { options } => {
                     for (id, _) in options {
-                        assert!(labels.iter().filter(|l| *l == id).count() >= 15, "{} has few {id}", check.id);
+                        assert!(
+                            labels.iter().filter(|l| *l == id).count() >= 15,
+                            "{} has few {id}",
+                            check.id
+                        );
                     }
                     assert!(labels.iter().all(|l| options.iter().any(|(id, _)| id == l)));
                 }
-                _ => assert!(labels.iter().filter(|l| *l == "yes").count() >= 15, "{} has under 15 positives", check.id),
+                _ => assert!(
+                    labels.iter().filter(|l| *l == "yes").count() >= 15,
+                    "{} has under 15 positives",
+                    check.id
+                ),
             }
         }
-        assert_eq!((set.rule.min_score_for("tone"), set.rule.min_score_for("pushback"), set.rule.min_stability), (0.80, 0.85, 0.95));
+        assert_eq!(
+            (
+                set.rule.min_score_for("tone"),
+                set.rule.min_score_for("pushback"),
+                set.rule.min_stability
+            ),
+            (0.80, 0.85, 0.95)
+        );
         assert_eq!((set.rule.max_p95_ms, set.rule.max_ece), (None, None));
     }
 
@@ -781,31 +1190,65 @@ mod tests {
         };
         let items = [item("agree", true), item("differ", false)];
         let raw = |id: &str, run: usize, p: f64| RawResult {
-            key: format!("{id}-{run}"), arm: "jev".into(), item: id.into(), run,
+            key: format!("{id}-{run}"),
+            arm: "jev".into(),
+            item: id.into(),
+            run,
             result: Ok(crate::scoring::Assessment {
-                scorer: "typesafe/jev".into(), latency_ms: 100, input_tokens: 10,
-                verdicts: BTreeMap::from([("pushback".to_string(), crate::scoring::Verdict {
-                    pick: if p >= 0.5 { "yes" } else { "no" }.into(), value: p, confidence: None,
-                    probabilities: BTreeMap::from([("yes".to_string(), p)]) })]),
+                scorer: "typesafe/jev".into(),
+                latency_ms: 100,
+                input_tokens: 10,
+                verdicts: BTreeMap::from([(
+                    "pushback".to_string(),
+                    crate::scoring::Verdict {
+                        pick: if p >= 0.5 { "yes" } else { "no" }.into(),
+                        value: p,
+                        confidence: None,
+                        probabilities: BTreeMap::from([("yes".to_string(), p)]),
+                    },
+                )]),
             }),
         };
-        let results = [raw("agree", 0, 0.9), raw("agree", 1, 0.2), raw("agree", 2, 0.8), raw("differ", 0, 0.9), raw("differ", 1, 0.9),
-                       raw("differ", 2, 0.1)];
+        let results = [
+            raw("agree", 0, 0.9),
+            raw("agree", 1, 0.2),
+            raw("agree", 2, 0.8),
+            raw("differ", 0, 0.9),
+            raw("differ", 1, 0.9),
+            raw("differ", 2, 0.1),
+        ];
         let md = disagreements(&results, &items, &[Arm::parse("jev").unwrap()], &set);
-        assert!(md.contains("| pushback | jev | differ | no | yes, yes, no |"), "{md}");
+        assert!(
+            md.contains("| pushback | jev | differ | no | yes, yes, no |"),
+            "{md}"
+        );
         assert!(!md.contains("| agree |"), "{md}");
     }
 
     #[test]
     fn the_labelled_set_loads_and_every_check_has_labels() {
-        let items = load_items(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/answers.jsonl").as_path()).unwrap();
+        let items = load_items(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/answers.jsonl")
+                .as_path(),
+        )
+        .unwrap();
         assert_eq!(items.len(), 70);
         for check in answer_set().checks {
-            let labelled = items.iter().filter(|i| i.expected(check.id).is_some()).count();
+            let labelled = items
+                .iter()
+                .filter(|i| i.expected(check.id).is_some())
+                .count();
             assert!(labelled >= 60, "{} has {labelled} labels", check.id);
             for item in &items {
-                if let (Some(expected), CheckKind::Choice { options }) = (item.expected(check.id), &check.kind) {
-                    assert!(options.iter().any(|(id, _)| *id == expected), "{}: unknown label {expected}", item.id);
+                if let (Some(expected), CheckKind::Choice { options }) =
+                    (item.expected(check.id), &check.kind)
+                {
+                    assert!(
+                        options.iter().any(|(id, _)| *id == expected),
+                        "{}: unknown label {expected}",
+                        item.id
+                    );
                 }
             }
         }

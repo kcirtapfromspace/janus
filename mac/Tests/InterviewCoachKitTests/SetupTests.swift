@@ -43,6 +43,21 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(status.check("claude")?.isDone, true)
     }
 
+    func testDecodesChatGPTActionsAndAccountPickerWithoutCredentials() throws {
+        let json = """
+        {"ready":false,"remaining":1,"model":"openai/gpt-5.6","checks":[
+          {"id":"openai","status":"action","required":true,"title":"Sign in with ChatGPT","detail":"…",
+           "action":{"label":"Continue with ChatGPT","kind":"chat_gpt_sign_in","account":"oaiapp_one","new_account":false,"enable_plan":true}}],
+         "openai":{"active":"oaiapp_one","email":"you@example.test","signed_in":true,"plan_enabled":false,"using_api_key":false,
+           "accounts":[{"client_id":"oaiapp_one","label":"you@example.test · oaiapp_one"}]}}
+        """
+        let status = try ICClient.decode(SetupStatus.self, from: Data(json.utf8))
+        XCTAssertEqual(status.check("openai")?.action?.kind, .chatGptSignIn(account: "oaiapp_one", newAccount: false, enablePlan: true))
+        XCTAssertEqual(status.openai?.accounts.first?.clientId, "oaiapp_one")
+        XCTAssertEqual(status.openai?.planEnabled, false)
+        XCTAssertEqual(status.openai?.usingApiKey, false)
+    }
+
     func testParsesEveryEvent() {
         XCTAssertEqual(SetupEvent.parse(#"{"event":"stage","message":"Downloading the speech model"}"#),
                        .stage("Downloading the speech model"))
