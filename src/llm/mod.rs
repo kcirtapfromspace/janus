@@ -6,6 +6,7 @@
 //! model is derived from the type, and the response is parsed and validated back into it.
 
 pub mod anthropic;
+pub mod jev;
 pub mod openai;
 
 use std::io::BufRead;
@@ -22,7 +23,8 @@ use crate::schema;
 
 const MAX_ATTEMPTS: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Effort {
     Low,
     Medium,
@@ -102,15 +104,45 @@ pub fn schema_for<T: StructuredOutput>() -> Value {
     schema::strict(&serde_json::to_value(schemars::schema_for!(T)).expect("schemas serialize"))
 }
 
+/// How much effort and room to give one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerateOptions {
+    pub effort: Effort,
+    pub max_tokens: u32,
+}
+
+impl GenerateOptions {
+    /// A long analysis: deep reasoning and room for a full report.
+    pub fn analysis(effort: Effort) -> Self {
+        GenerateOptions { effort, max_tokens: 64_000 }
+    }
+}
+
 /// Ask the model for a `T`: the schema comes from the type, and the answer is parsed and validated.
 pub fn generate<T: StructuredOutput>(llm: &dyn Llm, model: &str, system: &str, user: &str, effort: Effort,
                                      on_progress: &mut dyn FnMut(usize)) -> anyhow::Result<T> {
+    generate_with(llm, model, system, user, GenerateOptions::analysis(effort), on_progress)
+}
+
+pub fn generate_with<T: StructuredOutput>(llm: &dyn Llm, model: &str, system: &str, user: &str, opts: GenerateOptions,
+                                          on_progress: &mut dyn FnMut(usize)) -> anyhow::Result<T> {
     let schema = schema_for::<T>();
-    let req = StructuredRequest { model, system, user, schema: &schema, schema_name: T::NAME, effort, max_tokens: 64_000 };
+    let req = StructuredRequest { model, system, user, schema: &schema, schema_name: T::NAME, effort: opts.effort,
+                                  max_tokens: opts.max_tokens };
     let text = llm.structured(&req, on_progress)?;
     let value: T = serde_json::from_str(&text).with_context(|| format!("the model's {} didn't match the expected shape", T::NAME))?;
     value.validate().map_err(|e| anyhow!("the model's {} failed validation: {e}", T::NAME))?;
     Ok(value)
+}
+
+/// Ask for JSON matching a schema built at runtime (e.g. from a list of checks), parsed but not typed.
+pub fn structured_value(llm: &dyn Llm, model: &str, system: &str, user: &str, schema: &Value, name: &str,
+                        opts: GenerateOptions) -> anyhow::Result<Value> {
+    let schema = schema::strict(schema);
+    let req = StructuredRequest { model, system, user, schema: &schema, schema_name: name, effort: opts.effort,
+                                  max_tokens: opts.max_tokens };
+    let text = llm.structured(&req, &mut |_| {})?;
+    serde_json::from_str(&text).with_context(|| format!("the model's {name} wasn't valid JSON"))
 }
 
 /// The adapter for `model`'s provider, talking to the LiteLLM proxy at `endpoint`.

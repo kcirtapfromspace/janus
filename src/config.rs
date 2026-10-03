@@ -119,6 +119,55 @@ impl<'de> Deserialize<'de> for ModelRef {
     }
 }
 
+/// Who checks each of your answers (leads with the point, gives a number, …): TypeSafe's Jev,
+/// a Claude model, or nobody. Written `typesafe/jev-latest`, `anthropic/claude-haiku-4-5-20251001`, or `off`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScorerRef {
+    Jev(String),
+    Claude(String),
+    Off,
+}
+
+impl FromStr for ScorerRef {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s.trim() == "off" {
+            return Ok(ScorerRef::Off);
+        }
+        match s.split_once('/') {
+            Some(("typesafe", m)) if !m.trim().is_empty() => Ok(ScorerRef::Jev(m.trim().into())),
+            Some(("anthropic", m)) if !m.trim().is_empty() => Ok(ScorerRef::Claude(m.trim().into())),
+            _ => Err(format!("{s:?} isn't a scorer (use typesafe/jev-latest, anthropic/<model>, or off)")),
+        }
+    }
+}
+
+impl fmt::Display for ScorerRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScorerRef::Jev(m) => write!(f, "typesafe/{m}"),
+            ScorerRef::Claude(m) => write!(f, "anthropic/{m}"),
+            ScorerRef::Off => f.write_str("off"),
+        }
+    }
+}
+
+impl Serialize for ScorerRef {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ScorerRef {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d)?.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+pub fn default_scorer() -> ScorerRef {
+    ScorerRef::Jev("jev-latest".into())
+}
+
 pub fn default_model() -> ModelRef {
     ModelRef { provider: Provider::Anthropic, name: "claude-opus-5-5".into() }
 }
@@ -138,6 +187,9 @@ pub struct FileConfig {
     pub whisper_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_dir: Option<PathBuf>,
+    /// Who checks each answer: "typesafe/jev-latest", "anthropic/<model>", or "off".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scorer: Option<ScorerRef>,
 }
 
 impl FileConfig {
@@ -186,6 +238,8 @@ pub struct Settings {
     pub language: Option<String>,
     /// Default model for analysis (`--model` overrides it per command).
     pub model: ModelRef,
+    /// Who checks each answer (used only when it's available: a TypeSafe key, or a Claude sign-in).
+    pub scorer: ScorerRef,
 }
 
 fn home() -> PathBuf {
@@ -207,6 +261,7 @@ impl Settings {
             whisper_model: env::var("IC_WHISPER_MODEL").ok().or(file.whisper_model).unwrap_or_else(|| "large-v3-turbo".into()),
             language,
             model: env_parse::<ModelRef>("IC_MODEL")?.or(file.model).unwrap_or_else(default_model),
+            scorer: env_parse::<ScorerRef>("IC_SCORER")?.or(file.scorer).unwrap_or_else(default_scorer),
             data_dir,
         })
     }
@@ -227,6 +282,15 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scorers_parse_and_print() {
+        assert_eq!("typesafe/jev-latest".parse::<ScorerRef>(), Ok(ScorerRef::Jev("jev-latest".into())));
+        assert_eq!("anthropic/claude-haiku-4-5-20251001".parse::<ScorerRef>().unwrap().to_string(),
+                   "anthropic/claude-haiku-4-5-20251001");
+        assert_eq!("off".parse::<ScorerRef>(), Ok(ScorerRef::Off));
+        assert!("openai/gpt-5".parse::<ScorerRef>().unwrap_err().contains("isn't a scorer"));
+    }
 
     #[test]
     fn model_refs_need_a_known_provider_prefix() {

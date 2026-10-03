@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use interview_coach::auth;
 use interview_coach::capture;
-use interview_coach::config::{FileConfig, ModelRef, Provider, Settings};
+use interview_coach::config::{FileConfig, ModelRef, Provider, ScorerRef, Settings};
 use interview_coach::db::Db;
 use interview_coach::events::JsonEvents;
 use interview_coach::llm;
@@ -24,6 +24,7 @@ use interview_coach::pipeline;
 use interview_coach::progress::Progress;
 use interview_coach::proxy::{self, KeyTarget, LlmEndpoint};
 use interview_coach::report;
+use interview_coach::scoring::{ClaudeScorer, JevScorer, Scorer};
 use interview_coach::session_view;
 use interview_coach::setup;
 use interview_coach::steps::{self, StageStatus};
@@ -191,6 +192,45 @@ enum Cmd {
     },
     /// Check that everything the pipeline needs is installed and set up.
     Doctor,
+    /// Compare answer scorers (Jev and Claude) on the labelled answers.
+    #[command(hide = true)]
+    Eval {
+        #[command(subcommand)]
+        action: EvalCmd,
+    },
+    /// TypeSafe's Jev, through the AI proxy.
+    #[command(hide = true)]
+    Jev {
+        #[command(subcommand)]
+        action: JevCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvalCmd {
+    /// Score every labelled answer with each arm, then apply docs/eval/scorer-decision.md.
+    Scorers {
+        #[arg(long, default_value = "tests/fixtures/answers.jsonl")]
+        set: PathBuf,
+        /// Any of: jev, haiku, sonnet, opus.
+        #[arg(long, value_delimiter = ',', default_value = "jev,haiku,sonnet,opus")]
+        arms: Vec<String>,
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+        #[arg(long, default_value = "dist/eval")]
+        out: PathBuf,
+        /// Only the first N answers (for a quick check).
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum JevCmd {
+    /// Send one tiny question, to check the key and the proxy route.
+    Ping,
 }
 
 #[derive(Subcommand)]
@@ -243,6 +283,8 @@ enum ConfigKey {
     Language,
     /// whisper.cpp model, e.g. large-v3-turbo or large-v3-turbo-q5_0.
     WhisperModel,
+    /// Who checks each answer: typesafe/jev-latest, anthropic/<model>, or off.
+    Scorer,
 }
 
 #[derive(Subcommand)]
@@ -366,8 +408,24 @@ fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, ope
         return Err(e);
     }
     let endpoint = LlmEndpoint::load(settings).expect("checked above");
-    let client = llm::client(model, endpoint);
-    let stored = pipeline::analyze_session(db, client.as_ref(), model, id, &mut ui);
+    let client = llm::client(model, endpoint.clone());
+    // The answer-by-answer checks, when their scorer is available.
+    let jev_client = interview_coach::llm::jev::Client::new(endpoint.clone());
+    let (jev_scorer, claude_llm);
+    let claude_scorer;
+    let checker: Option<&dyn Scorer> = match &settings.scorer {
+        ScorerRef::Jev(m) if proxy::using_external_proxy() || proxy::has_key(settings, KeyTarget::TypeSafe) => {
+            jev_scorer = JevScorer { client: &jev_client, model: m.clone() };
+            Some(&jev_scorer)
+        }
+        ScorerRef::Claude(m) if auth::has_login() => {
+            claude_llm = llm::client(&ModelRef { provider: Provider::Anthropic, name: m.clone() }, endpoint);
+            claude_scorer = ClaudeScorer { llm: claude_llm.as_ref(), model: m.clone(), effort: llm::Effort::Low };
+            Some(&claude_scorer)
+        }
+        _ => None,
+    };
+    let stored = pipeline::analyze_session_with(db, client.as_ref(), model, id, checker, &mut ui);
     ui.finish();
     let stored = stored?;
     let session = db.get_session(id)?;
@@ -851,6 +909,7 @@ fn config_show(settings: &Settings) {
     println!("model          {}", settings.model);
     println!("language       {}", settings.language.as_deref().unwrap_or("auto"));
     println!("whisper_model  {}", settings.whisper_model);
+    println!("scorer         {}", settings.scorer);
     println!("models_dir     {}", settings.models_dir.display());
     println!("{}", style("Environment variables IC_MODEL, IC_LANGUAGE, IC_WHISPER_MODEL, IC_MODELS_DIR override the file.").dim());
 }
@@ -862,6 +921,7 @@ fn config_set(settings: &Settings, key: ConfigKey, value: &str) -> Result<()> {
         ConfigKey::Model => file.model = Some(value.parse().map_err(|e: String| anyhow::anyhow!("model: {e}"))?),
         ConfigKey::Language => file.language = Some(value.to_string()),
         ConfigKey::WhisperModel => file.whisper_model = Some(value.to_string()),
+        ConfigKey::Scorer => file.scorer = Some(value.parse().map_err(|e: String| anyhow::anyhow!("scorer: {e}"))?),
     }
     let previous = std::fs::read_to_string(&path).ok();
     file.write(&path)?;
@@ -889,6 +949,78 @@ fn proxy_status(settings: &Settings) -> Result<()> {
     let info = proxy::key_info(&endpoint)?;
     println!("{} ic's key: {} · spent so far: ${:.4}", style("✓").green(),
              info["key_alias"].as_str().unwrap_or("?"), info["spend"].as_f64().unwrap_or(0.0));
+    Ok(())
+}
+
+fn ai_endpoint(settings: &Settings) -> Result<LlmEndpoint> {
+    let mut ui = Ui::new();
+    let ready = proxy::ensure_running(settings, &mut ui);
+    ui.finish();
+    ready?;
+    LlmEndpoint::load(settings).context("The AI proxy isn't set up yet. Open Setup in the app (or run: ic proxy setup).")
+}
+
+fn jev_ping(settings: &Settings) -> Result<()> {
+    use interview_coach::llm::jev::{self, Question, SystemOne};
+    if !proxy::using_external_proxy() && !proxy::has_key(settings, KeyTarget::TypeSafe) {
+        bail!("The AI proxy has no TypeSafe key yet. Add it in Setup, or run: ic proxy key typesafe");
+    }
+    let client = jev::Client::new(ai_endpoint(settings)?);
+    let req = jev::Request {
+        state: serde_json::json!("Help! My payouts have been failing for 3 days."),
+        model: jev::DEFAULT_MODEL.into(),
+        questions: vec![("is_urgent".into(), Question::Noul { instructions: "Does this convey urgency?".into(), yes: None, no: None })],
+    };
+    let resp = client.ask(&req)?;
+    println!("{} {} answered in {} ms: {:?}", style("✓").green(), resp.model, resp.latency_ms, resp.answers["is_urgent"]);
+    Ok(())
+}
+
+fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usize, out: &Path, limit: Option<usize>,
+                concurrency: usize) -> Result<()> {
+    use interview_coach::eval;
+    let mut items = eval::load_items(set)?;
+    if let Some(n) = limit {
+        items.truncate(n);
+    }
+    let arms: Vec<eval::Arm> = arm_names.iter().map(|a| eval::Arm::parse(a)).collect::<Result<_, _>>().map_err(|e| anyhow::anyhow!(e))?;
+    if arms.iter().any(|a| a.name == "jev") && !proxy::using_external_proxy() && !proxy::has_key(settings, KeyTarget::TypeSafe) {
+        bail!("The AI proxy has no TypeSafe key yet. Add it in Setup, or run: ic proxy key typesafe");
+    }
+    if arms.iter().any(|a| a.name != "jev") && !auth::has_login() {
+        bail!("The Claude arms need you signed in to Claude (Setup in the app, or: ic login).");
+    }
+    let endpoint = ai_endpoint(settings)?;
+    println!("Scoring {} answers × {runs} runs with {} → {}", items.len(),
+             arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "), out.display());
+    let results = eval::run(
+        &eval::Plan { items: &items, arms: &arms, runs, concurrency, out_dir: out },
+        &endpoint,
+        &|r, done, total| {
+            let status = match &r.result {
+                Ok(a) => format!("{} ms", a.latency_ms),
+                Err(e) => format!("failed: {}", e.lines().next().unwrap_or_default()),
+            };
+            eprintln!("[{done}/{total}] {:<6} {:<28} run {} {status}", r.arm, r.item, r.run);
+        },
+    )?;
+    let stats = eval::summarize(&results, &items, &arms);
+    let decisions = eval::decide(&stats, &arms);
+    let fallback = arms.iter().filter(|a| a.name != "jev").min_by_key(|a| a.cost_rank()).map(|a| a.name.clone());
+    let cascade_rows = match (&fallback, arms.iter().any(|a| a.name == "jev")) {
+        (Some(f), true) => eval::cascade(&results, &items, f),
+        _ => vec![],
+    };
+    let md = eval::markdown(&stats, &decisions, &cascade_rows, fallback.as_deref().unwrap_or("-"), items.len(), runs);
+    let path = eval::write_summary(out, &stats, &decisions, &md)?;
+    for d in &decisions {
+        println!("{:<22} {}", d.check, match (&d.winner, &d.fallback) {
+            (Some(w), _) => style(w.clone()).green().to_string(),
+            (None, Some(f)) => style(format!("none qualifies (fallback {f})")).yellow().to_string(),
+            (None, None) => style("none qualifies".to_string()).yellow().to_string(),
+        });
+    }
+    println!("Summary: {}", path.display());
     Ok(())
 }
 
@@ -1067,6 +1199,10 @@ fn run() -> Result<()> {
             ConfigCmd::Set { key, value } => config_set(&settings, key, &value),
         },
         Cmd::Doctor => setup_status(&settings, false),
+        Cmd::Eval { action: EvalCmd::Scorers { set, arms, runs, out, limit, concurrency } } => {
+            eval_scorers(&settings, &set, &arms, runs, &out, limit, concurrency)
+        }
+        Cmd::Jev { action: JevCmd::Ping } => jev_ping(&settings),
     }
 }
 

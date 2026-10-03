@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use console::style;
 
 use crate::coverage::{self, RecordingNotes};
-use crate::db::{Outcome, StoredAnalysis, StoredNextSteps};
+use crate::db::{AnswerCheck, Outcome, StoredAnalysis, StoredNextSteps};
 use crate::metrics::TalkMetrics;
 use crate::models::{Direction, Evidence, Priority, Session, Verdict, fmt_ts};
 
@@ -68,6 +68,65 @@ fn notes(session: &Session) -> RecordingNotes {
     coverage::recording_notes(Path::new(&session.dir), session.mode)
 }
 
+/// The answer-by-answer checks, in report order, with how each reads in a table.
+const ANSWER_CHECKS: [(&str, &str); 6] = [
+    ("leads_with_point", "Led with the point"),
+    ("has_quantified_result", "Gave a number"),
+    ("star_missing", "Complete story"),
+    ("ownership", "Your own part clear"),
+    ("specificity", "Specific"),
+    ("structure", "Structured"),
+];
+
+/// What a check found, in a few words ("✓", "no result", "we", "3/5").
+fn check_cell(c: &AnswerCheck) -> String {
+    let mark = match c.verdict.as_str() {
+        "pass" => "✓",
+        "fail" => "✗",
+        _ => "?",
+    };
+    match c.check_id.as_str() {
+        "star_missing" if c.verdict == "fail" => match c.pick.as_str() {
+            "situation" => "✗ no context".into(),
+            "action" => "✗ no actions".into(),
+            "result" => "✗ no result".into(),
+            other => format!("✗ {other}"),
+        },
+        "ownership" => format!("{mark} {}", match c.pick.as_str() { "i" => "I", "we" => "we", _ => "team + me" }),
+        "specificity" | "structure" => format!("{mark} {}/5", c.pick),
+        _ => mark.into(),
+    }
+}
+
+/// Answers in order, each with its checks by id.
+fn answers_with_checks(checks: &[AnswerCheck]) -> Vec<(f64, &str, std::collections::HashMap<&str, &AnswerCheck>)> {
+    let mut out: Vec<(f64, &str, std::collections::HashMap<&str, &AnswerCheck>)> = vec![];
+    for c in checks {
+        match out.last_mut() {
+            Some((start, _, map)) if *start == c.answer_start => {
+                map.insert(c.check_id.as_str(), c);
+            }
+            _ => out.push((c.answer_start, c.question.as_str(), std::collections::HashMap::from([(c.check_id.as_str(), c)]))),
+        }
+    }
+    out
+}
+
+/// "Led with the point 3 of 7 · Gave a number 5 of 7 · …"
+pub fn answer_check_tally(checks: &[AnswerCheck]) -> String {
+    let answers = answers_with_checks(checks);
+    ANSWER_CHECKS
+        .iter()
+        .filter_map(|(id, label)| {
+            let judged: Vec<_> = answers.iter().filter_map(|(_, _, m)| m.get(id)).collect();
+            (!judged.is_empty()).then(|| {
+                format!("{label} {} of {}", judged.iter().filter(|c| c.verdict == "pass").count(), judged.len())
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 const METRICS_LEFT_OUT: &str = "Left out: part of the conversation wasn't recorded, so talk-time numbers would be wrong.";
 
 fn quote(ev: &Evidence) -> String {
@@ -120,6 +179,20 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
     } else {
         for line in metric_lines(m) {
             println!(" {line}");
+        }
+    }
+
+    if !stored.answer_checks.is_empty() {
+        println!("\n{}", style("Answer by answer").bold());
+        println!(" {}", answer_check_tally(&stored.answer_checks));
+        if full {
+            for (start, question, checks) in answers_with_checks(&stored.answer_checks) {
+                let cells: Vec<String> = ANSWER_CHECKS
+                    .iter()
+                    .filter_map(|(id, label)| checks.get(id).map(|c| format!("{label}: {}", check_cell(c))))
+                    .collect();
+                println!(" {} {}\n    {}", style(fmt_ts(start)).dim(), question, style(cells.join(" · ")).dim());
+            }
         }
     }
 
@@ -205,6 +278,10 @@ h1 { font-size:28px; line-height:1.2; margin:0 0 6px } h2 { font-size:15px; text
 .dots { color:var(--accent); letter-spacing:2px } .muted { color:var(--muted) }
 details { border-top:1px solid var(--line); padding:10px 0 } summary { cursor:pointer; list-style:none }
 summary::-webkit-details-marker { display:none } details p { margin:6px 0 }
+table.answers { width:100%; border-collapse:collapse; font-size:14px } table.answers th, table.answers td {
+  text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top }
+table.answers th { color:var(--muted); font-weight:600; font-size:12px } .pass { color:var(--good) } .fail { color:var(--bad) }
+.unclear { color:var(--muted) }
 .sig-positive::before { content:"+ "; color:var(--good); font-weight:700 } .sig-negative::before { content:"− ";
   color:var(--bad); font-weight:700 } ul.plain { list-style:none; padding:0 } ul.plain li { margin:0 0 14px }
 @media (max-width:600px) { .rubric { grid-template-columns:1fr 90px } .rubric .muted { grid-column:1/-1; margin-bottom:8px } }
@@ -283,6 +360,27 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
             let _ = write!(h, "<div class='stat'><b>{}</b><span>{}</span></div>", esc(value), esc(label));
         }
         h.push_str("</div>");
+    }
+    if !stored.answer_checks.is_empty() {
+        h.push_str("<h2>Answer by answer</h2>");
+        let _ = write!(h, "<p>{}</p><table class='answers'><tr><th>Question</th>", esc(&answer_check_tally(&stored.answer_checks)));
+        for (_, label) in ANSWER_CHECKS {
+            let _ = write!(h, "<th>{}</th>", esc(label));
+        }
+        h.push_str("</tr>");
+        for (start, question, checks) in answers_with_checks(&stored.answer_checks) {
+            let _ = write!(h, "<tr><td><span class='ts'>{}</span>{}</td>", esc(&fmt_ts(start)), esc(question));
+            for (id, _) in ANSWER_CHECKS {
+                match checks.get(id) {
+                    Some(c) => { let _ = write!(h, "<td class='{}'>{}</td>", esc(&c.verdict), esc(&check_cell(c))); }
+                    None => h.push_str("<td class='unclear'>—</td>"),
+                }
+            }
+            h.push_str("</tr>");
+        }
+        let scorer = stored.answer_checks.first().map(|c| c.scorer.as_str()).unwrap_or_default();
+        let _ = write!(h, "</table><p class='muted'>Checked answer by answer by {}. ✓ meets the bar, ✗ doesn't, ? too close to call.</p>",
+                       esc(scorer));
     }
     h.push_str("<h2>Interviewer signals</h2><ul class='plain'>");
     for s in &a.outlook.signals {

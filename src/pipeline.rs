@@ -22,6 +22,7 @@ use crate::metrics;
 use crate::models::{INTERVIEWER, Mode, RunStatus, Segment, Session, SessionAnalysis, Source, Status, Step, YOU, fmt_ts,
                     speaker_label};
 use crate::next_steps;
+use crate::scoring::{self, Scorer};
 use crate::progress::Progress;
 use crate::steps::{self, RunProgress};
 use crate::transcribe::Transcriber;
@@ -292,13 +293,35 @@ pub fn write_transcript_files(dir: &Path, segments: &[Segment]) -> Result<()> {
 /// `model` picks the provider/model; `llm` must be that provider's adapter (see `llm::client`).
 pub fn analyze_session(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i64, progress: &mut dyn Progress)
     -> Result<StoredAnalysis> {
+    analyze_session_with(db, llm, model, id, None, progress)
+}
+
+/// The report, then (with a `checker`) the built-in checks on each of the candidate's answers.
+/// A checker failure leaves a warning on the run; the report itself still succeeds.
+pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i64, checker: Option<&dyn Scorer>,
+                            progress: &mut dyn Progress) -> Result<StoredAnalysis> {
     let session = db.get_session(id)?;
     if db.get_segments(id)?.is_empty() {
         bail!("Session {id} has no transcript yet — run: ic run transcript {id}");
     }
     db.set_status(id, Status::Analyzing, None)?;
-    run_stage(db, id, Step::Report, json!({"model": model.to_string()}), progress, |db, run, progress| {
-        let stored = analyze_inner(db, llm, model, session, run, progress)?;
+    let mut params = json!({"model": model.to_string()});
+    if let Some(checker) = checker {
+        params["checks"] = json!(checker.name());
+    }
+    run_stage(db, id, Step::Report, params, progress, |db, run, progress| {
+        let mut stored = analyze_inner(db, llm, model, session, run, progress)?;
+        if let Some(checker) = checker {
+            let answers = scoring::answers_from_report(&to_turns(&db.get_segments(id)?), &stored.analysis.questions);
+            if !answers.is_empty() {
+                progress.stage(&format!("Checking your {} answers one by one…", answers.len()));
+                match scoring::check_answers(checker, &answers) {
+                    Ok(rows) => db.add_answer_checks(id, stored.id, &rows)?,
+                    Err(e) => db.set_run_warnings(run, &[format!("The answer-by-answer checks were skipped: {e:#}")])?,
+                }
+                stored = db.analysis_by_id(stored.id)?.unwrap_or(stored);
+            }
+        }
         let analysis_id = stored.id;
         Ok((stored, Some(analysis_id)))
     })

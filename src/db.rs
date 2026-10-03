@@ -108,6 +108,25 @@ CREATE TABLE IF NOT EXISTS next_steps (
 );
 CREATE INDEX IF NOT EXISTS next_steps_by_session ON next_steps(session_id, id);
 
+-- One row per check per answer in an analysed interview (see scoring.rs), e.g. whether answer 3
+-- led with its point. Kept per analysis run, with the scorer that judged it.
+CREATE TABLE IF NOT EXISTS answer_checks (
+    id INTEGER PRIMARY KEY,
+    analysis_id INTEGER NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    answer_idx INTEGER NOT NULL,
+    answer_start REAL NOT NULL,
+    question TEXT NOT NULL,
+    check_id TEXT NOT NULL,
+    scorer TEXT NOT NULL,
+    pick TEXT NOT NULL,
+    value REAL NOT NULL,
+    confidence REAL,
+    verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'fail', 'unclear'))
+);
+CREATE INDEX IF NOT EXISTS answer_checks_by_analysis ON answer_checks(analysis_id, answer_idx);
+
 CREATE TABLE IF NOT EXISTS coaching_plans (
     id INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -145,6 +164,25 @@ pub struct StoredAnalysis {
     pub analysis: SessionAnalysis,
     pub metrics: TalkMetrics,
     pub unverified_quotes: Vec<String>,
+    /// Per-answer checks for this run (empty when no scorer was available).
+    pub answer_checks: Vec<AnswerCheck>,
+}
+
+/// One check of one answer (see scoring.rs).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AnswerCheck {
+    pub answer_idx: i64,
+    /// Seconds into the recording where the answer's question was asked.
+    pub answer_start: f64,
+    pub question: String,
+    pub check_id: String,
+    /// The model that judged it, e.g. `typesafe/jev-1.13.0`.
+    pub scorer: String,
+    pub pick: String,
+    pub value: f64,
+    pub confidence: Option<f64>,
+    /// pass, fail, or unclear.
+    pub verdict: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,7 +231,7 @@ pub struct Db {
 }
 
 /// Schema version; `migrate` brings older databases up to it.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into()))
@@ -409,7 +447,42 @@ impl Db {
             analysis: serde_json::from_str(&analysis)?,
             metrics: serde_json::from_str(&metrics)?,
             unverified_quotes: serde_json::from_str(&unverified)?,
+            answer_checks: self.answer_checks(id)?,
         }))
+    }
+
+    pub fn add_answer_checks(&self, session_id: i64, analysis_id: i64, checks: &[AnswerCheck]) -> Result<()> {
+        let now = now_iso();
+        for c in checks {
+            self.conn.execute(
+                "INSERT INTO answer_checks (analysis_id, session_id, created_at, answer_idx, answer_start, question, check_id,
+                 scorer, pick, value, confidence, verdict) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![analysis_id, session_id, now, c.answer_idx, c.answer_start, c.question, c.check_id, c.scorer, c.pick,
+                        c.value, c.confidence, c.verdict],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn answer_checks(&self, analysis_id: i64) -> Result<Vec<AnswerCheck>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT answer_idx, answer_start, question, check_id, scorer, pick, value, confidence, verdict FROM answer_checks
+             WHERE analysis_id = ?1 ORDER BY answer_idx, id",
+        )?;
+        let rows = stmt.query_map([analysis_id], |r| {
+            Ok(AnswerCheck {
+                answer_idx: r.get(0)?,
+                answer_start: r.get(1)?,
+                question: r.get(2)?,
+                check_id: r.get(3)?,
+                scorer: r.get(4)?,
+                pick: r.get(5)?,
+                value: r.get(6)?,
+                confidence: r.get(7)?,
+                verdict: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn latest_verdicts(&self) -> Result<HashMap<i64, Verdict>> {
@@ -430,6 +503,7 @@ impl Db {
                     analysis: serde_json::from_str(&analysis)?,
                     metrics: serde_json::from_str(&metrics)?,
                     unverified_quotes: serde_json::from_str(&unverified)?,
+                    answer_checks: self.answer_checks(id)?,
                 })
             })
             .collect()

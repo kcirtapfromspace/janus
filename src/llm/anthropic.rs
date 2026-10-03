@@ -21,31 +21,59 @@ const OAUTH_BETA: &str = "oauth-2025-04-20";
 /// Where each request's OAuth access token comes from (`auth::access_token`, or a fake in tests).
 pub type TokenSource = Box<dyn Fn() -> Result<String, LlmError>>;
 
+/// What a model accepts. Current models (Opus/Sonnet 4.6 and later, Fable) take adaptive thinking,
+/// an effort level, and refusal fallbacks; older ones such as Haiku 4.5 reject them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caps {
+    pub adaptive_thinking: bool,
+    pub effort: bool,
+    pub fallbacks: bool,
+}
+
+pub fn caps(model: &str) -> Caps {
+    let older = model.starts_with("claude-haiku-")
+        || model.starts_with("claude-3")
+        || ["claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-5", "claude-sonnet-4-0", "claude-sonnet-4-5",
+            "claude-opus-4-2", "claude-sonnet-4-2"]
+            .iter()
+            .any(|prefix| model.starts_with(prefix))
+            || model == "claude-opus-4" || model == "claude-sonnet-4";
+    Caps { adaptive_thinking: !older, effort: !older || model.starts_with("claude-opus-4-5"), fallbacks: !older }
+}
+
 /// Request headers: the OAuth token goes to Anthropic; the virtual key only to the proxy.
-pub fn headers(proxy_key: &str, oauth_token: &str) -> Vec<(&'static str, String)> {
+pub fn headers(proxy_key: &str, oauth_token: &str, model: &str) -> Vec<(&'static str, String)> {
+    let betas = if caps(model).fallbacks { format!("{OAUTH_BETA},{FALLBACK_BETA}") } else { OAUTH_BETA.to_string() };
     vec![
         ("content-type", "application/json".into()),
         ("anthropic-version", "2023-06-01".into()),
-        ("anthropic-beta", format!("{OAUTH_BETA},{FALLBACK_BETA}")),
+        ("anthropic-beta", betas),
         ("authorization", format!("Bearer {oauth_token}")),
         ("x-litellm-api-key", proxy_key.into()),
     ]
 }
 
 pub fn request_body(req: &StructuredRequest) -> Value {
-    json!({
+    let caps = caps(req.model);
+    let mut output_config = json!({"format": {"type": "json_schema", "schema": req.schema}});
+    if caps.effort {
+        output_config["effort"] = json!(req.effort.as_str());
+    }
+    let mut body = json!({
         "model": req.model,
         "max_tokens": req.max_tokens,
         "stream": true,
-        "fallbacks": "default",
-        "thinking": {"type": "adaptive"},
-        "output_config": {
-            "effort": req.effort.as_str(),
-            "format": {"type": "json_schema", "schema": req.schema},
-        },
+        "output_config": output_config,
         "system": req.system,
         "messages": [{"role": "user", "content": req.user}],
-    })
+    });
+    if caps.fallbacks {
+        body["fallbacks"] = json!("default");
+    }
+    if caps.adaptive_thinking {
+        body["thinking"] = json!({"type": "adaptive"});
+    }
+    body
 }
 
 pub struct Client {
@@ -59,11 +87,11 @@ impl Client {
         Client { http: http_client(), endpoint, token }
     }
 
-    fn attempt(&self, body: &Value, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError> {
+    fn attempt(&self, model: &str, body: &Value, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError> {
         // Fetched per attempt: access tokens are short-lived, and a retry may come minutes later.
         let token = (self.token)()?;
         let mut request = self.http.post(format!("{}{MESSAGES_PATH}", self.endpoint.base_url.trim_end_matches('/')));
-        for (name, value) in headers(&self.endpoint.api_key, &token) {
+        for (name, value) in headers(&self.endpoint.api_key, &token, model) {
             request = request.header(name, value);
         }
         let resp = request.body(body.to_string()).send().map_err(|e| LlmError::Network(e.to_string()))?;
@@ -77,7 +105,7 @@ impl Client {
 impl Llm for Client {
     fn structured(&self, req: &StructuredRequest, on_progress: &mut dyn FnMut(usize)) -> Result<String, LlmError> {
         let body = request_body(req);
-        with_retries(|| self.attempt(&body, on_progress))
+        with_retries(|| self.attempt(req.model, &body, on_progress))
     }
 }
 
@@ -193,7 +221,7 @@ mod tests {
 
     #[test]
     fn oauth_token_goes_to_anthropic_and_the_virtual_key_to_the_proxy() {
-        let h = headers("sk-litellm-virtual", "sk-ant-oat01-token");
+        let h = headers("sk-litellm-virtual", "sk-ant-oat01-token", "claude-opus-5-5");
         let get = |name: &str| h.iter().find(|(n, _)| *n == name).map(|(_, v)| v.as_str());
         assert_eq!(get("authorization"), Some("Bearer sk-ant-oat01-token"));
         assert_eq!(get("x-litellm-api-key"), Some("sk-litellm-virtual"));
@@ -225,5 +253,21 @@ mod tests {
         assert_eq!(body["output_config"]["effort"], "high");
         assert_eq!(body["output_config"]["format"]["type"], "json_schema");
         assert_eq!(body["messages"][0]["content"], "hi");
+    }
+
+    /// Haiku 4.5 rejects adaptive thinking, effort, and refusal fallbacks; it still gets structured output.
+    #[test]
+    fn older_models_get_only_what_they_accept() {
+        let schema = json!({"type": "object"});
+        let body = request_body(&StructuredRequest {
+            model: "claude-haiku-4-5-20251001", system: "sys", user: "hi", schema: &schema, schema_name: "x",
+            effort: Effort::Low, max_tokens: 2000,
+        });
+        assert!(body.get("thinking").is_none() && body.get("fallbacks").is_none());
+        assert!(body["output_config"].get("effort").is_none());
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        let h = headers("k", "t", "claude-haiku-4-5-20251001");
+        assert!(h.contains(&("anthropic-beta", "oauth-2025-04-20".to_string())));
+        assert_eq!(caps("claude-sonnet-5-5"), Caps { adaptive_thinking: true, effort: true, fallbacks: true });
     }
 }

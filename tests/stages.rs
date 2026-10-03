@@ -179,3 +179,74 @@ fn a_mic_that_stopped_early_is_reported_to_the_model_the_report_and_the_app() {
     assert!(html.contains("Left out: part of the conversation wasn't recorded"));
     assert!(!html.contains("your share of talk time"));
 }
+
+/// Gives every answer the same verdicts (or fails), recording what it was asked.
+struct FakeScorer {
+    fail: bool,
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl interview_coach::scoring::Scorer for FakeScorer {
+    fn name(&self) -> String {
+        "typesafe/jev-latest".into()
+    }
+
+    fn assess(&self, input: &interview_coach::scoring::AnswerInput, checks: &[interview_coach::scoring::Check], _: usize)
+        -> anyhow::Result<interview_coach::scoring::Assessment> {
+        use interview_coach::scoring::{Assessment, Verdict};
+        self.asked.borrow_mut().push(input.answer.clone());
+        if self.fail {
+            anyhow::bail!("TypeSafe is down");
+        }
+        let verdict = |pick: &str, value: f64| Verdict { pick: pick.into(), value, confidence: Some(0.9),
+                                                         probabilities: [(pick.to_string(), 0.9)].into() };
+        let verdicts = checks
+            .iter()
+            .map(|c| {
+                let v = match c.id {
+                    "leads_with_point" => Verdict { probabilities: [("yes".into(), 0.1), ("no".into(), 0.9)].into(),
+                                                    ..verdict("no", 0.1) },
+                    "has_quantified_result" => Verdict { probabilities: [("yes".into(), 0.95)].into(), ..verdict("yes", 0.95) },
+                    "star_missing" => verdict("none", 0.9),
+                    "ownership" => verdict("we", 0.9),
+                    _ => verdict("4", 4.1),
+                };
+                (c.id.to_string(), v)
+            })
+            .collect();
+        Ok(Assessment { scorer: "typesafe/jev-1.13.0".into(), verdicts, latency_ms: 120, input_tokens: 300 })
+    }
+}
+
+/// Jev (or Claude) checks each answer after the report; the results are stored with the analysis
+/// and shown in the report, and a scorer failure only leaves a warning.
+#[test]
+fn each_answer_is_checked_after_the_report_and_a_failure_only_warns() {
+    use interview_coach::pipeline::analyze_session_with;
+    let (_tmp, mut db, id) = transcribed(Mode::Dual);
+    let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE)), Ok(sample(false, GOOD_QUOTE))]);
+    let scorer = FakeScorer { fail: false, asked: Default::default() };
+    let stored = analyze_session_with(&mut db, &llm, &claude(), id, Some(&scorer), &mut Quiet).unwrap();
+    assert_eq!(scorer.asked.borrow().len(), 1, "one question in the report, so one answer");
+    assert!(scorer.asked.borrow()[0].starts_with("Um, so, like, we shipped"), "the answer is the candidate's turns after it");
+    assert_eq!(stored.answer_checks.len(), 6);
+    let get = |id: &str| stored.answer_checks.iter().find(|c| c.check_id == id).unwrap();
+    assert_eq!((get("leads_with_point").verdict.as_str(), get("has_quantified_result").verdict.as_str()), ("fail", "pass"));
+    assert_eq!(get("ownership").verdict, "fail");
+    assert_eq!(get("specificity").scorer, "typesafe/jev-1.13.0");
+
+    let session = db.get_session(id).unwrap();
+    let html = interview_coach::report::render_html(&session, &stored, None);
+    assert!(html.contains("Answer by answer"));
+    assert!(html.contains("Led with the point 0 of 1 · Gave a number 1 of 1"));
+    assert!(html.contains("✓ 4/5") && html.contains("✗ we"));
+    assert!(html.contains("Checked answer by answer by typesafe/jev-1.13.0"));
+
+    let broken = FakeScorer { fail: true, asked: Default::default() };
+    let again = analyze_session_with(&mut db, &llm, &claude(), id, Some(&broken), &mut Quiet).unwrap();
+    assert!(again.answer_checks.is_empty());
+    let run = steps::current_run(&db, id, Step::Report).unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Succeeded);
+    assert!(run.warnings[0].contains("answer-by-answer checks were skipped: TypeSafe is down"), "{:?}", run.warnings);
+    assert_eq!(run.params["checks"], "typesafe/jev-latest");
+}
