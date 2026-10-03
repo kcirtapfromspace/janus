@@ -10,12 +10,14 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Interview Coach").font(.headline)
 
-            if let problem = model.health?.problems.first {
-                ProblemRow(problem: problem)
-                if model.health?.needsLogin == true {
-                    Button("Sign in to Claude…") { model.signInInTerminal() }
-                        .controlSize(.small)
+            if let setup = model.setup, !setup.ready {
+                Button { showSetup() } label: {
+                    Label(setup.remaining == 1 ? "Finish setup (1 thing left)…" : "Finish setup (\(setup.remaining) things left)…",
+                          systemImage: "wrench.and.screwdriver")
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
             }
             if let version = model.updateReady, model.phase.isBusy {
                 Label("Version \(version) installs when this finishes", systemImage: "arrow.down.circle")
@@ -39,6 +41,7 @@ struct MenuBarView: View {
             HStack {
                 Button("Open Interview Coach") { showMainWindow() }
                 Spacer()
+                Button("Setup…") { showSetup() }
                 if model.updater.isAvailable {
                     Button("Check for Updates…") { model.updater.checkForUpdates() }
                         .disabled(model.phase.isRecording)
@@ -137,5 +140,10 @@ struct MenuBarView: View {
     private func showMainWindow() {
         openWindow(id: "main")
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func showSetup() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "setup")
     }
 }

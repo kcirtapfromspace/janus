@@ -239,7 +239,7 @@ struct ReportStageView: View {
                     }
                     .frame(maxWidth: 380)
                 }
-                RerunMenu(step: .report, stage: stage, defaultModel: model.health?.model)
+                RerunMenu(step: .report, stage: stage, defaultModel: model.setup?.model)
                 Menu("Outcome") {
                     ForEach(outcomeChoices, id: \.value) { choice in
                         Button(choice.label) { model.setOutcome(detail.session.id, choice.value) }

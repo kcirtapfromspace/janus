@@ -5,6 +5,7 @@ import WebKit
 /// Session list on the left, the selected interview's report on the right, controls in the toolbar.
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     @State private var askingConsent = false
 
     var body: some View {
@@ -104,12 +105,12 @@ struct MainWindow: View {
                 .foregroundStyle(.red)
                 .lineLimit(1)
                 .help(error)
-        } else if let problem = model.health?.problems.first {
-            Label(problem, systemImage: "exclamationmark.triangle.fill")
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .lineLimit(1)
-                .help(problem)
+        } else if let setup = model.setup, !setup.ready {
+            Button { openWindow(id: "setup") } label: {
+                Label(setup.remaining == 1 ? "Finish setup (1 thing left)" : "Finish setup (\(setup.remaining) things left)",
+                      systemImage: "wrench.and.screwdriver")
+            }
+            .tint(.orange)
         }
     }
 }

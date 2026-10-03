@@ -1,14 +1,17 @@
 //! The local LiteLLM gateway that brokers ic's LLM requests (see litellm/).
 //!
-//! `ic proxy setup` writes the compose file, config, and a generated `.env` into
-//! ~/InterviewCoach/litellm/, starts the containers, and creates a LiteLLM virtual key for ic (a
-//! local credential between ic and the proxy, generated automatically). Claude needs no key here:
-//! ic sends your browser-login token, which LiteLLM forwards. Only OpenAI, which has no browser
-//! login for its API, needs a key in that `.env`.
+//! Setup (the app's Setup window, or `ic proxy setup`) writes the compose file, config, and a
+//! generated `.env` into ~/InterviewCoach/litellm/, starts the containers, and creates a LiteLLM
+//! virtual key for ic (a local credential between ic and the proxy, generated automatically).
+//! Claude needs no key here: ic sends your browser-login token, which LiteLLM forwards. OpenAI and
+//! TypeSafe (Jev), which have no browser login for their APIs, keep their keys in that `.env`.
+//!
+//! Docker doesn't have to be running beforehand: `ensure_running` starts Docker and the proxy
+//! before any step that needs them.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -16,6 +19,66 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::{Provider, Settings};
+use crate::progress::Progress;
+use crate::tools::Tool;
+
+/// An API key the proxy holds for a service with no browser login. Claude isn't one: it uses your
+/// login, so there's no way to put an Anthropic key here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
+pub enum KeyTarget {
+    #[value(name = "openai")]
+    OpenAi,
+    /// TypeSafe AI, for Jev.
+    #[value(name = "typesafe")]
+    TypeSafe,
+}
+
+impl KeyTarget {
+    pub const ALL: [KeyTarget; 2] = [KeyTarget::OpenAi, KeyTarget::TypeSafe];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KeyTarget::OpenAi => "openai",
+            KeyTarget::TypeSafe => "typesafe",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyTarget::OpenAi => "OpenAI",
+            KeyTarget::TypeSafe => "TypeSafe (Jev)",
+        }
+    }
+
+    /// The variable LiteLLM reads the key from.
+    pub fn env_var(self) -> &'static str {
+        match self {
+            KeyTarget::OpenAi => "OPENAI_API_KEY",
+            KeyTarget::TypeSafe => "TYPESAFE_API_KEY",
+        }
+    }
+
+    pub fn keys_url(self) -> &'static str {
+        match self {
+            KeyTarget::OpenAi => "https://platform.openai.com/api-keys",
+            KeyTarget::TypeSafe => "https://console.typesafe.ai/",
+        }
+    }
+
+    /// A light sanity check, so a pasted sentence or a Claude key isn't stored by mistake.
+    pub fn check(self, key: &str) -> Result<(), String> {
+        if key.is_empty() || key.chars().any(char::is_whitespace) || key.len() < 20 {
+            return Err(format!("That doesn't look like a {} API key.", self.label()));
+        }
+        if key.starts_with("sk-ant-") {
+            return Err("That's an Anthropic key. Claude uses your browser sign-in instead, so no key is needed.".into());
+        }
+        if self == KeyTarget::OpenAi && !key.starts_with("sk-") {
+            return Err("That doesn't look like an OpenAI API key (they start with sk-).".into());
+        }
+        Ok(())
+    }
+}
 
 const COMPOSE: &str = include_str!("../litellm/docker-compose.yml");
 const CONFIG: &str = include_str!("../litellm/config.yaml");
@@ -121,6 +184,10 @@ pub fn has_provider_key(settings: &Settings, provider: Provider) -> bool {
     env_value(&read_env(settings), provider.key_var()).is_some()
 }
 
+pub fn has_key(settings: &Settings, target: KeyTarget) -> bool {
+    env_value(&read_env(settings), target.env_var()).is_some()
+}
+
 /// An Anthropic key in the proxy would be injected alongside your login token, and Anthropic
 /// rejects requests that carry both. ic never writes one; `ic doctor` warns if one appears.
 pub fn has_stray_anthropic_key(settings: &Settings) -> bool {
@@ -137,45 +204,147 @@ pub fn base_url(settings: &Settings) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// Write the compose file, config, and `.env` (filling in missing secrets; setting a provider key
-/// only when one is given).
-pub fn write_files(settings: &Settings, provider_key: Option<(Provider, &str)>) -> Result<()> {
-    if let Some((Provider::Anthropic, _)) = provider_key {
-        bail!("Claude uses your browser login, not an API key — run: ic login");
-    }
+/// Write the compose file, config, and `.env` (filling in missing secrets; setting a key only when
+/// one is given).
+pub fn write_files(settings: &Settings, key: Option<(KeyTarget, &str)>) -> Result<()> {
     let d = dir(settings);
     std::fs::create_dir_all(&d)?;
     std::fs::write(d.join("docker-compose.yml"), COMPOSE)?;
     std::fs::write(d.join("config.yaml"), CONFIG)?;
     let port = std::env::var("IC_PROXY_PORT").unwrap_or_else(|_| DEFAULT_PORT.into());
     let mut env = fill_env(&read_env(settings), &port)?;
-    if let Some((provider, key)) = provider_key {
-        env = set_env_value(&env, provider.key_var(), key);
+    if let Some((target, key)) = key {
+        env = set_env_value(&env, target.env_var(), key);
     }
     write_private(&d.join(".env"), &env)
 }
 
 // --- docker ------------------------------------------------------------------------------------
 
+/// Docker Desktop or OrbStack, whichever is installed (a CLI alone isn't enough to start one).
+fn docker_app() -> Option<String> {
+    let home = dirs::home_dir().unwrap_or_default();
+    [PathBuf::from("/Applications/Docker.app"), home.join("Applications/Docker.app"),
+     PathBuf::from("/Applications/OrbStack.app"), home.join("Applications/OrbStack.app")]
+        .into_iter()
+        .find(|p| p.exists())
+        .map(|p| p.display().to_string())
+}
+
+pub fn docker_installed() -> bool {
+    Tool::Docker.find().is_some() || docker_app().is_some()
+}
+
 pub fn docker_running() -> bool {
-    Command::new("docker").args(["info", "--format", "{{.ServerVersion}}"]).output().is_ok_and(|o| o.status.success())
+    Tool::Docker
+        .command()
+        .is_ok_and(|mut c| c.args(["info", "--format", "{{.ServerVersion}}"]).output().is_ok_and(|o| o.status.success()))
+}
+
+/// Start Docker Desktop (or OrbStack) if it isn't running, and wait until it answers.
+pub fn start_docker(progress: &mut dyn Progress) -> Result<()> {
+    if docker_running() {
+        return Ok(());
+    }
+    let app = docker_app().context(
+        "Docker isn't installed. Get Docker Desktop from https://www.docker.com/products/docker-desktop/ (or install OrbStack).",
+    )?;
+    progress.stage("Starting Docker");
+    let status = Command::new("/usr/bin/open").args(["-g", "-a", &app]).status()?;
+    if !status.success() {
+        bail!("Couldn't open {app}.");
+    }
+    let deadline = Instant::now() + Duration::from_secs(180);
+    while Instant::now() < deadline {
+        if docker_running() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    bail!("Docker didn't start within 3 minutes. Open {app} and finish anything it asks for (accepting its terms, \
+           allowing its helper), then try again.")
+}
+
+fn compose_command(settings: &Settings, args: &[&str]) -> Result<Command> {
+    let d = dir(settings);
+    if !d.join("docker-compose.yml").exists() {
+        bail!("The AI proxy isn't set up yet. Open Setup in the app (or run: ic proxy setup).");
+    }
+    let mut cmd = Tool::Docker.command()?;
+    cmd.args(["compose", "-p", &project(), "--project-directory"]).arg(&d).arg("-f").arg(d.join("docker-compose.yml"));
+    cmd.args(args);
+    Ok(cmd)
 }
 
 fn compose(settings: &Settings, args: &[&str]) -> Result<()> {
-    let d = dir(settings);
-    if !d.join("docker-compose.yml").exists() {
-        bail!("The LLM proxy isn't set up yet. Run: ic proxy setup");
+    let out = compose_command(settings, args)?.stdin(Stdio::null()).output().context("running docker compose")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tail: Vec<_> = stderr.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect();
+        bail!("docker compose {} failed:\n{}", args.join(" "), tail.join("\n"));
     }
-    let status = Command::new("docker")
-        .args(["compose", "-p", &project(), "--project-directory"])
-        .arg(&d)
-        .arg("-f")
-        .arg(d.join("docker-compose.yml"))
-        .args(args)
-        .status()
-        .context("running docker compose")?;
-    if !status.success() {
-        bail!("docker compose {} failed", args.join(" "));
+    Ok(())
+}
+
+/// Byte progress across every image layer, from `docker compose --progress json pull` lines.
+#[derive(Debug, Default)]
+pub struct PullProgress {
+    layers: std::collections::BTreeMap<String, (u64, u64)>,
+    images_done: std::collections::BTreeSet<String>,
+}
+
+impl PullProgress {
+    /// Take one output line; returns (bytes done, bytes total) once any layer reports sizes.
+    pub fn feed(&mut self, line: &str) -> Option<(u64, u64)> {
+        let event: Value = serde_json::from_str(line).ok()?;
+        let id = event["id"].as_str()?.to_string();
+        if event["parent_id"].is_null() {
+            if event["status"] == "Done" {
+                self.images_done.insert(id);
+            }
+            return None;
+        }
+        let (current, total) = (event["current"].as_u64().unwrap_or(0), event["total"].as_u64().unwrap_or(0));
+        let entry = self.layers.entry(id).or_default();
+        if total > 0 {
+            *entry = (current.min(total), total);
+        }
+        if event["status"] == "Done" && entry.1 > 0 {
+            entry.0 = entry.1;
+        }
+        let (done, total) = self.layers.values().fold((0, 0), |(d, t), (ld, lt)| (d + ld, t + lt));
+        (total > 0).then_some((done, total))
+    }
+
+    pub fn images_done(&self) -> usize {
+        self.images_done.len()
+    }
+}
+
+/// Download the proxy's images (about 2 GB the first time), reporting byte progress.
+pub fn pull(settings: &Settings, progress: &mut dyn Progress) -> Result<()> {
+    progress.stage("Downloading the AI proxy (first time only)");
+    let mut child = compose_command(settings, &["--progress", "json", "pull"])?
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running docker compose pull")?;
+    // Compose writes its JSON progress to stderr; stdout is read too so neither pipe fills up.
+    let stdout = child.stdout.take().expect("piped");
+    let drain = std::thread::spawn(move || std::io::copy(&mut BufReader::new(stdout), &mut std::io::sink()));
+    let mut state = PullProgress::default();
+    let mut errors = vec![];
+    for line in BufReader::new(child.stderr.take().expect("piped")).lines().map_while(Result::ok) {
+        if let Some((done, total)) = state.feed(&line) {
+            progress.step(done, total);
+        } else if !line.trim_start().starts_with('{') {
+            errors.push(line);
+        }
+    }
+    let _ = drain.join();
+    if !child.wait()?.success() {
+        bail!("Couldn't download the AI proxy's images:\n{}", errors.join("\n"));
     }
     Ok(())
 }
@@ -266,6 +435,41 @@ pub fn ensure_key(settings: &Settings) -> Result<LlmEndpoint> {
     Ok(endpoint)
 }
 
+/// Whether the proxy answers and accepts ic's key.
+pub fn is_ready(settings: &Settings) -> bool {
+    LlmEndpoint::load(settings).is_some_and(|e| readiness(&e.base_url).is_ok() && key_info(&e).is_ok())
+}
+
+/// Set up (or repair) the local proxy from scratch: Docker, config, images, containers, ic's key.
+pub fn setup(settings: &Settings, progress: &mut dyn Progress) -> Result<LlmEndpoint> {
+    start_docker(progress)?;
+    write_files(settings, None)?;
+    pull(settings, progress)?;
+    progress.stage("Starting the AI proxy (the first start sets up its database)");
+    compose(settings, &["up", "-d"])?;
+    wait_ready(&base_url(settings), Duration::from_secs(300))?;
+    ensure_key(settings)
+}
+
+/// Make sure the proxy is up before an AI step: start Docker and the containers if they stopped
+/// (e.g. after a restart). Does nothing for an external proxy (`IC_LLM_URL`), and never sets one up
+/// from scratch — that's Setup's job.
+pub fn ensure_running(settings: &Settings, progress: &mut dyn Progress) -> Result<()> {
+    if using_external_proxy() || is_ready(settings) {
+        return Ok(());
+    }
+    if !dir(settings).join("docker-compose.yml").exists() {
+        bail!("The AI proxy isn't set up yet. Open Setup in the app (or run: ic proxy setup).");
+    }
+    start_docker(progress)?;
+    progress.stage("Starting the AI proxy");
+    write_files(settings, None)?; // refreshes the compose file after an app update; keys are kept
+    compose(settings, &["up", "-d"])?;
+    wait_ready(&base_url(settings), Duration::from_secs(300))?;
+    ensure_key(settings)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +493,31 @@ mod tests {
         let out = set_env_value(env, "ANTHROPIC_API_KEY", "new");
         assert_eq!(out, "A=1\nANTHROPIC_API_KEY=new\nB=2\n");
         assert_eq!(env_value("X=\n", "X"), None, "empty values count as missing");
+    }
+
+    #[test]
+    fn pull_progress_adds_up_layers_across_images() {
+        let mut p = PullProgress::default();
+        let lines = [
+            r#"{"id":"Image postgres:16","status":"Working","text":"Pulling"}"#,
+            r#"{"id":"a1","parent_id":"Image postgres:16","status":"Working","text":"Downloading","current":100,"total":1000}"#,
+            r#"{"id":"b2","parent_id":"Image litellm","status":"Working","text":"Downloading","current":50,"total":500}"#,
+            r#"{"id":"a1","parent_id":"Image postgres:16","status":"Done","text":"Pull complete"}"#,
+            r#"{"id":"Image postgres:16","status":"Done","text":"Pulled"}"#,
+        ];
+        let seen: Vec<_> = lines.iter().map(|l| p.feed(l)).collect();
+        assert_eq!(seen, [None, Some((100, 1000)), Some((150, 1500)), Some((1050, 1500)), None]);
+        assert_eq!(p.images_done(), 1);
+        assert_eq!(p.feed("not json"), None);
+    }
+
+    #[test]
+    fn keys_are_sanity_checked_and_claude_keys_refused() {
+        assert!(KeyTarget::OpenAi.check("sk-proj-0123456789abcdefghij").is_ok());
+        assert!(KeyTarget::OpenAi.check("nope").is_err());
+        assert!(KeyTarget::TypeSafe.check("ts_live_0123456789abcdefghij").is_ok());
+        assert!(KeyTarget::TypeSafe.check("sk-ant-api03-0123456789abcdefghij").unwrap_err().contains("browser sign-in"));
+        assert!(KeyTarget::TypeSafe.check("two words here and more words").is_err());
     }
 
     #[test]

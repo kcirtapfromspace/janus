@@ -14,19 +14,20 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use interview_coach::auth;
 use interview_coach::capture;
-use interview_coach::config::{FileConfig, ModelRef, Provider, Settings, which};
+use interview_coach::config::{FileConfig, ModelRef, Provider, Settings};
 use interview_coach::db::Db;
-use interview_coach::diarize;
+use interview_coach::events::JsonEvents;
 use interview_coach::llm;
 use interview_coach::merge::to_turns;
 use interview_coach::models::{OutcomeResult, Status, Step, YOU, fmt_ts, speaker_label};
 use interview_coach::pipeline;
 use interview_coach::progress::Progress;
-use interview_coach::proxy::{self, LlmEndpoint};
+use interview_coach::proxy::{self, KeyTarget, LlmEndpoint};
 use interview_coach::report;
 use interview_coach::session_view;
+use interview_coach::setup;
 use interview_coach::steps::{self, StageStatus};
-use interview_coach::transcribe;
+use interview_coach::tools::{Origin, Tool};
 
 #[derive(Parser)]
 #[command(name = "ic", about = "Interview Coach — record, transcribe, and get coached on your interviews.", version)]
@@ -167,8 +168,17 @@ enum Cmd {
         #[arg(long)]
         notes: Option<String>,
     },
-    /// Sign in to Claude through your browser (no API key needed). Starts the LLM proxy if needed.
-    Login,
+    /// Sign in to Claude through your browser (no API key needed).
+    Login {
+        /// JSON-lines events for the app (the sign-in URL, a code prompt); a code is read from stdin.
+        #[arg(long, hide = true)]
+        events: bool,
+    },
+    /// What this Mac still needs before Interview Coach works, and the steps that set it up.
+    Setup {
+        #[command(subcommand)]
+        action: SetupCmd,
+    },
     /// Run and manage the local LiteLLM proxy that brokers every LLM request.
     Proxy {
         #[command(subcommand)]
@@ -180,10 +190,23 @@ enum Cmd {
         action: ConfigCmd,
     },
     /// Check that everything the pipeline needs is installed and set up.
-    Doctor {
-        /// Machine-readable summary (used by the Interview Coach app).
+    Doctor,
+}
+
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// What's done and what's left.
+    Status {
+        /// Machine-readable (used by the app's Setup window).
         #[arg(long)]
         json: bool,
+    },
+    /// Do one setup step: docker, proxy, models, or all of them.
+    Run {
+        step: setup::Step,
+        /// JSON-lines progress events for the app.
+        #[arg(long)]
+        events: bool,
     },
 }
 
@@ -226,8 +249,13 @@ enum ConfigKey {
 enum ProxyCmd {
     /// Set up (or repair) the proxy: write its config, start it, and give ic its own key.
     Setup,
-    /// Add or replace OpenAI's API key in the proxy (Claude uses `ic login` instead).
-    Key { provider: Provider },
+    /// Add or replace an API key the proxy holds: openai, or typesafe (for Jev). Claude uses `ic login`.
+    Key {
+        target: KeyTarget,
+        /// Read the key from stdin instead of prompting (the app pipes it; it never appears in arguments).
+        #[arg(long)]
+        stdin: bool,
+    },
     /// Start the proxy containers.
     Start,
     /// Stop the proxy containers (your keys and spend history are kept).
@@ -318,12 +346,13 @@ fn analysis_blocker(settings: &Settings) -> Option<String> {
 /// Why `model` can't be used with the current setup, if it can't.
 fn blocker_for(settings: &Settings, model: &ModelRef) -> Option<String> {
     if LlmEndpoint::load(settings).is_none() {
-        return Some("the LLM proxy isn't set up yet — run: ic proxy setup".into());
+        return Some("the AI proxy isn't set up yet — open Setup in the app (or run: ic proxy setup)".into());
     }
     match model.provider {
-        Provider::Anthropic => (!auth::has_login()).then(|| "you're not signed in to Claude — run: ic login".to_string()),
-        Provider::OpenAi => (!proxy::using_external_proxy() && !proxy::has_provider_key(settings, Provider::OpenAi))
-            .then(|| format!("the proxy has no OpenAI key, which {model} needs — add one with: ic proxy key openai")),
+        Provider::Anthropic => (!auth::has_login())
+            .then(|| "you're not signed in to Claude — sign in from Setup in the app (or run: ic login)".to_string()),
+        Provider::OpenAi => (!proxy::using_external_proxy() && !proxy::has_key(settings, KeyTarget::OpenAi))
+            .then(|| format!("the proxy has no OpenAI key, which {model} needs — add one in Setup (or: ic proxy key openai)")),
     }
 }
 
@@ -331,9 +360,13 @@ fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, ope
     if let Some(reason) = blocker_for(settings, model) {
         bail!("Can't analyse yet: {reason}\nThen run: ic run report {id}");
     }
+    let mut ui = Ui::new();
+    if let Err(e) = proxy::ensure_running(settings, &mut ui) {
+        ui.finish();
+        return Err(e);
+    }
     let endpoint = LlmEndpoint::load(settings).expect("checked above");
     let client = llm::client(model, endpoint);
-    let mut ui = Ui::new();
     let stored = pipeline::analyze_session(db, client.as_ref(), model, id, &mut ui);
     ui.finish();
     let stored = stored?;
@@ -353,9 +386,13 @@ fn run_next(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, show: b
     if let Some(reason) = blocker_for(settings, model) {
         bail!("Can't plan next steps yet: {reason}\nThen run: ic run next {id}");
     }
+    let mut ui = Ui::new();
+    if let Err(e) = proxy::ensure_running(settings, &mut ui) {
+        ui.finish();
+        return Err(e);
+    }
     let endpoint = LlmEndpoint::load(settings).expect("checked above");
     let client = llm::client(model, endpoint);
-    let mut ui = Ui::new();
     let stored = pipeline::plan_next_steps(db, client.as_ref(), model, id, &mut ui);
     ui.finish();
     let stored = stored?;
@@ -706,79 +743,106 @@ fn outcome(settings: &Settings, id: i64, result: OutcomeResult, notes: Option<St
     Ok(())
 }
 
-fn read_provider_key(provider: Provider) -> Result<String> {
-    if let Ok(key) = std::env::var(provider.key_var()) {
-        println!("Using the {} key from ${}.", provider.label(), provider.key_var());
-        return Ok(key);
-    }
-    println!("Opening {} — create a {} API key there (or copy an existing one).", provider.keys_url(), provider.label());
-    let _ = Command::new("open").arg(provider.keys_url()).status();
-    let prompt = format!("Paste your {} API key (input hidden): ", provider.label());
-    let key = rpassword::prompt_password(&prompt).or_else(|_| {
-        // No terminal to hide input on (e.g. piped): read a plain line instead.
-        print!("{prompt}");
-        std::io::stdout().flush()?;
+fn read_key(target: KeyTarget, from_stdin: bool) -> Result<String> {
+    let key = if from_stdin {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
-        Ok::<_, std::io::Error>(line)
-    })?;
+        line
+    } else if let Ok(key) = std::env::var(target.env_var()) {
+        println!("Using the {} key from ${}.", target.label(), target.env_var());
+        key
+    } else {
+        println!("Opening {} — create a {} API key there (or copy an existing one).", target.keys_url(), target.label());
+        let _ = Command::new("/usr/bin/open").arg(target.keys_url()).status();
+        let prompt = format!("Paste your {} API key (input hidden): ", target.label());
+        rpassword::prompt_password(&prompt).or_else(|_| {
+            // No terminal to hide input on (e.g. piped): read a plain line instead.
+            print!("{prompt}");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            Ok::<_, std::io::Error>(line)
+        })?
+    };
     let key = key.trim().to_string();
-    if !key.starts_with(provider.key_prefix()) {
-        bail!("That doesn't look like an {} API key (they start with {}). Nothing was changed.", provider.label(),
-              provider.key_prefix());
-    }
+    target.check(&key).map_err(|reason| anyhow::anyhow!("{reason} Nothing was changed."))?;
     Ok(key)
 }
 
 fn proxy_setup(settings: &Settings) -> Result<()> {
-    if !proxy::docker_running() {
-        bail!("Docker isn't running. Start Docker Desktop, then run: ic proxy setup");
-    }
-    proxy::write_files(settings, None)?;
-    println!("Starting LiteLLM (the first start downloads its images and sets up its database)…");
-    proxy::start(settings)?;
-    let base = proxy::base_url(settings);
-    let ui = Ui::new();
-    ui.bar.set_message("Waiting for the proxy to be ready…");
-    let ready = proxy::wait_ready(&base, Duration::from_secs(300));
+    let mut ui = Ui::new();
+    let result = proxy::setup(settings, &mut ui);
     ui.finish();
-    ready?;
-    proxy::ensure_key(settings)?;
-    println!("{} LLM proxy running at {base}.", style("✓").green());
+    result?;
+    println!("{} AI proxy running at {}.", style("✓").green(), proxy::base_url(settings));
     println!("{}", style(format!("Config: {} · Spend: ic proxy status", proxy::dir(settings).display())).dim());
     Ok(())
 }
 
-fn proxy_key(settings: &Settings, provider: Provider) -> Result<()> {
-    if provider == Provider::Anthropic {
-        bail!("Claude uses your browser login instead of an API key — run: ic login");
+fn proxy_key(settings: &Settings, target: KeyTarget, from_stdin: bool) -> Result<()> {
+    if proxy::using_external_proxy() {
+        bail!("ic is using the shared proxy at IC_LLM_URL; add the {} key there.", target.label());
     }
-    if !proxy::docker_running() {
-        bail!("Docker isn't running. Start Docker Desktop, then run: ic proxy key {provider}");
-    }
-    let key = read_provider_key(provider)?;
-    proxy::write_files(settings, Some((provider, &key)))?;
+    let key = read_key(target, from_stdin)?;
+    let mut ui = Ui::new();
+    let ready = proxy::ensure_running(settings, &mut ui);
+    ui.finish();
+    ready?;
+    proxy::write_files(settings, Some((target, &key)))?;
     proxy::restart_with_new_env(settings)?;
     proxy::wait_ready(&proxy::base_url(settings), Duration::from_secs(300))?;
     proxy::ensure_key(settings)?;
-    println!("{} The proxy now holds your {} key. Use it with: --model {provider}/<model>, or make it the default:",
-             style("✓").green(), provider.label());
-    println!("  ic config set model {provider}/<model>");
+    println!("{} The AI proxy now holds your {} key.", style("✓").green(), target.label());
+    if target == KeyTarget::OpenAi {
+        println!("Use it with --model openai/<model>, or make it the default: ic config set model openai/<model>");
+    }
     Ok(())
 }
 
-fn login(settings: &Settings) -> Result<()> {
-    // Claude requests go through the proxy, so make sure it's set up and running first.
-    let proxy_ready = LlmEndpoint::load(settings).is_some_and(|e| proxy::readiness(&e.base_url).is_ok());
-    if !proxy_ready && !proxy::using_external_proxy() {
-        proxy_setup(settings)?;
+fn login(events: bool) -> Result<()> {
+    if events {
+        let mut out = JsonEvents::new();
+        let result = auth::login(Some(&mut |event| match event {
+            auth::LoginEvent::OpenUrl(url) => out.open_url(&url),
+            auth::LoginEvent::NeedCode => out.need_code(),
+            auth::LoginEvent::Log(line) => out.log(&line),
+        }))
+        .and_then(|_| auth::access_token().map(|_| ()));
+        return match result {
+            Ok(()) => {
+                out.done();
+                Ok(())
+            }
+            Err(e) => {
+                out.error(&format!("{e:#}"));
+                Err(e)
+            }
+        };
     }
     println!("{} — a browser window will open. Approve access there, then come back here.", style("Claude sign-in").bold());
     println!("{}", style("If the page shows a code instead of closing, paste it at the Code: prompt below.").dim());
-    auth::login()?;
+    auth::login(None)?;
     auth::access_token()?; // prove the session works before saying so
     println!("{} Signed in to Claude — no API key stored. ic gets short-lived tokens from this session as needed.",
              style("✓").green());
+    Ok(())
+}
+
+fn setup_run(settings: &Settings, step: setup::Step, events: bool) -> Result<()> {
+    if events {
+        let mut out = JsonEvents::new();
+        let result = setup::run(step, settings, &mut out);
+        match &result {
+            Ok(()) => out.done(),
+            Err(e) => out.error(&format!("{e:#}")),
+        }
+        return result;
+    }
+    let mut ui = Ui::new();
+    let result = setup::run(step, settings, &mut ui);
+    ui.finish();
+    result?;
+    println!("{} Done.", style("✓").green());
     Ok(())
 }
 
@@ -828,99 +892,49 @@ fn proxy_status(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-/// `ic doctor --json`: the few facts the app's status row needs.
-fn doctor_json(settings: &Settings) -> Result<()> {
-    let (ffmpeg, ant) = (which("ffmpeg").is_some(), which("ant").is_some());
-    let docker_installed = which("docker").is_some();
-    let docker = docker_installed && proxy::docker_running();
-    let signed_in = ant && auth::has_login() && auth::access_token().is_ok();
-    let proxy_ready = LlmEndpoint::load(settings)
-        .is_some_and(|e| proxy::readiness(&e.base_url).is_ok() && proxy::key_info(&e).is_ok());
-    // Most fixable first: a fresh Mac needs its tools, then Docker, then a sign-in.
-    let mut problems = vec![];
-    if !ffmpeg {
-        problems.push("ffmpeg isn't installed — run: brew install ffmpeg".to_string());
+/// `ic setup status` (and `ic doctor`): what's done, what's left, and how to do it.
+fn setup_status(settings: &Settings, json: bool) -> Result<()> {
+    let status = setup::status(&setup::System { settings });
+    if json {
+        println!("{}", serde_json::to_string(&status)?);
+        return Ok(());
     }
-    if !ant {
-        problems.push("Anthropic's CLI (for Claude sign-in) isn't installed — run: brew install anthropics/tap/ant".to_string());
+    for check in &status.checks {
+        let mark = match check.status {
+            setup::Status::Ok => style("✓").green(),
+            setup::Status::Action => style("•").yellow(),
+            setup::Status::Blocked => style("…").dim(),
+            setup::Status::Optional => style("○").dim(),
+        };
+        println!("{mark} {}", check.title);
+        if !check.detail.is_empty() && check.status != setup::Status::Ok {
+            println!("  {}", style(&check.detail).dim());
+        }
     }
-    if !docker_installed {
-        problems.push("Docker Desktop isn't installed — get it from docker.com/products/docker-desktop".to_string());
-    } else if !docker {
-        problems.push("Docker isn't running — start Docker Desktop".to_string());
-    }
-    let can_sign_in = ant && docker;
-    if can_sign_in && !proxy_ready {
-        problems.push("The LLM proxy isn't set up or running — sign in to start it".to_string());
-    } else if can_sign_in && settings.model.provider == Provider::Anthropic && !signed_in {
-        problems.push("Not signed in to Claude (or the login expired)".to_string());
-    } else if let Some(reason) = analysis_blocker(settings).filter(|_| proxy_ready) {
-        problems.push(reason);
-    }
-    let needs_login = can_sign_in && (!proxy_ready || (settings.model.provider == Provider::Anthropic && !signed_in));
-    println!("{}", serde_json::json!({
-        "model": settings.model.to_string(),
-        "signed_in": signed_in,
-        "docker_running": docker,
-        "proxy_ready": proxy_ready,
-        "needs_login": needs_login,
-        "problems": problems,
-    }));
-    Ok(())
-}
-
-fn doctor(settings: &Settings) {
-    let ok = style("✓").green();
-    let bad = style("✗").red();
-    let todo = style("•").yellow();
-    let mark = |good: bool| if good { ok.clone() } else { bad.clone() };
-
-    println!("{} ffmpeg", mark(which("ffmpeg").is_some()));
-    if transcribe::is_downloaded(settings) {
-        println!("{ok} Whisper model downloaded ({})", settings.whisper_model);
-    } else {
-        println!("{todo} Whisper model ({}) downloads automatically on first use (~1.6 GB)", settings.whisper_model);
-    }
-    if diarize::is_downloaded(settings) {
-        println!("{ok} Speaker-detection models downloaded (for single-track imports)");
-    } else {
-        println!("{todo} Speaker-detection models download automatically on first single-track import (~50 MB)");
+    for tool in [Tool::Ffmpeg, Tool::Ant, Tool::Docker] {
+        if let Some(found) = tool.find() {
+            let origin = match found.origin {
+                Origin::Bundled => "bundled with the app",
+                Origin::Override => "from IC_* override",
+                Origin::System => "installed on this Mac",
+            };
+            println!("{}", style(format!("  {} {} ({origin})", tool.name(), found.path.display())).dim());
+        }
     }
     let app = capture::app_path();
-    println!("{} Recorder app {} ({})", mark(app.exists()), if app.exists() { "built" } else { "not built — run mac/build.sh" },
-             app.display());
-    println!("{ok} Analysis model: {} {}", settings.model, style("(change: ic config set model …, or --model)").dim());
-    match (auth::has_login(), which("ant").is_some()) {
-        (_, false) => println!("{todo} Anthropic's CLI (used for Claude sign-in) isn't installed — {}", auth::INSTALL_ANT),
-        (true, true) => match auth::access_token() {
-            Ok(_) => println!("{ok} Signed in to Claude (browser login, no API key)"),
-            Err(_) => println!("{bad} Claude login expired — run: ic login"),
-        },
-        (false, true) => println!("{todo} Not signed in to Claude — run: ic login"),
+    if !app.exists() {
+        println!("{} Recorder app not found ({}) — `ic record` needs it; the app records by itself",
+                 style("•").yellow(), app.display());
     }
-    let docker = proxy::docker_running();
-    println!("{} Docker {}", mark(docker), if docker { "running" } else { "not running (needed for the LLM proxy)" });
-    match LlmEndpoint::load(settings) {
-        None => println!("{todo} LLM proxy not set up (needed for analysis) — run: ic proxy setup"),
-        Some(e) => match proxy::readiness(&e.base_url).and_then(|_| proxy::key_info(&e)) {
-            Ok(_) => {
-                println!("{ok} LLM proxy up at {} and ic's key accepted", e.base_url);
-                if !proxy::using_external_proxy() {
-                    match proxy::has_provider_key(settings, Provider::OpenAi) {
-                        true => println!("{ok} OpenAI key in the proxy"),
-                        false => println!("{todo} No OpenAI key in the proxy (only needed for openai/… models) — ic proxy key openai"),
-                    }
-                    if proxy::has_stray_anthropic_key(settings) {
-                        println!("{bad} The proxy's .env has an ANTHROPIC_API_KEY; remove it — Anthropic rejects requests \
-                                  that carry both a key and your login token");
-                    }
-                }
-            }
-            Err(err) => println!("{bad} LLM proxy at {}: {err:#} — try: ic proxy start", e.base_url),
-        },
+    if status.ready {
+        println!("{} Ready. Analysis model: {}", style("✓").green(), settings.model);
+    } else {
+        println!("{} {} thing(s) left — open Setup in the app, or: ic setup run all, then ic login",
+                 style("•").yellow(), status.remaining);
     }
-    println!("{}", style(format!("Data folder: {}", settings.data_dir.display())).dim());
-    println!("{}", style(format!("Models folder: {}", settings.models_dir.display())).dim());
+    println!("{}", style(format!("Data folder: {} · Models: {}", settings.data_dir.display(),
+                                 settings.models_dir.display())).dim());
+    Ok(())
 }
 
 fn run() -> Result<()> {
@@ -1028,17 +1042,23 @@ fn run() -> Result<()> {
                 }
                 Ok(())
             }
-            ProxyCmd::Key { provider } => proxy_key(&settings, provider),
+            ProxyCmd::Key { target, stdin } => proxy_key(&settings, target, stdin),
             ProxyCmd::Start => {
-                proxy::start(&settings)?;
-                proxy::wait_ready(&proxy::base_url(&settings), Duration::from_secs(300))?;
-                println!("{} LLM proxy running at {}", style("✓").green(), proxy::base_url(&settings));
+                let mut ui = Ui::new();
+                let result = proxy::ensure_running(&settings, &mut ui);
+                ui.finish();
+                result?;
+                println!("{} AI proxy running at {}", style("✓").green(), proxy::base_url(&settings));
                 Ok(())
             }
             ProxyCmd::Stop => proxy::stop(&settings),
             ProxyCmd::Status => proxy_status(&settings),
         },
-        Cmd::Login => login(&settings),
+        Cmd::Login { events } => login(events),
+        Cmd::Setup { action } => match action {
+            SetupCmd::Status { json } => setup_status(&settings, json),
+            SetupCmd::Run { step, events } => setup_run(&settings, step, events),
+        },
         Cmd::Config { action } => match action {
             ConfigCmd::Show => {
                 config_show(&settings);
@@ -1046,11 +1066,7 @@ fn run() -> Result<()> {
             }
             ConfigCmd::Set { key, value } => config_set(&settings, key, &value),
         },
-        Cmd::Doctor { json: true } => doctor_json(&settings),
-        Cmd::Doctor { json: false } => {
-            doctor(&settings);
-            Ok(())
-        }
+        Cmd::Doctor => setup_status(&settings, false),
     }
 }
 

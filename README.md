@@ -6,20 +6,23 @@ the transcript text goes to the model you choose (Claude or OpenAI) for analysis
 
 ## Install on a Mac
 
-Download the notarized app from **[interview-coach-releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest)**
-and follow the steps there: Docker Desktop, `brew install ffmpeg anthropics/tap/ant`, move the app to
-Applications, open it, and **Sign in to Claude…** from the menu bar. It updates itself after that.
-Releasing is described in [docs/RELEASING.md](docs/RELEASING.md).
+Download the notarized app from **[interview-coach-releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest)**,
+move it to Applications, and open it. Its **Setup** window walks through the rest: Docker Desktop (the
+only thing to install yourself), the local AI proxy, signing in to Claude in your browser, the speech
+models, and a 5-second recording test. ffmpeg and Anthropic's `ant` come inside the app. It updates
+itself after that. Releasing is described in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Build from source
 
 ```sh
-mac/build.sh               # builds `ic` and both Mac apps into mac/build/ (signed)
-open "mac/build/Interview Coach.app"
-ic login                   # once: starts the local LLM proxy and signs you in to Claude in your browser
+mac/build.sh               # builds `ic`, both Mac apps, and the bundled ffmpeg and ant into mac/build/ (signed)
+open "mac/build/Interview Coach.app"   # its Setup window does the rest
 ```
 
-(`cargo install --path .` puts `ic` on your PATH for the commands below; `ic doctor` checks everything.)
+From the command line instead: `ic setup status` shows what's left, `ic setup run all` starts Docker,
+sets up the AI proxy and downloads the models, and `ic login` signs you in to Claude.
+(`cargo install --path .` puts `ic` on your PATH; outside the app it uses ffmpeg and `ant` from PATH,
+or `IC_FFMPEG` / `IC_ANT`.)
 
 ### The Mac app
 

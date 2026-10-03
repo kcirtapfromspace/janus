@@ -1,5 +1,6 @@
 import InterviewCoachKit
 import AppKit
+import AVFoundation
 import ICRecorderCore
 import Observation
 
@@ -20,7 +21,16 @@ final class AppModel {
         didSet { if phase == .idle { updater.installIfIdle() } }  // a waiting update installs between interviews
     }
     var sessions: [SessionSummary] = []
-    var health: Health?
+    /// What this Mac still needs (`ic setup status`), shown in the Setup window.
+    var setup: SetupStatus?
+    /// The setup step running now (one at a time), with its live progress.
+    var setupActivity: SetupActivity?
+    /// The last failure per setup check, shown on its row until it's retried.
+    var setupErrors: [String: String] = [:]
+    var selfTest: SelfTestState = .notRun
+    var micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+    /// Setup opens by itself at most once per launch.
+    @ObservationIgnored var setupPromptShown = false
     var selection: SessionSummary.ID?
     var lastError: String?
     var title = ""
@@ -39,6 +49,9 @@ final class AppModel {
     private var recorder: RecordingSession?
     private var recordingID: Int?
     @ObservationIgnored private var healthTimer: Timer?
+    @ObservationIgnored private var setupStream: ICStream?
+    @ObservationIgnored private var setupCancelled = false
+    @ObservationIgnored private var runningSelfTest: AudioSelfTest?
 
     init() {
         updater.isIdle = { [unowned self] in phase == .idle }
@@ -97,7 +110,8 @@ final class AppModel {
         }
         do {
             sessions = try await ic.decode([SessionSummary].self, ["list", "--json"])
-            health = try await ic.decode(Health.self, ["doctor", "--json"])
+            setup = try await ic.decode(SetupStatus.self, ["setup", "status", "--json"])
+            micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
         } catch {
             lastError = error.localizedDescription
         }
@@ -201,24 +215,111 @@ final class AppModel {
         runIC(["outcome", "\(id)", outcome], label: "Saving outcome…", select: id)
     }
 
-    /// `ic login` opens the browser and may ask to paste a code, so it runs in a Terminal window.
-    func signInInTerminal() {
-        guard let ic else { return }
-        let script = FileManager.default.temporaryDirectory.appendingPathComponent("interview-coach-sign-in.command")
-        let body = """
-        #!/bin/zsh
-        export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        clear
-        '\(ic.executable.path)' login
-        echo
-        echo "Done. You can close this window and go back to Interview Coach."
-        """
+    // MARK: Setup
+
+    /// Run one `ic setup` step, following its progress.
+    func runSetupStep(_ step: String, check: String) {
+        follow(["setup", "run", step, "--events"], check: check, message: "Starting…")
+    }
+
+    /// Browser sign-in: ic runs the bundled `ant`, which opens the approval page.
+    func signIn() {
+        follow(["login", "--events"], check: "claude", message: "Approve access in your browser…")
+    }
+
+    /// The code the sign-in page shows when it can't hand the approval back by itself.
+    func sendSignInCode(_ code: String) {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return }
+        setupStream?.send(code)
+        setupActivity?.needsCode = false
+        setupActivity?.message = "Checking the code…"
+    }
+
+    func cancelSetupActivity() {
+        setupCancelled = true
+        setupStream?.cancel()
+    }
+
+    /// Store an API key in the AI proxy. It goes to ic on stdin, never as an argument.
+    func saveKey(_ key: String, target: String, check: String) async {
+        guard let ic, setupActivity == nil else { return }
+        setupErrors[check] = nil
+        setupActivity = SetupActivity(checkID: check, message: "Saving the key and restarting the AI proxy…")
         do {
-            try body.write(to: script, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-            NSWorkspace.shared.open(script)
+            _ = try await ic.run(["proxy", "key", target, "--stdin"], stdin: key)
         } catch {
-            lastError = "Couldn't open Terminal: \(error.localizedDescription)"
+            setupErrors[check] = error.localizedDescription
+        }
+        setupActivity = nil
+        await refresh()
+    }
+
+    func requestMicAccess() {
+        MicCapture.requestAccess { [weak self] _ in
+            Task { @MainActor in self?.micPermission = AVCaptureDevice.authorizationStatus(for: .audio) }
+        }
+    }
+
+    /// Record 5 s from both tracks to prove the permissions work. Only ever started by a click.
+    func runSelfTest() {
+        guard runningSelfTest == nil, !phase.isRecording else { return }
+        selfTest = .running
+        let test = AudioSelfTest()
+        runningSelfTest = test
+        test.run { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.runningSelfTest = nil
+                self.selfTest = .finished(result)
+                self.micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+            }
+        }
+    }
+
+    private func follow(_ args: [String], check: String, message: String) {
+        guard let ic, setupActivity == nil else { return }
+        setupErrors[check] = nil
+        setupCancelled = false
+        setupActivity = SetupActivity(checkID: check, message: message)
+        do {
+            let stream = try ic.stream(args) { [weak self] event in self?.handle(event) }
+            setupStream = stream
+            Task {
+                do {
+                    try await stream.wait()
+                } catch where !setupCancelled {
+                    setupErrors[check] = error.localizedDescription
+                } catch {}
+                setupStream = nil
+                setupActivity = nil
+                await refresh()
+            }
+        } catch {
+            setupErrors[check] = error.localizedDescription
+            setupActivity = nil
+        }
+    }
+
+    private func handle(_ event: SetupEvent) {
+        switch event {
+        case .stage(let message):
+            setupActivity?.message = message
+            setupActivity?.progress = nil
+        case .progress(let done, let total):
+            setupActivity?.progress = total > 0 ? Double(done) / Double(total) : nil
+            setupActivity?.detail = total > 10_000_000
+                ? "\(ByteCountFormatter.string(fromByteCount: done, countStyle: .file)) of \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))"
+                : nil
+        case .openURL(let url):
+            setupActivity?.signInURL = url
+        case .needCode:
+            setupActivity?.needsCode = true
+            setupActivity?.message = "Paste the code the page shows."
+        case .error(let message):
+            if let check = setupActivity?.checkID { setupErrors[check] = message }
+        case .log, .done:
+            break
         }
     }
 
@@ -255,4 +356,20 @@ final class AppModel {
             phase = .idle
         }
     }
+}
+
+/// A setup step in progress.
+struct SetupActivity: Equatable {
+    let checkID: String
+    var message: String
+    var progress: Double?
+    var detail: String?
+    var signInURL: URL?
+    var needsCode = false
+}
+
+enum SelfTestState: Equatable {
+    case notRun
+    case running
+    case finished(AudioSelfTest.Result)
 }

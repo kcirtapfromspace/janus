@@ -8,13 +8,18 @@ Interview Coach records your job interviews from any app, transcribes them on yo
 
 Needs an Apple silicon Mac with macOS 14.4 or later.
 
-1. Install **Docker Desktop** (docker.com) and open it once.
-2. In Terminal: `brew install ffmpeg anthropics/tap/ant`
-3. Download the latest `InterviewCoach-…-macos-arm64.zip` from [Releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest) and unzip it.
-4. **Move Interview Coach.app to Applications before opening it.** Opened from Downloads, macOS runs it from a temporary read-only copy, which can't update itself.
-5. Open it. A waveform icon appears in the menu bar. Click it, then **Sign in to Claude…** and approve access in your browser.
-6. Optional, for the `ic` command line:
-   `ln -s "/Applications/Interview Coach.app/Contents/MacOS/ic" /opt/homebrew/bin/ic`
+1. Download the latest `InterviewCoach-…-macos-arm64.zip` from [Releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest) and unzip it.
+2. **Move Interview Coach.app to Applications before opening it.** Opened from Downloads, macOS runs it from a temporary read-only copy, which can't update itself.
+3. Open it. The **Setup** window lists what's left, each with one button:
+   - **Docker Desktop**, the one thing you install yourself (it runs the local AI proxy). The app starts it when it's needed.
+   - **The AI proxy**: downloaded and started for you.
+   - **Sign in to Claude**: approve access in your browser. No API key.
+   - **Speech models**: about 1.7 GB, once.
+   - **Test recording**: 5 seconds, to check your mic and the call audio are both captured.
+4. Optional, for the `ic` command line:
+   `ln -s "/Applications/Interview Coach.app/Contents/MacOS/ic" /usr/local/bin/ic`
+
+Nothing comes from Homebrew: ffmpeg (a minimal LGPL build) and Anthropic's `ant` are inside the app.
 
 Installed copies update themselves from this repository's latest release, and only install while nothing is being recorded or analysed.
 

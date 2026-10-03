@@ -15,7 +15,7 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use crate::audio::SR;
 use crate::config::Settings;
-use crate::download;
+use crate::download::{self, Asset};
 use crate::models::{Segment, Word};
 use crate::progress::Progress;
 
@@ -26,12 +26,57 @@ const VAD_MODEL: &str = "ggml-silero-v6.2.0.bin";
 const MAX_CHUNK_S: f32 = 28.0;
 const MAX_GAP_S: f32 = 2.0;
 
+/// Downloads come from fixed revisions, checked against their published SHA-256.
+const WHISPER_REVISION: &str = "5359861c739e955e79d9a303bcbc70fb988958b1";
+const VAD_REVISION: &str = "9ffd54a1e1ee413ddf265af9913beaf518d1639b";
+const PINNED_WHISPER: &[(&str, &str, u64)] = &[
+    ("large-v3-turbo", "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69", 1_624_555_275),
+    ("large-v3-turbo-q5_0", "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", 574_041_195),
+];
+
 pub fn model_path(settings: &Settings) -> PathBuf {
     settings.models_dir.join(format!("ggml-{}.bin", settings.whisper_model))
 }
 
+/// The configured Whisper model. Models outside the pinned list download unverified.
+pub fn whisper_asset(model: &str) -> Asset {
+    match PINNED_WHISPER.iter().find(|(name, ..)| *name == model) {
+        Some((_, sha, size)) => Asset::pinned(
+            format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/{WHISPER_REVISION}/ggml-{model}.bin"), sha, *size),
+        None => Asset::unpinned(format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{model}.bin")),
+    }
+}
+
+fn vad_asset() -> Asset {
+    Asset::pinned(format!("https://huggingface.co/ggml-org/whisper-vad/resolve/{VAD_REVISION}/{VAD_MODEL}"),
+                  "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987", 885_098)
+}
+
 pub fn is_downloaded(settings: &Settings) -> bool {
-    model_path(settings).exists() && settings.models_dir.join(VAD_MODEL).exists()
+    whisper_asset(&settings.whisper_model).is_present(&model_path(settings))
+        && vad_asset().is_present(&settings.models_dir.join(VAD_MODEL))
+}
+
+/// Bytes still to download for transcription (0 when everything's there; unknown sizes count as 0).
+pub fn download_size(settings: &Settings) -> u64 {
+    let whisper = whisper_asset(&settings.whisper_model);
+    let mut total = 0;
+    if !whisper.is_present(&model_path(settings)) {
+        total += whisper.size.unwrap_or(0);
+    }
+    if !vad_asset().is_present(&settings.models_dir.join(VAD_MODEL)) {
+        total += vad_asset().size.unwrap_or(0);
+    }
+    total
+}
+
+/// Fetch the Whisper and voice-activity models (setup does this up front; `load` falls back to it).
+pub fn download(settings: &Settings, progress: &mut dyn Progress) -> Result<(PathBuf, PathBuf)> {
+    let model = download::ensure_file(&whisper_asset(&settings.whisper_model), &model_path(settings),
+                                      &format!("speech model (Whisper {})", settings.whisper_model), progress)?;
+    let vad = download::ensure_file(&vad_asset(), &settings.models_dir.join(VAD_MODEL), "voice-activity model",
+                                    progress)?;
+    Ok((model, vad))
 }
 
 pub struct Transcriber {
@@ -46,18 +91,7 @@ impl Transcriber {
         if std::env::var_os("IC_DEBUG").is_none() {
             whisper_rs::install_logging_hooks(); // whisper.cpp logs to stderr otherwise
         }
-        let model = download::ensure_file(
-            &format!("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{}.bin", settings.whisper_model),
-            &model_path(settings),
-            &format!("Whisper {}", settings.whisper_model),
-            progress,
-        )?;
-        let vad_model = download::ensure_file(
-            &format!("https://huggingface.co/ggml-org/whisper-vad/resolve/main/{VAD_MODEL}"),
-            &settings.models_dir.join(VAD_MODEL),
-            "voice-activity model",
-            progress,
-        )?;
+        let (model, vad_model) = download(settings, progress)?;
         progress.stage("Loading Whisper");
         let ctx = WhisperContext::new_with_params(&model, WhisperContextParameters::default())
             .with_context(|| format!("loading {}", model.display()))?;

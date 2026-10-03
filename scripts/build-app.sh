@@ -1,8 +1,9 @@
 #!/bin/bash
 # Builds Interview Coach.app for Apple silicon: the SwiftUI app, the bundled `ic` CLI
-# (Contents/MacOS/ic), ICRecorder.app for `ic record` (Contents/Helpers), and Sparkle for in-place
-# updates (Contents/Frameworks). Signs it inside out with the hardened runtime. Adapted from
-# MacLink's build-app.sh.
+# (Contents/MacOS/ic) with the tools it runs (a minimal LGPL ffmpeg and Anthropic's `ant`, next to
+# it, so users install nothing from Homebrew), ICRecorder.app for `ic record` (Contents/Helpers),
+# and Sparkle for in-place updates (Contents/Frameworks). Signs it inside out with the hardened
+# runtime. Adapted from MacLink's build-app.sh.
 #
 #   IC_RELEASE_VERSION    1.2.3 or 1.2.3-preview.N (default: the version in Cargo.toml)
 #   IC_CODESIGN_IDENTITY  signing identity (default: this Mac's first "Apple Development" identity,
@@ -57,6 +58,8 @@ fi
 
 MACOSX_DEPLOYMENT_TARGET=14.4 cargo build --locked --release
 sparkle_dir="$("$project_root/scripts/fetch-sparkle.sh")"
+ffmpeg_dir="$("$project_root/scripts/fetch-ffmpeg.sh")"
+ant_dir="$("$project_root/scripts/fetch-ant.sh")"
 (cd mac && swift build -c release)
 bin="$(cd mac && swift build -c release --show-bin-path)"
 
@@ -69,6 +72,11 @@ sparkle="$bundle/Contents/Frameworks/Sparkle.framework"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks" "$recorder/Contents/MacOS"
 cp "$bin/InterviewCoach" "$bundle/Contents/MacOS/InterviewCoach"
 cp target/release/ic "$bundle/Contents/MacOS/ic"
+cp "$ffmpeg_dir/bin/ffmpeg" "$bundle/Contents/MacOS/ffmpeg"
+cp "$ant_dir/ant" "$bundle/Contents/MacOS/ant"
+cp "$ffmpeg_dir/LICENSE.txt" "$bundle/Contents/Resources/ffmpeg-LICENSE.txt"
+cp "$ffmpeg_dir/BUILD.txt" "$bundle/Contents/Resources/ffmpeg-BUILD.txt"
+cp "$ant_dir/LICENSE.txt" "$bundle/Contents/Resources/ant-LICENSE.txt"
 cp "$bin/ICRecorder" "$recorder/Contents/MacOS/ICRecorder"
 cp mac/Resources/InterviewCoach-Info.plist "$bundle/Contents/Info.plist"
 cp mac/Resources/ICRecorder-Info.plist "$recorder/Contents/Info.plist"
@@ -104,10 +112,14 @@ codesign "${sign_options[@]}" "$sparkle/Versions/B/Updater.app"
 codesign "${sign_options[@]}" "$sparkle"
 codesign "${sign_options[@]}" --entitlements "$entitlements" "$recorder"
 codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ic"
+# The bundled tools are signed as ours too (their pinned checksums prove where they came from).
+codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ffmpeg"
+codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ant"
 codesign "${sign_options[@]}" --entitlements "$entitlements" "$bundle"
 codesign --verify --deep --strict "$bundle"
 
 for executable in "$bundle/Contents/MacOS/InterviewCoach" "$bundle/Contents/MacOS/ic" \
+    "$bundle/Contents/MacOS/ffmpeg" "$bundle/Contents/MacOS/ant" \
     "$recorder/Contents/MacOS/ICRecorder" "$sparkle/Versions/B/Sparkle" "$sparkle/Versions/B/Autoupdate" \
     "$sparkle/Versions/B/Updater.app/Contents/MacOS/Updater"; do
     if [[ "$(lipo -archs "$executable")" != arm64 ]]; then

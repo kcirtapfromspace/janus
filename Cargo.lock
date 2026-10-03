@@ -1108,6 +1108,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "sherpa-rs",
  "tempfile",
  "thiserror 2.0.21",

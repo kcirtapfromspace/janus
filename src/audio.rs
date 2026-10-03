@@ -3,17 +3,18 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
-use crate::config::which;
+use crate::tools::Tool;
 
 pub const SR: u32 = 16_000;
 
 /// A track this quiet is digital silence — almost always a capture/permission failure, not a quiet room.
 pub const SILENCE_DBFS: f64 = -70.0;
 
+/// The ffmpeg bundled with the app (a minimal audio-only build, see scripts/fetch-ffmpeg.sh).
 fn ffmpeg() -> Result<std::path::PathBuf> {
-    which("ffmpeg").context("ffmpeg not found. Install it with: brew install ffmpeg")
+    Tool::Ffmpeg.require()
 }
 
 /// Decode any audio/video file to 16 kHz mono FLAC (small on disk, lossless for Whisper).

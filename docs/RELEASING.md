@@ -48,3 +48,14 @@ Installed copies pick the update up within about four hours, or straight away wi
 `VERSION` is `1.2.3` or `1.2.3-preview.N`. `scripts/build-app.sh` derives the numeric `CFBundleVersion` that Sparkle compares as `(major·10000 + minor·100 + patch)·1000 + N`, using 999 for a final release. So every preview sorts before its release, and every release sorts before the next version's previews. The full version string is stored as `ICReleaseVersion`.
 
 Development builds (`mac/build.sh`) are signed with Apple Development and have no feed, so they never replace themselves. Switching between a development build and a release build changes the code signature, so macOS asks again once for Microphone and System Audio Recording.
+
+## Bundled tools
+
+The app carries its own ffmpeg and `ant` next to `ic` in `Contents/MacOS`, so users install nothing from Homebrew. `scripts/build-app.sh` gets both through pinned, checksum-verified scripts and caches them in `mac/vendor/`:
+
+- **`scripts/fetch-ffmpeg.sh`** builds a minimal, audio-only, LGPL ffmpeg from the release tarball. The tarball's signature was checked once against FFmpeg's release key; its SHA-256 is pinned. The first build takes about a minute.
+  - It covers every format `ic` reads, including WebM/Opus and video files, whose audio track it extracts.
+  - Its license and configure options ship as `Resources/ffmpeg-LICENSE.txt` and `ffmpeg-BUILD.txt`.
+- **`scripts/fetch-ant.sh`** fetches Anthropic's MIT-licensed CLI release, with the zip and its license pinned. Its license ships as `Resources/ant-LICENSE.txt`.
+
+Both are re-signed with the app's identity. To upgrade either one, change its version and checksum in the script. Then run `scripts/ci-local.sh`, which runs the end-to-end tests with the bundled ffmpeg.

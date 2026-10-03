@@ -10,9 +10,15 @@ struct InterviewCoachApp: App {
             MenuBarView()
                 .environment(model)
         } label: {
-            Image(systemName: model.captureProblem == nil ? model.phase.menuBarSymbol : "exclamationmark.triangle.fill")
+            MenuBarLabel().environment(model)
         }
         .menuBarExtraStyle(.window)
+
+        Window("Set Up Interview Coach", id: "setup") {
+            SetupView()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
 
         Window("Interview Coach", id: "main") {
             MainWindow()
@@ -20,6 +26,25 @@ struct InterviewCoachApp: App {
                 .frame(minWidth: 820, minHeight: 520)
         }
         .defaultSize(width: 1100, height: 740)
+    }
+}
+
+/// The menu-bar icon. It's the one view that exists from launch, so it also opens Setup the
+/// first time the app starts on a Mac that isn't ready yet.
+struct MenuBarLabel: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Image(systemName: model.captureProblem == nil ? model.phase.menuBarSymbol : "exclamationmark.triangle.fill")
+            .onChange(of: model.setup) { _, setup in
+                guard !model.setupPromptShown, let setup else { return }
+                model.setupPromptShown = true
+                if !setup.ready {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "setup")
+                }
+            }
     }
 }
 
