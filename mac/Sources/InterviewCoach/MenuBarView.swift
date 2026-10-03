@@ -38,19 +38,29 @@ struct MenuBarView: View {
             recent
             Divider()
 
-            HStack {
+            HStack(spacing: 8) {
                 Button("Open Interview Coach") { showMainWindow() }
-                Spacer()
-                Button("Setup…") { showSetup() }
-                if model.updater.isAvailable {
-                    Button("Check for Updates…") { model.updater.checkForUpdates() }
-                        .disabled(model.phase.isRecording)
-                }
+                    .fixedSize()
                 Button("Import…") { model.importRecording() }
+                    .fixedSize()
                     .disabled(model.phase.isBusy)
-                Button("Quit") { NSApp.terminate(nil) }
-                    .disabled(model.phase.isRecording)
-                    .help(model.phase.isRecording ? "Stop the recording first" : "")
+                Spacer(minLength: 0)
+                Menu {
+                    Button("Setup…") { showSetup() }
+                    if model.updater.isAvailable {
+                        Button("Check for Updates…") { model.updater.checkForUpdates() }
+                            .disabled(model.phase.isRecording)
+                    }
+                    Divider()
+                    Button("Quit Interview Coach") { NSApp.terminate(nil) }
+                        .disabled(model.phase.isRecording)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(model.phase.isRecording ? "Stop the recording before quitting" : "Setup, updates, and quit")
             }
             .controlSize(.small)
         }

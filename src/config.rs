@@ -164,8 +164,10 @@ impl<'de> Deserialize<'de> for ScorerRef {
     }
 }
 
+/// Off until the Jev vs Claude comparison (docs/eval/scorer-decision.md) picks a scorer, so reports
+/// never show answer checks from an unvalidated scorer.
 pub fn default_scorer() -> ScorerRef {
-    ScorerRef::Jev("jev-latest".into())
+    ScorerRef::Off
 }
 
 pub fn default_model() -> ModelRef {

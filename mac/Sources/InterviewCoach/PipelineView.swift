@@ -65,12 +65,13 @@ struct StageCard: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 StatusIcon(status: stage.status)
-                Text(stage.label).font(.callout.weight(.semibold)).lineLimit(1)
+                Text(stage.step.shortTitle).font(.callout.weight(.semibold)).lineLimit(1).fixedSize()
             }
             Text(statusLine)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2, reservesSpace: true)
+                .help(statusLine)
             if stage.status == .running {
                 if let progress = stage.progress {
                     ProgressView(value: progress, total: 100).controlSize(.small)
@@ -86,6 +87,7 @@ struct StageCard: View {
         .overlay(RoundedRectangle(cornerRadius: 10)
             .strokeBorder(isSelected ? Color.accentColor : Color.secondary.opacity(0.25)))
         .contentShape(RoundedRectangle(cornerRadius: 10))
+        .help(stage.label)
     }
 
     private var statusLine: String {
@@ -95,7 +97,7 @@ struct StageCard: View {
         case .outOfDate: return "Out of date · " + (stage.summary ?? "")
         case .notRun: return "Not run yet"
         case .done:
-            return [stage.summary, relativeTime(stage.lastRunAt)].compactMap { $0 }.joined(separator: " · ")
+            return stage.summary ?? "Done"
         }
     }
 }

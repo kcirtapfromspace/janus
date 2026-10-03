@@ -80,6 +80,16 @@ public struct SessionDetail: Decodable, Equatable {
 public enum StageStep: String, Decodable, CaseIterable, Identifiable {
     case recording, transcript, report, next
     public var id: String { rawValue }
+
+    /// The stage's name where space is tight (the flow strip); the full name heads its pane.
+    public var shortTitle: String {
+        switch self {
+        case .recording: "Recording"
+        case .transcript: "Transcript"
+        case .report: "Report"
+        case .next: "Next steps"
+        }
+    }
 }
 
 public enum StageStatus: String, Decodable {

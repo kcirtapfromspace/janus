@@ -12,16 +12,21 @@ struct StageHeader<Actions: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.title3.weight(.semibold))
-                    if !meta.isEmpty {
-                        Text(meta).font(.caption).foregroundStyle(.secondary)
-                    }
+            // Actions sit beside the title when they fit, and move under it when they don't;
+            // a button's text is never cut off.
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 12) {
+                    titleBlock
+                    Spacer(minLength: 12)
+                    actionRow
                 }
-                Spacer()
-                actions
+                VStack(alignment: .leading, spacing: 10) {
+                    titleBlock
+                    actionRow
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             if let stage, stage.status == .failed, let error = stage.error {
                 Label(error, systemImage: "xmark.octagon.fill")
                     .font(.callout)
@@ -39,6 +44,19 @@ struct StageHeader<Actions: View>: View {
             }
         }
         .padding(16)
+    }
+
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.title3.weight(.semibold)).fixedSize()
+            if !meta.isEmpty {
+                Text(meta).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 8) { actions }.fixedSize()
     }
 
     private var meta: String {
@@ -231,13 +249,14 @@ struct ReportStageView: View {
         VStack(spacing: 0) {
             StageHeader(stage: stage, title: "After-action report") {
                 if detail.reports.count > 1 {
-                    Picker("Run", selection: Binding(get: { shown?.analysisId }, set: { chosen = $0 })) {
+                    Menu("Runs (\(detail.reports.count))") {
                         ForEach(detail.reports) { r in
-                            Text("\(relativeTime(r.createdAt) ?? r.createdAt) · \(r.model) · \(r.verdictLabel)\(r.isCurrent ? " (current)" : "")")
-                                .tag(Optional(r.analysisId))
+                            Toggle(isOn: Binding(get: { shown?.analysisId == r.analysisId }, set: { _ in chosen = r.analysisId })) {
+                                Text("\(relativeTime(r.createdAt) ?? r.createdAt) · \(r.model) · \(r.verdictLabel)\(r.isCurrent ? " (current)" : "")")
+                            }
                         }
                     }
-                    .frame(maxWidth: 380)
+                    .help("Every report run is kept; pick one to show")
                 }
                 RerunMenu(step: .report, stage: stage, defaultModel: model.setup?.model)
                 Menu("Outcome") {

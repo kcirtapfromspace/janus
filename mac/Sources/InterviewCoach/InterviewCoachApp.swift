@@ -3,7 +3,13 @@ import SwiftUI
 /// Interview Coach: record from the menu bar during any call, review reports in the window.
 @main
 struct InterviewCoachApp: App {
-    @State private var model = AppModel()
+    @State private var model: AppModel
+
+    init() {
+        let model = AppModel()
+        _model = State(initialValue: model)
+        Snapshots.runIfRequested(model: model)  // developer tool; does nothing unless IC_SNAPSHOTS is set
+    }
 
     var body: some Scene {
         MenuBarExtra {

@@ -2,7 +2,9 @@ import InterviewCoachKit
 import SwiftUI
 import WebKit
 
-/// Session list on the left, the selected interview's report on the right, controls in the toolbar.
+/// Session list on the left, the selected interview's stages on the right. The toolbar holds a
+/// fixed set of controls that always fit; anything with a message (progress, errors, setup, a live
+/// recording problem) goes in a banner under it, where there's room for the whole sentence.
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -14,7 +16,7 @@ struct MainWindow: View {
             List(model.sessions, selection: $model.selection) { session in
                 SessionRow(session: session).tag(session.id)
             }
-            .navigationSplitViewColumnWidth(min: 240, ideal: 290)
+            .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
             .overlay {
                 if model.sessions.isEmpty {
                     ContentUnavailableView("No interviews yet", systemImage: "waveform",
@@ -22,13 +24,16 @@ struct MainWindow: View {
                 }
             }
         } detail: {
-            if let detail = model.detail, detail.session.id == model.selection {
-                PipelineView(detail: detail)
-            } else if model.selection != nil {
-                ProgressView()
-            } else {
-                ContentUnavailableView("Select an interview", systemImage: "doc.text.magnifyingglass")
+            Group {
+                if let detail = model.detail, detail.session.id == model.selection {
+                    PipelineView(detail: detail)
+                } else if model.selection != nil {
+                    ProgressView()
+                } else {
+                    ContentUnavailableView("Select an interview", systemImage: "doc.text.magnifyingglass")
+                }
             }
+            .safeAreaInset(edge: .top, spacing: 0) { StatusBanner() }
         }
         .task(id: model.selection) { await model.loadDetail() }
         .toolbar { toolbar }
@@ -45,9 +50,6 @@ struct MainWindow: View {
         ToolbarItem(placement: .navigation) {
             recordControl
         }
-        ToolbarItem(placement: .status) {
-            statusLine
-        }
         ToolbarItemGroup(placement: .primaryAction) {
             let selected = model.selectedSession
             let busy = model.phase.isBusy
@@ -62,7 +64,10 @@ struct MainWindow: View {
             .help("Record how the interview actually turned out")
             .disabled(selected == nil || busy)
             Button("Show in Finder", systemImage: "folder") { if let s = selected { model.revealInFinder(s) } }
+                .help("Show this interview's folder in Finder")
                 .disabled(selected == nil)
+            Button("Setup", systemImage: "gearshape") { openWindow(id: "setup") }
+                .help("Set up Interview Coach: Docker, the AI proxy, sign-in, models, keys, recording test")
         }
     }
 
@@ -75,6 +80,7 @@ struct MainWindow: View {
                     ElapsedTime(since: since)
                 }
             }
+            .fixedSize()
             .help("Stop recording")
         default:
             Button { askingConsent = true } label: {
@@ -82,36 +88,57 @@ struct MainWindow: View {
                     .foregroundStyle(.red)
             }
             .labelStyle(.titleAndIcon)
+            .fixedSize()
             .help("Record an interview from any app (your mic + the call's audio)")
             .disabled(model.phase.isBusy)
         }
     }
+}
 
-    @ViewBuilder private var statusLine: some View {
+/// One line under the toolbar for whatever needs saying right now, most urgent first: a live
+/// recording problem, an error, what's running, or setup still to finish.
+struct StatusBanner: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
         if let problem = model.captureProblem {
-            Label(problem, systemImage: "exclamationmark.triangle.fill")
-                .font(.callout)
-                .foregroundStyle(.orange)
-                .lineLimit(1)
-                .help(problem)
-        } else if case .working(let label) = model.phase {
-            HStack(spacing: 6) {
-                ProgressView().controlSize(.small)
-                Text(label).font(.callout)
-            }
+            row(problem, systemImage: "exclamationmark.triangle.fill", tint: .orange)
         } else if let error = model.lastError {
-            Label(error, systemImage: "xmark.octagon.fill")
-                .font(.callout)
-                .foregroundStyle(.red)
-                .lineLimit(1)
-                .help(error)
-        } else if let setup = model.setup, !setup.ready {
-            Button { openWindow(id: "setup") } label: {
-                Label(setup.remaining == 1 ? "Finish setup (1 thing left)" : "Finish setup (\(setup.remaining) things left)",
-                      systemImage: "wrench.and.screwdriver")
+            row(error, systemImage: "xmark.octagon.fill", tint: .red) {
+                Button("Dismiss") { model.lastError = nil }
             }
-            .tint(.orange)
+        } else if case .working(let label) = model.phase {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(label).font(.callout).lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(.bar)
+            .overlay(alignment: .bottom) { Divider() }
+        } else if let setup = model.setup, !setup.ready {
+            row(setup.remaining == 1 ? "Setup has 1 thing left before interviews can be analysed."
+                    : "Setup has \(setup.remaining) things left before interviews can be analysed.",
+                systemImage: "wrench.and.screwdriver", tint: .orange) {
+                Button("Open Setup") { openWindow(id: "setup") }
+            }
         }
+    }
+
+    private func row(_ text: String, systemImage: String, tint: Color, @ViewBuilder action: () -> some View = { EmptyView() })
+        -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: systemImage).foregroundStyle(tint)
+            Text(text).font(.callout).lineLimit(3).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            action().controlSize(.small).fixedSize()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(tint.opacity(0.10))
+        .overlay(alignment: .bottom) { Divider() }
     }
 }
 
