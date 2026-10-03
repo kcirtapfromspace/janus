@@ -13,6 +13,7 @@ use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use interview_coach::auth;
+use interview_coach::{errln, out, outln};
 use interview_coach::capture;
 use interview_coach::config::{FileConfig, ModelRef, Provider, ScorerRef, Settings};
 use interview_coach::db::Db;
@@ -360,7 +361,7 @@ impl Progress for Ui {
 }
 
 fn warn(msg: &str) {
-    eprintln!("{} {msg}", style("Warning:").red().bold());
+    errln!("{} {msg}", style("Warning:").red().bold());
 }
 
 fn open_db(settings: &Settings) -> Result<Db> {
@@ -375,7 +376,7 @@ fn run_transcription(db: &mut Db, settings: &Settings, id: i64) -> Result<()> {
     for w in &result.warnings {
         warn(w);
     }
-    println!("{} {} turns. View it with {}", style(format!("Transcribed session {id}:")).green(),
+    outln!("{} {} turns. View it with {}", style(format!("Transcribed session {id}:")).green(),
              to_turns(&result.segments).len(), style(format!("ic transcript {id}")).bold());
     Ok(())
 }
@@ -470,9 +471,9 @@ fn after_transcription(db: &mut Db, settings: &Settings, id: i64, analyze: bool)
         None => {
             run_analysis(db, settings, &settings.model, id, false, false)?;
             run_next(db, settings, &settings.model, id, false)?;
-            println!("{}", style(format!("What to do next: ic next {id} · All stages: ic steps {id}")).dim());
+            outln!("{}", style(format!("What to do next: ic next {id} · All stages: ic steps {id}")).dim());
         }
-        Some(reason) => println!("{}", style(format!("Skipping analysis: {reason}, then: ic run report {id} --then-later")).dim()),
+        Some(reason) => outln!("{}", style(format!("Skipping analysis: {reason}, then: ic run report {id} --then-later")).dim()),
     }
     Ok(())
 }
@@ -489,7 +490,7 @@ fn run_step(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_mode
             }
         }
     }
-    println!();
+    outln!();
     print_steps(db, id)
 }
 
@@ -501,7 +502,7 @@ fn run_one(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model
             let result = pipeline::reprocess_audio(db, id, &mut ui);
             ui.finish();
             result?;
-            println!("{} Re-processed the audio for session {id}.", style("✓").green());
+            outln!("{} Re-processed the audio for session {id}.", style("✓").green());
         }
         Step::Transcript => {
             if let Some(n) = speakers {
@@ -529,7 +530,7 @@ fn run_one(db: &mut Db, settings: &Settings, step: Step, id: i64, explicit_model
 
 fn print_steps(db: &Db, id: i64) -> Result<()> {
     let view = session_view::build(db, id)?;
-    println!("{}", style(format!("━━ {} ━━", view.session.title)).bold());
+    outln!("{}", style(format!("━━ {} ━━", view.session.title)).bold());
     for stage in &view.stages {
         let (mark, status) = match stage.status {
             StageStatus::Done => (style("✓").green(), style("done".to_string()).green()),
@@ -546,22 +547,22 @@ fn print_steps(db: &Db, id: i64) -> Result<()> {
             StageStatus::NotRun => (style("○").dim(), style("not run".to_string()).dim()),
         };
         let when = stage.last_run_at.as_deref().map(|t| t.chars().take(16).collect::<String>().replace('T', " "));
-        println!(" {mark} {:<20} {:<12} {}  {}", stage.label, status.to_string(), stage.summary.as_deref().unwrap_or(""),
+        outln!(" {mark} {:<20} {:<12} {}  {}", stage.label, status.to_string(), stage.summary.as_deref().unwrap_or(""),
                  style(when.unwrap_or_default()).dim());
         if let Some(error) = &stage.error {
-            println!("     {}", style(error).red());
+            outln!("     {}", style(error).red());
         }
     }
     if let Some(first) = view.stages.iter().find(|s| s.status == StageStatus::OutOfDate) {
         let upstream = first.step.upstream().map(|u| u.as_str()).unwrap_or("recording");
-        println!("{}", style(format!("Update later stages: ic run {} {id} --then-later   (or just: ic run {} {id} --then-later)",
+        outln!("{}", style(format!("Update later stages: ic run {} {id} --then-later   (or just: ic run {} {id} --then-later)",
                                      first.step, upstream)).dim());
     }
     Ok(())
 }
 
 fn confirm(question: &str) -> Result<bool> {
-    print!("{question} [y/N] ");
+    out!("{question} [y/N] ");
     std::io::stdout().flush()?;
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
@@ -638,7 +639,7 @@ fn finish_recording(db: &mut Db, settings: &Settings, id: i64, analyze: bool, st
     let processed = pipeline::process_recording(db, id, &mic, &system, &mut ui);
     ui.finish();
     session = processed.with_context(|| format!("Couldn't process the recording; the raw audio is still in {}", dir.display()))?;
-    println!("Saved session {} ({}) → {}", style(id).bold(), fmt_ts(session.duration_s.unwrap_or(0.0)), dir.display());
+    outln!("Saved session {} ({}) → {}", style(id).bold(), fmt_ts(session.duration_s.unwrap_or(0.0)), dir.display());
     after_transcription(db, settings, id, analyze)
 }
 
@@ -691,7 +692,7 @@ fn list_json(db: &Db) -> Result<()> {
             error: s.error,
         })
         .collect();
-    println!("{}", serde_json::to_string(&rows)?);
+    outln!("{}", serde_json::to_string(&rows)?);
     Ok(())
 }
 
@@ -702,7 +703,7 @@ fn list(settings: &Settings, json: bool) -> Result<()> {
     }
     let sessions = db.list_sessions()?;
     if sessions.is_empty() {
-        println!("No sessions yet. Try: ic record   or   ic import path/to/interview.m4a");
+        outln!("No sessions yet. Try: ic record   or   ic import path/to/interview.m4a");
         return Ok(());
     }
     let (verdicts, outcomes) = (db.latest_verdicts()?, db.all_outcomes()?);
@@ -730,10 +731,10 @@ fn list(settings: &Settings, json: bool) -> Result<()> {
             .collect::<Vec<_>>()
             .join("  ")
     };
-    println!("{}", style(line(header.iter().map(|h| h.to_string()).collect())).bold());
+    outln!("{}", style(line(header.iter().map(|h| h.to_string()).collect())).bold());
     for (row, s) in rows.iter().zip(&sessions) {
         let text = line(row.to_vec());
-        println!("{}", if s.status == Status::Failed { style(text).red().to_string() } else { text });
+        outln!("{}", if s.status == Status::Failed { style(text).red().to_string() } else { text });
     }
     Ok(())
 }
@@ -748,14 +749,14 @@ fn transcript(settings: &Settings, id: i64, json: bool) -> Result<()> {
     }
     if json {
         let plain: Vec<_> = segments.into_iter().map(|s| interview_coach::models::Segment { words: vec![], ..s }).collect();
-        println!("{}", serde_json::to_string_pretty(&plain)?);
+        outln!("{}", serde_json::to_string_pretty(&plain)?);
         return Ok(());
     }
-    println!("{}\n", style(format!("━━ {} · {} ━━", session.title, fmt_ts(session.duration_s.unwrap_or(0.0)))).bold());
+    outln!("{}\n", style(format!("━━ {} · {} ━━", session.title, fmt_ts(session.duration_s.unwrap_or(0.0)))).bold());
     for t in to_turns(&segments) {
         let name = speaker_label(&t.speaker);
         let name = if t.speaker == YOU { style(format!("{name}:")).cyan().bold() } else { style(format!("{name}:")).magenta().bold() };
-        println!("{} {name} {}\n", style(fmt_ts(t.start)).dim(), t.text);
+        outln!("{} {name} {}\n", style(fmt_ts(t.start)).dim(), t.text);
     }
     Ok(())
 }
@@ -763,8 +764,8 @@ fn transcript(settings: &Settings, id: i64, json: bool) -> Result<()> {
 fn swap(settings: &Settings, id: i64) -> Result<()> {
     let mut db = open_db(settings)?;
     pipeline::swap_speakers(&mut db, id, &mut interview_coach::progress::Quiet)?;
-    println!("Swapped speakers for session {id}. The report and next steps are now out of date:");
-    println!("  ic run report {id} --then-later");
+    outln!("Swapped speakers for session {id}. The report and next steps are now out of date:");
+    outln!("  ic run report {id} --then-later");
     Ok(())
 }
 
@@ -793,10 +794,10 @@ fn outcome(settings: &Settings, id: i64, result: OutcomeResult, notes: Option<St
     match db.latest_analysis(id)? {
         Some(stored) => {
             report::write_html(&session, &stored, Some(&outcome))?;
-            println!("Recorded {} for session {id} (the analysis predicted: {}).", style(outcome.result.label()).bold(),
+            outln!("Recorded {} for session {id} (the analysis predicted: {}).", style(outcome.result.label()).bold(),
                      stored.analysis.outlook.verdict.label());
         }
-        None => println!("Recorded {} for session {id}.", style(outcome.result.label()).bold()),
+        None => outln!("Recorded {} for session {id}.", style(outcome.result.label()).bold()),
     }
     Ok(())
 }
@@ -807,15 +808,15 @@ fn read_key(target: KeyTarget, from_stdin: bool) -> Result<String> {
         std::io::stdin().read_line(&mut line)?;
         line
     } else if let Ok(key) = std::env::var(target.env_var()) {
-        println!("Using the {} key from ${}.", target.label(), target.env_var());
+        outln!("Using the {} key from ${}.", target.label(), target.env_var());
         key
     } else {
-        println!("Opening {} — create a {} API key there (or copy an existing one).", target.keys_url(), target.label());
+        outln!("Opening {} — create a {} API key there (or copy an existing one).", target.keys_url(), target.label());
         let _ = Command::new("/usr/bin/open").arg(target.keys_url()).status();
         let prompt = format!("Paste your {} API key (input hidden): ", target.label());
         rpassword::prompt_password(&prompt).or_else(|_| {
             // No terminal to hide input on (e.g. piped): read a plain line instead.
-            print!("{prompt}");
+            out!("{prompt}");
             std::io::stdout().flush()?;
             let mut line = String::new();
             std::io::stdin().read_line(&mut line)?;
@@ -832,8 +833,8 @@ fn proxy_setup(settings: &Settings) -> Result<()> {
     let result = proxy::setup(settings, &mut ui);
     ui.finish();
     result?;
-    println!("{} AI proxy running at {}.", style("✓").green(), proxy::base_url(settings));
-    println!("{}", style(format!("Config: {} · Spend: ic proxy status", proxy::dir(settings).display())).dim());
+    outln!("{} AI proxy running at {}.", style("✓").green(), proxy::base_url(settings));
+    outln!("{}", style(format!("Config: {} · Spend: ic proxy status", proxy::dir(settings).display())).dim());
     Ok(())
 }
 
@@ -850,9 +851,9 @@ fn proxy_key(settings: &Settings, target: KeyTarget, from_stdin: bool) -> Result
     proxy::restart_with_new_env(settings)?;
     proxy::wait_ready(&proxy::base_url(settings), Duration::from_secs(300))?;
     proxy::ensure_key(settings)?;
-    println!("{} The AI proxy now holds your {} key.", style("✓").green(), target.label());
+    outln!("{} The AI proxy now holds your {} key.", style("✓").green(), target.label());
     if target == KeyTarget::OpenAi {
-        println!("Use it with --model openai/<model>, or make it the default: ic config set model openai/<model>");
+        outln!("Use it with --model openai/<model>, or make it the default: ic config set model openai/<model>");
     }
     Ok(())
 }
@@ -877,11 +878,11 @@ fn login(events: bool) -> Result<()> {
             }
         };
     }
-    println!("{} — a browser window will open. Approve access there, then come back here.", style("Claude sign-in").bold());
-    println!("{}", style("If the page shows a code instead of closing, paste it at the Code: prompt below.").dim());
+    outln!("{} — a browser window will open. Approve access there, then come back here.", style("Claude sign-in").bold());
+    outln!("{}", style("If the page shows a code instead of closing, paste it at the Code: prompt below.").dim());
     auth::login(None)?;
     auth::access_token()?; // prove the session works before saying so
-    println!("{} Signed in to Claude — no API key stored. ic gets short-lived tokens from this session as needed.",
+    outln!("{} Signed in to Claude — no API key stored. ic gets short-lived tokens from this session as needed.",
              style("✓").green());
     Ok(())
 }
@@ -900,18 +901,18 @@ fn setup_run(settings: &Settings, step: setup::Step, events: bool) -> Result<()>
     let result = setup::run(step, settings, &mut ui);
     ui.finish();
     result?;
-    println!("{} Done.", style("✓").green());
+    outln!("{} Done.", style("✓").green());
     Ok(())
 }
 
 fn config_show(settings: &Settings) {
-    println!("{}", style(format!("Config file: {}", settings.config_path().display())).dim());
-    println!("model          {}", settings.model);
-    println!("language       {}", settings.language.as_deref().unwrap_or("auto"));
-    println!("whisper_model  {}", settings.whisper_model);
-    println!("scorer         {}", settings.scorer);
-    println!("models_dir     {}", settings.models_dir.display());
-    println!("{}", style("Environment variables IC_MODEL, IC_LANGUAGE, IC_WHISPER_MODEL, IC_MODELS_DIR override the file.").dim());
+    outln!("{}", style(format!("Config file: {}", settings.config_path().display())).dim());
+    outln!("model          {}", settings.model);
+    outln!("language       {}", settings.language.as_deref().unwrap_or("auto"));
+    outln!("whisper_model  {}", settings.whisper_model);
+    outln!("scorer         {}", settings.scorer);
+    outln!("models_dir     {}", settings.models_dir.display());
+    outln!("{}", style("Environment variables IC_MODEL, IC_LANGUAGE, IC_WHISPER_MODEL, IC_MODELS_DIR override the file.").dim());
 }
 
 fn config_set(settings: &Settings, key: ConfigKey, value: &str) -> Result<()> {
@@ -933,7 +934,7 @@ fn config_set(settings: &Settings, key: ConfigKey, value: &str) -> Result<()> {
         }
         return Err(e.context("not saved"));
     }
-    println!("{} Saved to {}", style("✓").green(), path.display());
+    outln!("{} Saved to {}", style("✓").green(), path.display());
     Ok(())
 }
 
@@ -942,12 +943,12 @@ fn proxy_status(settings: &Settings) -> Result<()> {
         bail!("The LLM proxy isn't set up yet. Run: ic proxy setup");
     };
     match proxy::readiness(&endpoint.base_url) {
-        Ok(r) => println!("{} Proxy up at {} (database {})", style("✓").green(), endpoint.base_url,
+        Ok(r) => outln!("{} Proxy up at {} (database {})", style("✓").green(), endpoint.base_url,
                           r["db"].as_str().unwrap_or("unknown")),
         Err(_) => bail!("The proxy at {} isn't responding. Start it with: ic proxy start", endpoint.base_url),
     }
     let info = proxy::key_info(&endpoint)?;
-    println!("{} ic's key: {} · spent so far: ${:.4}", style("✓").green(),
+    outln!("{} ic's key: {} · spent so far: ${:.4}", style("✓").green(),
              info["key_alias"].as_str().unwrap_or("?"), info["spend"].as_f64().unwrap_or(0.0));
     Ok(())
 }
@@ -972,7 +973,7 @@ fn jev_ping(settings: &Settings) -> Result<()> {
         questions: vec![("is_urgent".into(), Question::Noul { instructions: "Does this convey urgency?".into(), yes: None, no: None })],
     };
     let resp = client.ask(&req)?;
-    println!("{} {} answered in {} ms: {:?}", style("✓").green(), resp.model, resp.latency_ms, resp.answers["is_urgent"]);
+    outln!("{} {} answered in {} ms: {:?}", style("✓").green(), resp.model, resp.latency_ms, resp.answers["is_urgent"]);
     Ok(())
 }
 
@@ -991,7 +992,7 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
         bail!("The Claude arms need you signed in to Claude (Setup in the app, or: ic login).");
     }
     let endpoint = ai_endpoint(settings)?;
-    println!("Scoring {} answers × {runs} runs with {} → {}", items.len(),
+    outln!("Scoring {} answers × {runs} runs with {} → {}", items.len(),
              arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "), out.display());
     let results = eval::run(
         &eval::Plan { items: &items, arms: &arms, runs, concurrency, out_dir: out },
@@ -1001,7 +1002,7 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
                 Ok(a) => format!("{} ms", a.latency_ms),
                 Err(e) => format!("failed: {}", e.lines().next().unwrap_or_default()),
             };
-            eprintln!("[{done}/{total}] {:<6} {:<28} run {} {status}", r.arm, r.item, r.run);
+            errln!("[{done}/{total}] {:<6} {:<28} run {} {status}", r.arm, r.item, r.run);
         },
     )?;
     let stats = eval::summarize(&results, &items, &arms);
@@ -1014,13 +1015,13 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
     let md = eval::markdown(&stats, &decisions, &cascade_rows, fallback.as_deref().unwrap_or("-"), items.len(), runs);
     let path = eval::write_summary(out, &stats, &decisions, &md)?;
     for d in &decisions {
-        println!("{:<22} {}", d.check, match (&d.winner, &d.fallback) {
+        outln!("{:<22} {}", d.check, match (&d.winner, &d.fallback) {
             (Some(w), _) => style(w.clone()).green().to_string(),
             (None, Some(f)) => style(format!("none qualifies (fallback {f})")).yellow().to_string(),
             (None, None) => style("none qualifies".to_string()).yellow().to_string(),
         });
     }
-    println!("Summary: {}", path.display());
+    outln!("Summary: {}", path.display());
     Ok(())
 }
 
@@ -1028,7 +1029,7 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
 fn setup_status(settings: &Settings, json: bool) -> Result<()> {
     let status = setup::status(&setup::System { settings });
     if json {
-        println!("{}", serde_json::to_string(&status)?);
+        outln!("{}", serde_json::to_string(&status)?);
         return Ok(());
     }
     for check in &status.checks {
@@ -1038,9 +1039,9 @@ fn setup_status(settings: &Settings, json: bool) -> Result<()> {
             setup::Status::Blocked => style("…").dim(),
             setup::Status::Optional => style("○").dim(),
         };
-        println!("{mark} {}", check.title);
+        outln!("{mark} {}", check.title);
         if !check.detail.is_empty() && check.status != setup::Status::Ok {
-            println!("  {}", style(&check.detail).dim());
+            outln!("  {}", style(&check.detail).dim());
         }
     }
     for tool in [Tool::Ffmpeg, Tool::Ant, Tool::Docker] {
@@ -1050,21 +1051,21 @@ fn setup_status(settings: &Settings, json: bool) -> Result<()> {
                 Origin::Override => "from IC_* override",
                 Origin::System => "installed on this Mac",
             };
-            println!("{}", style(format!("  {} {} ({origin})", tool.name(), found.path.display())).dim());
+            outln!("{}", style(format!("  {} {} ({origin})", tool.name(), found.path.display())).dim());
         }
     }
     let app = capture::app_path();
     if !app.exists() {
-        println!("{} Recorder app not found ({}) — `ic record` needs it; the app records by itself",
+        outln!("{} Recorder app not found ({}) — `ic record` needs it; the app records by itself",
                  style("•").yellow(), app.display());
     }
     if status.ready {
-        println!("{} Ready. Analysis model: {}", style("✓").green(), settings.model);
+        outln!("{} Ready. Analysis model: {}", style("✓").green(), settings.model);
     } else {
-        println!("{} {} thing(s) left — open Setup in the app, or: ic setup run all, then ic login",
+        outln!("{} {} thing(s) left — open Setup in the app, or: ic setup run all, then ic login",
                  style("•").yellow(), status.remaining);
     }
-    println!("{}", style(format!("Data folder: {} · Models: {}", settings.data_dir.display(),
+    outln!("{}", style(format!("Data folder: {} · Models: {}", settings.data_dir.display(),
                                  settings.models_dir.display())).dim());
     Ok(())
 }
@@ -1085,7 +1086,7 @@ fn run() -> Result<()> {
             let mut db = open_db(&settings)?;
             let active: Vec<_> = db.list_sessions()?.into_iter().filter(|s| s.status == Status::Recording).collect();
             if active.is_empty() {
-                println!("Nothing is recording.");
+                outln!("Nothing is recording.");
             }
             for s in active {
                 if let Err(e) = finish_recording(&mut db, &settings, s.id, !no_analyze, true) {
@@ -1116,7 +1117,7 @@ fn run() -> Result<()> {
                 }
                 _ => bail!("Pass a recording file, or both --mic and --system tracks."),
             };
-            println!("Imported as session {} ({}) → {}", style(session.id).bold(),
+            outln!("Imported as session {} ({}) → {}", style(session.id).bold(),
                      fmt_ts(session.duration_s.unwrap_or(0.0)), session.dir);
             if no_transcribe {
                 return Ok(());
@@ -1130,7 +1131,7 @@ fn run() -> Result<()> {
                 let db = open_db(&settings)?;
                 let title = title.unwrap_or_else(|| chrono::Local::now().format("Interview %Y-%m-%d %H:%M").to_string());
                 let session = pipeline::create_recording_session(&db, &settings, &title, company)?;
-                println!("{}", serde_json::json!({"id": session.id, "dir": session.dir}));
+                outln!("{}", serde_json::json!({"id": session.id, "dir": session.dir}));
                 Ok(())
             }
             RecordingCmd::Finish { id, no_analyze } => {
@@ -1143,7 +1144,7 @@ fn run() -> Result<()> {
         Cmd::Steps { id, json } => {
             let db = open_db(&settings)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&session_view::build(&db, id)?.stages)?);
+                outln!("{}", serde_json::to_string_pretty(&session_view::build(&db, id)?.stages)?);
                 Ok(())
             } else {
                 print_steps(&db, id)
@@ -1161,7 +1162,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Session { id } => {
-            println!("{}", serde_json::to_string(&session_view::build(&open_db(&settings)?, id)?)?);
+            outln!("{}", serde_json::to_string(&session_view::build(&open_db(&settings)?, id)?)?);
             Ok(())
         }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
@@ -1170,7 +1171,7 @@ fn run() -> Result<()> {
             ProxyCmd::Setup => {
                 proxy_setup(&settings)?;
                 if !auth::has_login() {
-                    println!("Next, sign in to Claude: ic login");
+                    outln!("Next, sign in to Claude: ic login");
                 }
                 Ok(())
             }
@@ -1180,7 +1181,7 @@ fn run() -> Result<()> {
                 let result = proxy::ensure_running(&settings, &mut ui);
                 ui.finish();
                 result?;
-                println!("{} AI proxy running at {}", style("✓").green(), proxy::base_url(&settings));
+                outln!("{} AI proxy running at {}", style("✓").green(), proxy::base_url(&settings));
                 Ok(())
             }
             ProxyCmd::Stop => proxy::stop(&settings),
@@ -1208,7 +1209,7 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("{} {e:#}", style("Error:").red().bold());
+        errln!("{} {e:#}", style("Error:").red().bold());
         std::process::exit(1);
     }
 }

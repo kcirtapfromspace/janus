@@ -1,5 +1,33 @@
 //! Interview Coach: record, transcribe, and get coached on your job interviews — locally.
 
+/// Like `println!`, but a closed stdout (the app that started ic quit, or `| head`) doesn't end
+/// ic mid-step: the output is dropped and the work still finishes and lands in the database.
+#[macro_export]
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// `print!` that tolerates a closed stdout (see `outln!`).
+#[macro_export]
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// `eprintln!` that tolerates a closed stderr (see `outln!`).
+#[macro_export]
+macro_rules! errln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod analyze;
 pub mod audio;
 pub mod auth;

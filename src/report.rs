@@ -145,12 +145,12 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
     .into_iter()
     .flatten()
     .collect();
-    println!("{}", style(format!("━━ {} ━━", header.join(" · "))).bold());
+    outln!("{}", style(format!("━━ {} ━━", header.join(" · "))).bold());
     let notes = notes(session);
     if !notes.is_empty() {
-        println!("\n{}", style("Part of this interview wasn't recorded").yellow().bold());
+        outln!("\n{}", style("Part of this interview wasn't recorded").yellow().bold());
         for note in &notes.for_you {
-            println!(" {}", style(note).yellow());
+            outln!(" {}", style(note).yellow());
         }
     }
 
@@ -160,50 +160,50 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
             .dim()
             .to_string(),
     };
-    println!("\n{} {}{actual}\n", verdict_badge(a.outlook.verdict), style(format!("({} confidence)", a.outlook.confidence)).dim());
-    println!("{}\n", a.outlook.reasoning);
-    println!("{}\n{}\n", style("Summary").bold(), a.summary);
+    outln!("\n{} {}{actual}\n", verdict_badge(a.outlook.verdict), style(format!("({} confidence)", a.outlook.confidence)).dim());
+    outln!("{}\n", a.outlook.reasoning);
+    outln!("{}\n{}\n", style("Summary").bold(), a.summary);
 
-    println!("{}", style("Interviewer signals").bold());
+    outln!("{}", style("Interviewer signals").bold());
     for s in &a.outlook.signals {
         let mark = match s.direction {
             Direction::Positive => style("+").green().bold(),
             Direction::Negative => style("−").red().bold(),
         };
-        println!(" {mark} {}\n    {}", s.signal, quote(&s.evidence));
+        outln!(" {mark} {}\n    {}", s.signal, quote(&s.evidence));
     }
 
-    println!("\n{}", style("By the numbers").bold());
+    outln!("\n{}", style("By the numbers").bold());
     if notes.incomplete {
-        println!(" {}", style(METRICS_LEFT_OUT).dim());
+        outln!(" {}", style(METRICS_LEFT_OUT).dim());
     } else {
         for line in metric_lines(m) {
-            println!(" {line}");
+            outln!(" {line}");
         }
     }
 
     if !stored.answer_checks.is_empty() {
-        println!("\n{}", style("Answer by answer").bold());
-        println!(" {}", answer_check_tally(&stored.answer_checks));
+        outln!("\n{}", style("Answer by answer").bold());
+        outln!(" {}", answer_check_tally(&stored.answer_checks));
         if full {
             for (start, question, checks) in answers_with_checks(&stored.answer_checks) {
                 let cells: Vec<String> = ANSWER_CHECKS
                     .iter()
                     .filter_map(|(id, label)| checks.get(id).map(|c| format!("{label}: {}", check_cell(c))))
                     .collect();
-                println!(" {} {}\n    {}", style(fmt_ts(start)).dim(), question, style(cells.join(" · ")).dim());
+                outln!(" {} {}\n    {}", style(fmt_ts(start)).dim(), question, style(cells.join(" · ")).dim());
             }
         }
     }
 
-    println!("\n{}", style("Rubric").bold());
+    outln!("\n{}", style("Rubric").bold());
     for (label, score) in a.rubric.items() {
-        println!(" {label:<22} {}  {}", style(format!("{:<5}", dots(score.score))).cyan(), style(&score.rationale).dim());
+        outln!(" {label:<22} {}  {}", style(format!("{:<5}", dots(score.score))).cyan(), style(&score.rationale).dim());
     }
 
-    println!("\n{}", style("Top things to work on").bold());
+    outln!("\n{}", style("Top things to work on").bold());
     for (i, c) in a.coaching.iter().enumerate() {
-        println!(
+        outln!(
             "\n {}\n    {}\n    {}\n    {} {}\n    {} {}",
             style(format!("{}. {}", i + 1, c.title)).bold(),
             c.why_it_matters,
@@ -215,34 +215,34 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
         );
     }
 
-    println!("\n{}", style("Question by question").bold());
+    outln!("\n{}", style("Question by question").bold());
     for q in &a.questions {
-        println!(" {} {} {} {}", style(&q.timestamp).dim(), style(dots(q.score)).cyan(), q.question,
+        outln!(" {} {} {} {}", style(&q.timestamp).dim(), style(dots(q.score)).cyan(), q.question,
                  style(format!("({})", q.kind)).dim());
         if full {
-            println!("    {} {}\n    {} {}\n    {} {}\n    {} {}\n", style("You:").dim(), q.answer_summary,
+            outln!("    {} {}\n    {} {}\n    {} {}\n    {} {}\n", style("You:").dim(), q.answer_summary,
                      style("Worked:").green(), q.what_worked, style("Missing:").yellow(), q.what_was_missing,
                      style("Stronger:").cyan(), q.stronger_answer);
         }
     }
 
     if full {
-        println!("\n{}", style("Strengths").bold());
+        outln!("\n{}", style("Strengths").bold());
         for h in &a.strengths {
-            println!(" {} {}\n    {}", style("✓").green(), h.point, quote(&h.evidence));
+            outln!(" {} {}\n    {}", style("✓").green(), h.point, quote(&h.evidence));
         }
         if !a.red_flags.is_empty() {
-            println!("\n{}", style("Red flags").bold());
+            outln!("\n{}", style("Red flags").bold());
             for h in &a.red_flags {
-                println!(" {} {}\n    {}", style("!").red().bold(), h.point, quote(&h.evidence));
+                outln!(" {} {}\n    {}", style("!").red().bold(), h.point, quote(&h.evidence));
             }
         }
     } else {
-        println!("\n{}", style(format!("More detail: ic report {0} --full · HTML: ic report {0} --open", session.id)).dim());
+        outln!("\n{}", style(format!("More detail: ic report {0} --full · HTML: ic report {0} --open", session.id)).dim());
     }
 
     if !stored.unverified_quotes.is_empty() {
-        println!("\n{} {} quoted line(s) aren't word-for-word in the transcript and may be paraphrased.",
+        outln!("\n{} {} quoted line(s) aren't word-for-word in the transcript and may be paraphrased.",
                  style("Note:").yellow(), stored.unverified_quotes.len());
     }
 }
@@ -451,30 +451,30 @@ pub fn write_analysis_html(session: &Session, stored: &StoredAnalysis, outcome: 
 
 pub fn print_next_steps(session: &Session, next: &StoredNextSteps) {
     let plan = &next.plan;
-    println!("{}", style(format!("━━ What to do next · {} ━━", session.title)).bold());
-    println!("\n{}\n", style(&plan.headline).bold());
-    println!("{}", style("Next-round prep").bold());
+    outln!("{}", style(format!("━━ What to do next · {} ━━", session.title)).bold());
+    outln!("\n{}\n", style(&plan.headline).bold());
+    outln!("{}", style("Next-round prep").bold());
     for (i, item) in plan.next_round_prep.iter().enumerate() {
-        println!("\n {}\n    {}\n    {}\n    {} {}", style(format!("{}. {}", i + 1, item.topic)).bold(), item.why,
+        outln!("\n {}\n    {}\n    {}\n    {} {}", style(format!("{}. {}", i + 1, item.topic)).bold(), item.why,
                  quote(&item.evidence), style("Prepare:").green(), item.how_to_prepare);
         for q in &item.likely_questions {
-            println!("    {} {q}", style("?").cyan());
+            outln!("    {} {q}", style("?").cyan());
         }
     }
-    println!("\n{}", style("Practice plan").bold());
+    outln!("\n{}", style("Practice plan").bold());
     for p in &plan.practice_plan {
         let priority = match p.priority {
             Priority::High => style("high").red(),
             Priority::Medium => style("medium").yellow(),
             Priority::Low => style("low").dim(),
         };
-        println!(" {} {} {} {}\n    {}", style("□").dim(), style(&p.skill).bold(),
+        outln!(" {} {} {} {}\n    {}", style("□").dim(), style(&p.skill).bold(),
                  style(format!("({} min · {priority} priority)", p.minutes)).dim(), style(format!("— {}", p.from_coaching)).dim(),
                  p.drill);
     }
     if !next.unverified_quotes.is_empty() {
-        println!("\n{} {} quoted line(s) aren't word-for-word in the transcript and may be paraphrased.",
+        outln!("\n{} {} quoted line(s) aren't word-for-word in the transcript and may be paraphrased.",
                  style("Note:").yellow(), next.unverified_quotes.len());
     }
-    println!("\n{}", style(format!("Generated {} with {}", &next.created_at[..16.min(next.created_at.len())], next.model)).dim());
+    outln!("\n{}", style(format!("Generated {} with {}", &next.created_at[..16.min(next.created_at.len())], next.model)).dim());
 }
