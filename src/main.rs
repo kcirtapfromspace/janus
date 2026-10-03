@@ -160,6 +160,9 @@ enum Cmd {
         #[arg(long)]
         full: bool,
     },
+    /// Rebuild how the room felt for an analysed interview (no new Claude analysis; uses Jev when
+    /// its key is set).
+    Timeline { id: i64 },
     /// Record how an interview actually turned out — coaching learns from real results.
     Outcome {
         id: i64,
@@ -209,23 +212,57 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum EvalCmd {
-    /// Score every labelled answer with each arm, then apply docs/eval/scorer-decision.md.
+    /// Score every labelled item with each arm, then apply the set's rule in docs/eval/.
     Scorers {
-        #[arg(long, default_value = "tests/fixtures/answers.jsonl")]
-        set: PathBuf,
+        /// What to score: answers (your answers' checks) or interviewer (the timeline's turn checks).
+        #[arg(long, value_enum, default_value_t = EvalSet::Answers)]
+        set: EvalSet,
+        /// The labelled items (default: tests/fixtures/answers.jsonl or interviewer_turns.jsonl).
+        #[arg(long)]
+        items: Option<PathBuf>,
         /// Any of: jev, haiku, sonnet, opus.
         #[arg(long, value_delimiter = ',', default_value = "jev,haiku,sonnet,opus")]
         arms: Vec<String>,
         #[arg(long, default_value_t = 3)]
         runs: usize,
-        #[arg(long, default_value = "dist/eval")]
-        out: PathBuf,
-        /// Only the first N answers (for a quick check).
+        /// Where results go (default: dist/eval for answers, dist/eval/interviewer otherwise).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Only the first N items (for a quick check).
         #[arg(long)]
         limit: Option<usize>,
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum EvalSet {
+    Answers,
+    Interviewer,
+}
+
+impl EvalSet {
+    fn check_set(self) -> interview_coach::scoring::CheckSet {
+        match self {
+            EvalSet::Answers => interview_coach::scoring::answer_set(),
+            EvalSet::Interviewer => interview_coach::temperature::interviewer_set(),
+        }
+    }
+
+    fn default_items(self) -> PathBuf {
+        PathBuf::from(match self {
+            EvalSet::Answers => "tests/fixtures/answers.jsonl",
+            EvalSet::Interviewer => "tests/fixtures/interviewer_turns.jsonl",
+        })
+    }
+
+    fn default_out(self) -> PathBuf {
+        PathBuf::from(match self {
+            EvalSet::Answers => "dist/eval",
+            EvalSet::Interviewer => "dist/eval/interviewer",
+        })
+    }
 }
 
 #[derive(Subcommand)]
@@ -410,12 +447,15 @@ fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, ope
     }
     let endpoint = LlmEndpoint::load(settings).expect("checked above");
     let client = llm::client(model, endpoint.clone());
-    // The answer-by-answer checks, when their scorer is available.
+    // The answer-by-answer checks, when their scorer is available, and Jev for the room's timeline
+    // whenever its key is there.
     let jev_client = interview_coach::llm::jev::Client::new(endpoint.clone());
+    let has_jev = proxy::using_external_proxy() || proxy::has_key(settings, KeyTarget::TypeSafe);
+    let timeline_scorer = JevScorer { client: &jev_client, model: interview_coach::llm::jev::DEFAULT_MODEL.into() };
     let (jev_scorer, claude_llm);
     let claude_scorer;
     let checker: Option<&dyn Scorer> = match &settings.scorer {
-        ScorerRef::Jev(m) if proxy::using_external_proxy() || proxy::has_key(settings, KeyTarget::TypeSafe) => {
+        ScorerRef::Jev(m) if has_jev => {
             jev_scorer = JevScorer { client: &jev_client, model: m.clone() };
             Some(&jev_scorer)
         }
@@ -426,7 +466,8 @@ fn run_analysis(db: &mut Db, settings: &Settings, model: &ModelRef, id: i64, ope
         }
         _ => None,
     };
-    let stored = pipeline::analyze_session_with(db, client.as_ref(), model, id, checker, &mut ui);
+    let extras = pipeline::ReportExtras { checker, timeline: has_jev.then_some(&timeline_scorer as &dyn Scorer) };
+    let stored = pipeline::analyze_session_with(db, client.as_ref(), model, id, extras, &mut ui);
     ui.finish();
     let stored = stored?;
     let session = db.get_session(id)?;
@@ -784,6 +825,40 @@ fn show_report(settings: &Settings, id: i64, open: bool, full: bool) -> Result<(
     Ok(())
 }
 
+fn refresh_timeline(settings: &Settings, id: i64) -> Result<()> {
+    let mut db = open_db(settings)?;
+    let mut ui = Ui::new();
+    let has_jev = proxy::using_external_proxy() || proxy::has_key(settings, KeyTarget::TypeSafe);
+    let (jev_client, jev_scorer);
+    let scorer: Option<&dyn Scorer> = if has_jev {
+        if let Err(e) = proxy::ensure_running(settings, &mut ui) {
+            ui.finish();
+            return Err(e);
+        }
+        jev_client = interview_coach::llm::jev::Client::new(LlmEndpoint::load(settings).context("the proxy isn't set up")?);
+        jev_scorer = JevScorer { client: &jev_client, model: interview_coach::llm::jev::DEFAULT_MODEL.into() };
+        Some(&jev_scorer)
+    } else {
+        None
+    };
+    let result = pipeline::refresh_timeline(&mut db, id, scorer, &mut ui);
+    ui.finish();
+    let (stored, warnings) = result?;
+    for w in &warnings {
+        errln!("{} {w}", style("Warning:").yellow());
+    }
+    let session = db.get_session(id)?;
+    let outcome = db.get_outcome(id)?;
+    report::write_analysis_html(&session, &stored, outcome.as_ref())?;
+    report::write_html(&session, &stored, outcome.as_ref())?;
+    if stored.turn_signals.iter().any(|s| s.temperature.is_some()) {
+        report::print_room(&stored, true);
+    } else {
+        outln!("The interviewer didn't say enough to read the room.");
+    }
+    Ok(())
+}
+
 fn outcome(settings: &Settings, id: i64, result: OutcomeResult, notes: Option<String>) -> Result<()> {
     let db = open_db(settings)?;
     let outcome = db.set_outcome(id, result, notes.as_deref())?;
@@ -977,10 +1052,14 @@ fn jev_ping(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usize, out: &Path, limit: Option<usize>,
-                concurrency: usize) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn eval_scorers(settings: &Settings, which: EvalSet, items_path: Option<PathBuf>, arm_names: &[String], runs: usize,
+                out: Option<PathBuf>, limit: Option<usize>, concurrency: usize) -> Result<()> {
     use interview_coach::eval;
-    let mut items = eval::load_items(set)?;
+    let set = which.check_set();
+    let out = out.unwrap_or_else(|| which.default_out());
+    let out = out.as_path();
+    let mut items = eval::load_items(&items_path.unwrap_or_else(|| which.default_items()))?;
     if let Some(n) = limit {
         items.truncate(n);
     }
@@ -992,10 +1071,10 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
         bail!("The Claude arms need you signed in to Claude (Setup in the app, or: ic login).");
     }
     let endpoint = ai_endpoint(settings)?;
-    outln!("Scoring {} answers × {runs} runs with {} → {}", items.len(),
+    outln!("Scoring {} {} × {runs} runs with {} → {}", items.len(), if set.id == "answers" { "answers" } else { "turns" },
              arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "), out.display());
     let results = eval::run(
-        &eval::Plan { items: &items, arms: &arms, runs, concurrency, out_dir: out },
+        &eval::Plan { set: &set, items: &items, arms: &arms, runs, concurrency, out_dir: out },
         &endpoint,
         &|r, done, total| {
             let status = match &r.result {
@@ -1005,14 +1084,15 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
             errln!("[{done}/{total}] {:<6} {:<28} run {} {status}", r.arm, r.item, r.run);
         },
     )?;
-    let stats = eval::summarize(&results, &items, &arms);
-    let decisions = eval::decide(&stats, &arms);
+    let stats = eval::summarize(&results, &items, &arms, &set);
+    let decisions = eval::decide(&stats, &arms, &set);
     let fallback = arms.iter().filter(|a| a.name != "jev").min_by_key(|a| a.cost_rank()).map(|a| a.name.clone());
     let cascade_rows = match (&fallback, arms.iter().any(|a| a.name == "jev")) {
-        (Some(f), true) => eval::cascade(&results, &items, f),
+        (Some(f), true) => eval::cascade(&results, &items, f, &set),
         _ => vec![],
     };
-    let md = eval::markdown(&stats, &decisions, &cascade_rows, fallback.as_deref().unwrap_or("-"), items.len(), runs);
+    let mut md = eval::markdown(&stats, &decisions, &cascade_rows, fallback.as_deref().unwrap_or("-"), items.len(), runs, &set);
+    md += &eval::disagreements(&results, &items, &arms, &set);
     let path = eval::write_summary(out, &stats, &decisions, &md)?;
     for d in &decisions {
         outln!("{:<22} {}", d.check, match (&d.winner, &d.fallback) {
@@ -1166,6 +1246,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
+        Cmd::Timeline { id } => refresh_timeline(&settings, id),
         Cmd::Outcome { id, result, notes } => outcome(&settings, id, result, notes),
         Cmd::Proxy { action } => match action {
             ProxyCmd::Setup => {
@@ -1200,8 +1281,8 @@ fn run() -> Result<()> {
             ConfigCmd::Set { key, value } => config_set(&settings, key, &value),
         },
         Cmd::Doctor => setup_status(&settings, false),
-        Cmd::Eval { action: EvalCmd::Scorers { set, arms, runs, out, limit, concurrency } } => {
-            eval_scorers(&settings, &set, &arms, runs, &out, limit, concurrency)
+        Cmd::Eval { action: EvalCmd::Scorers { set, items, arms, runs, out, limit, concurrency } } => {
+            eval_scorers(&settings, set, items, &arms, runs, out, limit, concurrency)
         }
         Cmd::Jev { action: JevCmd::Ping } => jev_ping(&settings),
     }

@@ -191,16 +191,17 @@ impl interview_coach::scoring::Scorer for FakeScorer {
         "typesafe/jev-latest".into()
     }
 
-    fn assess(&self, input: &interview_coach::scoring::AnswerInput, checks: &[interview_coach::scoring::Check], _: usize)
+    fn assess(&self, input: &dyn interview_coach::scoring::ScoreInput, set: &interview_coach::scoring::CheckSet, _: usize)
         -> anyhow::Result<interview_coach::scoring::Assessment> {
         use interview_coach::scoring::{Assessment, Verdict};
-        self.asked.borrow_mut().push(input.answer.clone());
+        self.asked.borrow_mut().push(input.state()["answer"].as_str().unwrap_or_default().to_string());
         if self.fail {
             anyhow::bail!("TypeSafe is down");
         }
         let verdict = |pick: &str, value: f64| Verdict { pick: pick.into(), value, confidence: Some(0.9),
                                                          probabilities: [(pick.to_string(), 0.9)].into() };
-        let verdicts = checks
+        let verdicts = set
+            .checks
             .iter()
             .map(|c| {
                 let v = match c.id {
@@ -218,6 +219,10 @@ impl interview_coach::scoring::Scorer for FakeScorer {
     }
 }
 
+fn checks(scorer: &dyn interview_coach::scoring::Scorer) -> interview_coach::pipeline::ReportExtras<'_> {
+    interview_coach::pipeline::ReportExtras { checker: Some(scorer), timeline: None }
+}
+
 /// Jev (or Claude) checks each answer after the report; the results are stored with the analysis
 /// and shown in the report, and a scorer failure only leaves a warning.
 #[test]
@@ -226,7 +231,7 @@ fn each_answer_is_checked_after_the_report_and_a_failure_only_warns() {
     let (_tmp, mut db, id) = transcribed(Mode::Dual);
     let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE)), Ok(sample(false, GOOD_QUOTE))]);
     let scorer = FakeScorer { fail: false, asked: Default::default() };
-    let stored = analyze_session_with(&mut db, &llm, &claude(), id, Some(&scorer), &mut Quiet).unwrap();
+    let stored = analyze_session_with(&mut db, &llm, &claude(), id, checks(&scorer), &mut Quiet).unwrap();
     assert_eq!(scorer.asked.borrow().len(), 1, "one question in the report, so one answer");
     assert!(scorer.asked.borrow()[0].starts_with("Um, so, like, we shipped"), "the answer is the candidate's turns after it");
     assert_eq!(stored.answer_checks.len(), 6);
@@ -243,10 +248,91 @@ fn each_answer_is_checked_after_the_report_and_a_failure_only_warns() {
     assert!(html.contains("Checked answer by answer by typesafe/jev-1.13.0"));
 
     let broken = FakeScorer { fail: true, asked: Default::default() };
-    let again = analyze_session_with(&mut db, &llm, &claude(), id, Some(&broken), &mut Quiet).unwrap();
+    let again = analyze_session_with(&mut db, &llm, &claude(), id, checks(&broken), &mut Quiet).unwrap();
     assert!(again.answer_checks.is_empty());
     let run = steps::current_run(&db, id, Step::Report).unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Succeeded);
     assert!(run.warnings[0].contains("answer-by-answer checks were skipped: TypeSafe is down"), "{:?}", run.warnings);
     assert_eq!(run.params["checks"], "typesafe/jev-latest");
+}
+
+/// Reads interviewer turns like Jev would: "Great" is warm praise, a recruiter is next steps.
+struct RoomScorer;
+
+impl interview_coach::scoring::Scorer for RoomScorer {
+    fn name(&self) -> String {
+        "typesafe/jev-latest".into()
+    }
+
+    fn assess(&self, input: &dyn interview_coach::scoring::ScoreInput, set: &interview_coach::scoring::CheckSet, _: usize)
+        -> anyhow::Result<interview_coach::scoring::Assessment> {
+        use interview_coach::scoring::{Assessment, Verdict};
+        let says = input.state()["interviewer_says"].as_str().unwrap_or_default().to_string();
+        let warm = says.starts_with("Great");
+        let yes_no = |yes: bool| {
+            let p = if yes { 0.9 } else { 0.1 };
+            Verdict { pick: if yes { "yes" } else { "no" }.into(), value: p, confidence: Some(0.9),
+                      probabilities: [("yes".to_string(), p), ("no".to_string(), 1.0 - p)].into() }
+        };
+        let verdicts = set
+            .checks
+            .iter()
+            .map(|c| {
+                let v = match c.id {
+                    "tone" => {
+                        let (w, n) = if warm { (0.8, 0.15) } else { (0.1, 0.8) };
+                        Verdict { pick: if warm { "warm" } else { "neutral" }.into(), value: w, confidence: Some(0.8),
+                                  probabilities: [("warm".to_string(), w), ("neutral".to_string(), n),
+                                                  ("cool".to_string(), 1.0 - w - n)].into() }
+                    }
+                    "positive_reaction" => yes_no(warm),
+                    "next_steps" => yes_no(says.contains("recruiter")),
+                    _ => yes_no(false),
+                };
+                (c.id.to_string(), v)
+            })
+            .collect();
+        Ok(Assessment { scorer: "typesafe/jev-1.13.0".into(), verdicts, latency_ms: 90, input_tokens: 200 })
+    }
+}
+
+/// The report stage reads the room: each interviewer turn and your answer are stored with the
+/// report, the page shows the timeline with seek links, and it renders the same every time.
+#[test]
+fn the_report_reads_the_room_and_renders_it_the_same_every_time() {
+    use interview_coach::pipeline::{ReportExtras, analyze_session_with, refresh_timeline};
+    use interview_coach::temperature::Kind;
+    let (_tmp, mut db, id) = transcribed(Mode::Dual);
+    let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE))]);
+    let extras = ReportExtras { checker: None, timeline: Some(&RoomScorer) };
+    let stored = analyze_session_with(&mut db, &llm, &claude(), id, extras, &mut Quiet).unwrap();
+
+    let kinds: Vec<Kind> = stored.turn_signals.iter().map(|s| s.kind).collect();
+    assert_eq!(kinds, [Kind::Substantive, Kind::Answer, Kind::Substantive], "your two segments are one answer");
+    assert_eq!(stored.timeline_scorer.as_deref(), Some("typesafe/jev-1.13.0"));
+    let (first, last) = (&stored.turn_signals[0], &stored.turn_signals[2]);
+    assert!(last.temperature.unwrap() > first.temperature.unwrap() + 0.3, "praise reads warmer than a plain question");
+    assert_eq!(last.latency_s, Some(1.0));
+    let run = steps::current_run(&db, id, Step::Report).unwrap().unwrap();
+    assert_eq!(run.params["timeline"], "typesafe/jev-latest");
+    assert!(run.warnings.iter().any(|w| w.contains("couldn't read the audio")), "no audio in this test: {:?}", run.warnings);
+
+    let session = db.get_session(id).unwrap();
+    let html = interview_coach::report::render_html(&session, &stored, None);
+    assert!(html.contains("<h2>How the room felt</h2>"));
+    assert!(html.contains("<svg class='room'") && html.contains("href='#t=31.0'"), "the dots seek");
+    assert!(html.contains("<a class='ts' href='#t=31.0'>00:00:31</a>"), "quoted timestamps seek too");
+    assert!(html.contains("Next steps mentioned") && html.contains("★ next steps"));
+    assert!(html.contains("checked turn by turn by typesafe/jev-1.13.0"));
+    let reloaded = db.analysis_by_id(stored.id).unwrap().unwrap();
+    assert_eq!(interview_coach::report::render_html(&session, &reloaded, None), html, "same rows, same page");
+
+    // Without a TypeSafe key the timeline is rebuilt from voices only, and says so.
+    let (voice_only, warnings) = refresh_timeline(&mut db, id, None, &mut Quiet).unwrap();
+    assert_eq!(voice_only.id, stored.id, "the same report, no new Claude call");
+    assert_eq!((voice_only.turn_signals.len(), voice_only.timeline_scorer.clone()), (3, None));
+    assert!(voice_only.turn_signals.iter().all(|s| s.checks.is_empty()));
+    assert!(warnings.iter().any(|w| w.contains("couldn't read the audio")));
+    let html = interview_coach::report::render_html(&session, &voice_only, None);
+    assert!(html.contains("add a TypeSafe key in Setup"));
 }

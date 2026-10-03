@@ -151,6 +151,23 @@ pub fn fmt_ts(seconds: f64) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, s % 3600 / 60, s % 60)
 }
 
+/// Seconds from `HH:MM:SS` or `MM:SS` (as in reports), or None.
+pub fn parse_ts(ts: &str) -> Option<f64> {
+    let parts: Vec<&str> = ts.trim().split(':').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut seconds = 0.0;
+    for (i, part) in parts.iter().enumerate() {
+        let n: u32 = part.parse().ok().filter(|_| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))?;
+        if i > 0 && n >= 60 {
+            return None;
+        }
+        seconds = seconds * 60.0 + n as f64;
+    }
+    Some(seconds)
+}
+
 // --- Analysis schema --------------------------------------------------------------------------
 // These types are Claude's structured-output schema, so doc comments are instructions to the model.
 

@@ -250,7 +250,7 @@ pub fn status(p: &dyn Probe) -> SetupStatus {
             let required = target == KeyTarget::OpenAi && p.analysis_provider() == Provider::OpenAi;
             let (id, purpose) = match target {
                 KeyTarget::OpenAi => ("openai_key", "Only needed to analyse with OpenAI models."),
-                KeyTarget::TypeSafe => ("typesafe_key", "For Jev, which can check your answers one by one."),
+                KeyTarget::TypeSafe => ("typesafe_key", "For Jev, which reads how the interviewer reacted, turn by turn."),
             };
             checks.push(if p.has_key(target) {
                 Check { id, status: Status::Ok, required, title: format!("{} key added", target.label()),

@@ -24,7 +24,9 @@ use crate::models::{INTERVIEWER, Mode, RunStatus, Segment, Session, SessionAnaly
 use crate::next_steps;
 use crate::scoring::{self, Scorer};
 use crate::progress::Progress;
+use crate::prosody;
 use crate::steps::{self, RunProgress};
+use crate::temperature;
 use crate::transcribe::Transcriber;
 
 /// Dual-track layout: which file belongs to which speaker.
@@ -293,12 +295,22 @@ pub fn write_transcript_files(dir: &Path, segments: &[Segment]) -> Result<()> {
 /// `model` picks the provider/model; `llm` must be that provider's adapter (see `llm::client`).
 pub fn analyze_session(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i64, progress: &mut dyn Progress)
     -> Result<StoredAnalysis> {
-    analyze_session_with(db, llm, model, id, None, progress)
+    analyze_session_with(db, llm, model, id, ReportExtras::default(), progress)
 }
 
-/// The report, then (with a `checker`) the built-in checks on each of the candidate's answers.
-/// A checker failure leaves a warning on the run; the report itself still succeeds.
-pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i64, checker: Option<&dyn Scorer>,
+/// What the Report stage adds after Claude's report.
+#[derive(Clone, Copy, Default)]
+pub struct ReportExtras<'a> {
+    /// Checks each of your answers (off unless the `scorer` setting picks one).
+    pub checker: Option<&'a dyn Scorer>,
+    /// Judges what the interviewer says, turn by turn, for the temperature timeline (Jev, when its
+    /// key exists). The timeline is always built; without this it's voice-only.
+    pub timeline: Option<&'a dyn Scorer>,
+}
+
+/// The report, then (with a `checker`) the built-in checks on each of the candidate's answers,
+/// then the room's temperature timeline. Failures after the report only leave warnings on the run.
+pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i64, extras: ReportExtras,
                             progress: &mut dyn Progress) -> Result<StoredAnalysis> {
     let session = db.get_session(id)?;
     if db.get_segments(id)?.is_empty() {
@@ -306,26 +318,98 @@ pub fn analyze_session_with(db: &mut Db, llm: &dyn Llm, model: &ModelRef, id: i6
     }
     db.set_status(id, Status::Analyzing, None)?;
     let mut params = json!({"model": model.to_string()});
-    if let Some(checker) = checker {
+    if let Some(checker) = extras.checker {
         params["checks"] = json!(checker.name());
     }
+    if let Some(timeline) = extras.timeline {
+        params["timeline"] = json!(timeline.name());
+    }
     run_stage(db, id, Step::Report, params, progress, |db, run, progress| {
-        let mut stored = analyze_inner(db, llm, model, session, run, progress)?;
-        if let Some(checker) = checker {
+        let stored = analyze_inner(db, llm, model, session, run, progress)?;
+        let mut warnings = vec![];
+        if let Some(checker) = extras.checker {
             let answers = scoring::answers_from_report(&to_turns(&db.get_segments(id)?), &stored.analysis.questions);
             if !answers.is_empty() {
                 progress.stage(&format!("Checking your {} answers one by one…", answers.len()));
                 match scoring::check_answers(checker, &answers) {
                     Ok(rows) => db.add_answer_checks(id, stored.id, &rows)?,
-                    Err(e) => db.set_run_warnings(run, &[format!("The answer-by-answer checks were skipped: {e:#}")])?,
+                    Err(e) => warnings.push(format!("The answer-by-answer checks were skipped: {e:#}")),
                 }
-                stored = db.analysis_by_id(stored.id)?.unwrap_or(stored);
             }
         }
+        // Built from the final transcript: a single-track report may just have swapped the speakers.
+        let session = db.get_session(id)?;
+        warnings.extend(add_timeline(db, &session, stored.id, extras.timeline, progress)?);
+        db.set_run_warnings(run, &warnings)?;
+        let stored = db.analysis_by_id(stored.id)?.unwrap_or(stored);
         let analysis_id = stored.id;
         Ok((stored, Some(analysis_id)))
     })
     .map_err(|e| fail(db, id, e))
+}
+
+/// The room's temperature timeline for a stored report: Jev's checks on each substantive
+/// interviewer turn (with a `scorer`) and voices measured from the session's audio. Returns
+/// warnings; only a database error fails it.
+fn add_timeline(db: &Db, session: &Session, analysis_id: i64, scorer: Option<&dyn Scorer>, progress: &mut dyn Progress)
+    -> Result<Vec<String>> {
+    let convo = temperature::conversation(&db.get_segments(session.id)?);
+    let turns = convo.iter().filter(|t| t.kind == temperature::Kind::Substantive).count();
+    if turns == 0 {
+        return Ok(vec![]);
+    }
+    let mut warnings = vec![];
+    let assessments = match scorer {
+        Some(scorer) => {
+            progress.stage(&format!("Reading the room: {turns} things the interviewer said…"));
+            let (assessments, errors) = temperature::assess_turns(scorer, &convo);
+            if let Some(first) = errors.first() {
+                warnings.push(format!("The room's timeline is missing the words of {} of the interviewer's {turns} turns: {first}",
+                                      turns - assessments.len()));
+            }
+            assessments
+        }
+        None => Default::default(),
+    };
+    progress.stage("Measuring how everyone sounded…");
+    let audio = match timeline_audio(session) {
+        Ok(audio) => Some(audio),
+        Err(e) => {
+            warnings.push(format!("The room's timeline couldn't read the audio, so it leaves out how people sounded: {e:#}"));
+            None
+        }
+    };
+    let signals = temperature::build(&convo, &assessments, audio.as_ref());
+    let scorer_name = assessments.values().next().map(|a| a.scorer.clone());
+    db.set_turn_signals(session.id, analysis_id, &signals, scorer_name.as_deref())?;
+    Ok(warnings)
+}
+
+/// Rebuild the room's timeline for the current report without asking Claude again: for reports
+/// made before the timeline existed, or after adding a TypeSafe key. Returns the report and warnings.
+pub fn refresh_timeline(db: &mut Db, id: i64, scorer: Option<&dyn Scorer>, progress: &mut dyn Progress)
+    -> Result<(StoredAnalysis, Vec<String>)> {
+    let report = current_report(db, id)?
+        .with_context(|| format!("Session {id} has no after-action report yet — run: ic run report {id}"))?;
+    let warnings = add_timeline(db, &db.get_session(id)?, report.id, scorer, progress)?;
+    Ok((db.analysis_by_id(report.id)?.unwrap_or(report), warnings))
+}
+
+/// Pitch and loudness frames for each voice: the interviewer's track and yours, or the one mixed
+/// track for both.
+fn timeline_audio(session: &Session) -> Result<temperature::Audio> {
+    let dir = Path::new(&session.dir);
+    let track = |name: &str| -> Result<Vec<prosody::Frame>> {
+        let samples = audio::load(&dir.join(format!("{name}.flac")))?;
+        Ok(prosody::frames(&samples, prosody::noise_floor_db(&samples)))
+    };
+    Ok(match session.mode {
+        Mode::Dual => temperature::Audio { interviewer: track("system")?, you: track("mic")?, separate: true },
+        Mode::Single => {
+            let frames = track("audio")?;
+            temperature::Audio { interviewer: frames.clone(), you: frames, separate: false }
+        }
+    })
 }
 
 fn analyze_inner(db: &mut Db, llm: &dyn Llm, model: &ModelRef, mut session: Session, report_run: i64,

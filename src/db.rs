@@ -127,6 +127,27 @@ CREATE TABLE IF NOT EXISTS answer_checks (
 );
 CREATE INDEX IF NOT EXISTS answer_checks_by_analysis ON answer_checks(analysis_id, answer_idx);
 
+-- The room's temperature timeline (temperature.rs): one row per conversation turn in an analysed
+-- interview: substantive interviewer turns, their backchannels, and your answers. Jev's verdicts go in
+-- checks_json; voice features, z-scores, listening cues and the smoothed line in features_json.
+CREATE TABLE IF NOT EXISTS turn_signals (
+    id INTEGER PRIMARY KEY,
+    analysis_id INTEGER NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    turn_idx INTEGER NOT NULL,
+    speaker TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('substantive', 'backchannel', 'answer')),
+    start_s REAL NOT NULL,
+    end_s REAL NOT NULL,
+    excerpt TEXT NOT NULL,
+    temperature REAL,
+    scorer TEXT,
+    method TEXT NOT NULL,
+    checks_json TEXT NOT NULL,
+    features_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS turn_signals_by_analysis ON turn_signals(analysis_id, turn_idx);
+
 CREATE TABLE IF NOT EXISTS coaching_plans (
     id INTEGER PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -166,6 +187,10 @@ pub struct StoredAnalysis {
     pub unverified_quotes: Vec<String>,
     /// Per-answer checks for this run (empty when no scorer was available).
     pub answer_checks: Vec<AnswerCheck>,
+    /// The temperature timeline for this run (empty for runs before it existed).
+    pub turn_signals: Vec<crate::temperature::Signal>,
+    /// Which scorer judged the timeline's turns, e.g. `typesafe/jev-1.13.0` (None: voice only).
+    pub timeline_scorer: Option<String>,
 }
 
 /// One check of one answer (see scoring.rs).
@@ -231,7 +256,7 @@ pub struct Db {
 }
 
 /// Schema version; `migrate` brings older databases up to it.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, e.into()))
@@ -317,7 +342,8 @@ impl Db {
     }
 
     /// Version 2 added stage runs: sessions created before it get runs synthesized from what
-    /// they already have, once, so their stages show correctly. Version 3 added run warnings.
+    /// they already have, once, so their stages show correctly. Version 3 added run warnings,
+    /// version 4 answer checks and version 5 the temperature timeline (new tables, from SCHEMA).
     fn migrate(&self) -> Result<()> {
         let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version >= SCHEMA_VERSION {
@@ -438,6 +464,7 @@ impl Db {
         let Some((id, session_id, created_at, model, prompt_version, analysis, metrics, unverified)) = row else {
             return Ok(None);
         };
+        let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
         Ok(Some(StoredAnalysis {
             id,
             session_id,
@@ -448,7 +475,72 @@ impl Db {
             metrics: serde_json::from_str(&metrics)?,
             unverified_quotes: serde_json::from_str(&unverified)?,
             answer_checks: self.answer_checks(id)?,
+            turn_signals,
+            timeline_scorer,
         }))
+    }
+
+    /// Store a report's timeline, replacing any earlier one (excerpts are capped; the transcript
+    /// has the full text).
+    pub fn set_turn_signals(&self, session_id: i64, analysis_id: i64, signals: &[crate::temperature::Signal],
+                            scorer: Option<&str>) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM turn_signals WHERE analysis_id = ?1", [analysis_id])?;
+        for s in signals {
+            let features = serde_json::json!({
+                "voice": s.voice, "z": s.z, "backchannel_rate": s.backchannel_rate, "latency_s": s.latency_s,
+                "smoothed": s.smoothed,
+            });
+            let excerpt: String = s.text.chars().take(600).collect();
+            tx.execute(
+                "INSERT INTO turn_signals (analysis_id, session_id, turn_idx, speaker, kind, start_s, end_s, excerpt,
+                 temperature, scorer, method, checks_json, features_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![analysis_id, session_id, s.turn_idx as i64, s.speaker, serde_json::to_value(s.kind)?.as_str(),
+                        s.start, s.end, excerpt, s.temperature, scorer, crate::temperature::METHOD,
+                        serde_json::to_string(&s.checks)?, features.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A run's timeline in turn order, and the scorer that judged it.
+    pub fn turn_signals(&self, analysis_id: i64) -> Result<(Vec<crate::temperature::Signal>, Option<String>)> {
+        let mut stmt = self.conn.prepare(
+            "SELECT turn_idx, speaker, kind, start_s, end_s, excerpt, temperature, scorer, checks_json, features_json
+             FROM turn_signals WHERE analysis_id = ?1 ORDER BY turn_idx",
+        )?;
+        let mut scorer = None;
+        let rows = stmt.query_map([analysis_id], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, f64>(3)?, r.get::<_, f64>(4)?,
+                r.get::<_, String>(5)?, r.get::<_, Option<f64>>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, String>(8)?,
+                r.get::<_, String>(9)?))
+        })?;
+        let mut out = vec![];
+        for row in rows {
+            let (idx, speaker, kind, start, end, text, temperature, row_scorer, checks, features) = row?;
+            if scorer.is_none() {
+                scorer = row_scorer;
+            }
+            let f: serde_json::Value = serde_json::from_str(&features)?;
+            out.push(crate::temperature::Signal {
+                turn_idx: idx as usize,
+                kind: serde_json::from_value(serde_json::Value::String(kind))?,
+                speaker,
+                start,
+                end,
+                text,
+                checks: serde_json::from_str(&checks)?,
+                voice: serde_json::from_value(f["voice"].clone()).unwrap_or(None),
+                z: serde_json::from_value(f["z"].clone()).unwrap_or_default(),
+                backchannel_rate: f["backchannel_rate"].as_f64(),
+                latency_s: f["latency_s"].as_f64(),
+                temperature,
+                smoothed: f["smoothed"].as_f64(),
+            });
+        }
+        Ok((out, scorer))
     }
 
     pub fn add_answer_checks(&self, session_id: i64, analysis_id: i64, checks: &[AnswerCheck]) -> Result<()> {
@@ -498,12 +590,15 @@ impl Db {
         let rows = stmt.query_map([session_id], analysis_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
             .map(|(id, session_id, created_at, model, prompt_version, analysis, metrics, unverified)| {
+                let (turn_signals, timeline_scorer) = self.turn_signals(id)?;
                 Ok(StoredAnalysis {
                     id, session_id, created_at, model, prompt_version,
                     analysis: serde_json::from_str(&analysis)?,
                     metrics: serde_json::from_str(&metrics)?,
                     unverified_quotes: serde_json::from_str(&unverified)?,
                     answer_checks: self.answer_checks(id)?,
+                    turn_signals,
+                    timeline_scorer,
                 })
             })
             .collect()
@@ -704,6 +799,23 @@ mod tests {
         db.set_run_warnings(run.id, &["Speaker detection found 1 voice".into()])?;
         assert_eq!(db.runs(1)?[0].warnings, ["Speaker detection found 1 voice"]);
         assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    /// A version-4 database gains the timeline table; its analyses load with an empty timeline.
+    #[test]
+    fn version_4_databases_gain_the_timeline() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("coach.db");
+        {
+            let db = Db::open(&path)?;
+            db.create_session(new_session(Mode::Dual))?;
+            db.conn.execute_batch("DROP INDEX turn_signals_by_analysis; DROP TABLE turn_signals; PRAGMA user_version = 4;")?;
+        }
+        let db = Db::open(&path)?;
+        assert_eq!(db.conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?, SCHEMA_VERSION);
+        assert_eq!(db.turn_signals(1)?, (vec![], None));
+        assert!(db.get_session(1).is_ok(), "the session survives");
         Ok(())
     }
 

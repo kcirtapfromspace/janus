@@ -45,10 +45,81 @@ pub struct AnswerInput {
 
 pub const OPENING_WORDS: usize = 40;
 
-impl AnswerInput {
-    pub fn state(&self) -> Value {
+/// Something to score: what Jev sees (a small JSON state its checks refer to in backticks) and
+/// the same content as tagged text for Claude.
+pub trait ScoreInput {
+    fn state(&self) -> Value;
+    fn claude_body(&self) -> String;
+}
+
+impl ScoreInput for AnswerInput {
+    fn state(&self) -> Value {
         let opening: Vec<&str> = self.answer.split_whitespace().take(OPENING_WORDS).collect();
         json!({"question": self.question, "answer": self.answer, "opening": opening.join(" ")})
+    }
+
+    fn claude_body(&self) -> String {
+        format!("<question>\n{}\n</question>\n\n<answer>\n{}\n</answer>", self.question, self.answer)
+    }
+}
+
+/// The pass rule a comparison applies to a check set (docs/eval/*-decision.md).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rule {
+    /// Balanced accuracy floor for yes/no and choice checks.
+    pub min_score: f64,
+    /// Checks with their own floor, e.g. a subjective tone check.
+    pub min_score_overrides: &'static [(&'static str, f64)],
+    pub min_within_one: f64,
+    pub max_behind_best: f64,
+    pub min_stability: f64,
+    /// None when speed doesn't matter for this set.
+    pub max_p95_ms: Option<u64>,
+    /// Jev's calibration limit; None when its probabilities aren't used for routing.
+    pub max_ece: Option<f64>,
+}
+
+impl Rule {
+    pub fn min_score_for(&self, check: &str) -> f64 {
+        self.min_score_overrides.iter().find(|(id, _)| *id == check).map_or(self.min_score, |(_, v)| *v)
+    }
+}
+
+/// Reads a labelled item's input fields into what a check set scores.
+pub type InputFrom = fn(&serde_json::Map<String, Value>) -> Result<Box<dyn ScoreInput>>;
+
+/// A named list of checks, how Claude is instructed for them, how a verdict reads as pass or
+/// fail, and the rule a comparison holds them to.
+pub struct CheckSet {
+    pub id: &'static str,
+    pub checks: Vec<Check>,
+    pub claude_prompt: &'static str,
+    pub classify: fn(&str, &Verdict) -> &'static str,
+    pub rule: Rule,
+    /// Builds an input from a labelled item's fields (for the comparison).
+    pub input_from: InputFrom,
+}
+
+/// The checks each of your answers gets.
+pub fn answer_set() -> CheckSet {
+    CheckSet {
+        id: "answers",
+        checks: builtin_checks(),
+        claude_prompt: CLAUDE_PROMPT,
+        classify,
+        rule: Rule {
+            min_score: 0.85,
+            min_score_overrides: &[],
+            min_within_one: 0.90,
+            max_behind_best: 0.05,
+            min_stability: 0.95,
+            max_p95_ms: Some(1_000),
+            max_ece: Some(0.10),
+        },
+        input_from: |m| {
+            let field = |k: &str| m.get(k).and_then(Value::as_str).map(String::from).with_context(|| format!("item has no {k}"));
+            Ok(Box::new(AnswerInput { question: field("question")?, answer: field("answer")? }))
+        },
     }
 }
 
@@ -77,8 +148,9 @@ pub struct Assessment {
 pub trait Scorer {
     /// The configured name, e.g. `typesafe/jev-latest` or `anthropic/claude-haiku-4-5-20251001`.
     fn name(&self) -> String;
-    /// Score one answer. `rotation` shifts every choice's option order (to measure first-option bias).
-    fn assess(&self, input: &AnswerInput, checks: &[Check], rotation: usize) -> Result<Assessment>;
+    /// Score one input against a set's checks. `rotation` shifts every choice's option order (to
+    /// measure first-option bias).
+    fn assess(&self, input: &dyn ScoreInput, set: &CheckSet, rotation: usize) -> Result<Assessment>;
 }
 
 fn rotated<T: Clone>(items: &[T], by: usize) -> Vec<T> {
@@ -236,11 +308,12 @@ pub fn classify(check_id: &str, v: &Verdict) -> &'static str {
 
 /// Run the built-in checks on every answer, as rows to store with the analysis.
 pub fn check_answers(scorer: &dyn Scorer, answers: &[InterviewAnswer]) -> Result<Vec<AnswerCheck>> {
-    let checks = builtin_checks();
+    let set = answer_set();
+    let checks = &set.checks;
     let mut rows = vec![];
     for a in answers {
-        let assessment = scorer.assess(&a.input, &checks, 0)?;
-        for c in &checks {
+        let assessment = scorer.assess(&a.input, &set, 0)?;
+        for c in checks {
             let Some(v) = assessment.verdicts.get(c.id) else { continue };
             rows.push(AnswerCheck {
                 answer_idx: a.idx as i64,
@@ -251,7 +324,7 @@ pub fn check_answers(scorer: &dyn Scorer, answers: &[InterviewAnswer]) -> Result
                 pick: v.pick.clone(),
                 value: v.value,
                 confidence: v.confidence,
-                verdict: classify(c.id, v).to_string(),
+                verdict: (set.classify)(c.id, v).to_string(),
             });
         }
     }
@@ -270,7 +343,8 @@ impl Scorer for JevScorer<'_> {
         format!("typesafe/{}", self.model)
     }
 
-    fn assess(&self, input: &AnswerInput, checks: &[Check], rotation: usize) -> Result<Assessment> {
+    fn assess(&self, input: &dyn ScoreInput, set: &CheckSet, rotation: usize) -> Result<Assessment> {
+        let checks = &set.checks;
         let questions = checks
             .iter()
             .map(|c| {
@@ -287,7 +361,7 @@ impl Scorer for JevScorer<'_> {
         let req = jev::Request { state: input.state(), model: self.model.clone(), questions };
         let resp = self.client.ask(&req)?;
         let mut verdicts = BTreeMap::new();
-        for c in checks {
+        for c in checks.iter() {
             let answer = resp.answers.get(c.id).with_context(|| format!("Jev didn't answer {}", c.id))?;
             let verdict = match answer {
                 jev::Answer::Noul { p_yes } => Verdict {
@@ -348,9 +422,9 @@ pub fn claude_schema(checks: &[Check], rotation: usize) -> Value {
     json!({"type": "object", "additionalProperties": false, "required": required, "properties": properties})
 }
 
-/// The checks written out for Claude, in the same order and wording Jev gets.
-pub fn claude_message(input: &AnswerInput, checks: &[Check], rotation: usize) -> String {
-    let mut out = format!("<question>\n{}\n</question>\n\n<answer>\n{}\n</answer>\n\n<checks>\n", input.question, input.answer);
+/// The input and its checks written out for Claude, in the same order and wording Jev gets.
+pub fn claude_message(input: &dyn ScoreInput, checks: &[Check], rotation: usize) -> String {
+    let mut out = format!("{}\n\n<checks>\n", input.claude_body());
     for c in checks {
         out.push_str(&format!("\n{}: {}\n", c.id, c.instructions.replace('`', "")));
         match &c.kind {
@@ -376,14 +450,16 @@ impl Scorer for ClaudeScorer<'_> {
         format!("anthropic/{}", self.model)
     }
 
-    fn assess(&self, input: &AnswerInput, checks: &[Check], rotation: usize) -> Result<Assessment> {
+    fn assess(&self, input: &dyn ScoreInput, set: &CheckSet, rotation: usize) -> Result<Assessment> {
+        let checks = &set.checks;
         let schema = claude_schema(checks, rotation);
         let started = Instant::now();
-        let value = llm::structured_value(self.llm, &self.model, CLAUDE_PROMPT, &claude_message(input, checks, rotation),
-                                          &schema, "answer_checks", GenerateOptions { effort: self.effort, max_tokens: 4_000 })?;
+        let value = llm::structured_value(self.llm, &self.model, set.claude_prompt, &claude_message(input, checks, rotation),
+                                          &schema, &format!("{}_checks", set.id),
+                                          GenerateOptions { effort: self.effort, max_tokens: 4_000 })?;
         let latency_ms = started.elapsed().as_millis() as u64;
         let mut verdicts = BTreeMap::new();
-        for c in checks {
+        for c in checks.iter() {
             let v = &value[c.id];
             let verdict = match &c.kind {
                 CheckKind::YesNo { .. } => {
@@ -507,13 +583,13 @@ mod tests {
     fn jev_verdicts_use_rubric_levels_and_rotation_reorders_choices() {
         let fake = FakeJev(RefCell::new(vec![]));
         let scorer = JevScorer { client: &fake, model: "jev-latest".into() };
-        let a = scorer.assess(&input(), &builtin_checks(), 0).unwrap();
+        let a = scorer.assess(&input(), &answer_set(), 0).unwrap();
         assert_eq!(a.scorer, "typesafe/jev-1.13.0");
         assert_eq!(a.verdicts["leads_with_point"].pick, "yes");
         assert!((a.verdicts["leads_with_point"].confidence.unwrap() - 0.6).abs() < 1e-9);
         assert_eq!(a.verdicts["star_missing"].pick, "none", "unrotated: the first option is 'none'");
         assert_eq!((a.verdicts["specificity"].pick.as_str(), a.verdicts["specificity"].value), ("4", 4.2), "levels report as 1..=5");
-        let rotated = scorer.assess(&input(), &builtin_checks(), 1).unwrap();
+        let rotated = scorer.assess(&input(), &answer_set(), 1).unwrap();
         assert_eq!(rotated.verdicts["star_missing"].pick, "situation", "rotated by one, 'situation' is shown first");
         let sent = fake.0.borrow();
         assert!(matches!(&sent[1].questions[2].1, Question::Choice { options, .. } if options[0].0 == "situation"));
@@ -546,7 +622,7 @@ mod tests {
                            "specificity": {"level": 3}, "structure": {"level": 2}});
         let fake = FakeClaude(reply.to_string());
         let scorer = ClaudeScorer { llm: &fake, model: "claude-haiku-4-5-20251001".into(), effort: Effort::Low };
-        let a = scorer.assess(&input(), &builtin_checks(), 0).unwrap();
+        let a = scorer.assess(&input(), &answer_set(), 0).unwrap();
         assert_eq!(a.verdicts["leads_with_point"].pick, "no");
         assert_eq!(a.verdicts["star_missing"].pick, "result");
         assert_eq!(a.verdicts["structure"].value, 2.0);
@@ -554,6 +630,6 @@ mod tests {
                                     "star_missing": {"pick": "everything"}, "ownership": {"pick": "i"},
                                     "specificity": {"level": 3}, "structure": {"level": 2}}).to_string());
         let scorer = ClaudeScorer { llm: &bad, model: "m".into(), effort: Effort::Low };
-        assert!(scorer.assess(&input(), &builtin_checks(), 0).unwrap_err().to_string().contains("unknown option"));
+        assert!(scorer.assess(&input(), &answer_set(), 0).unwrap_err().to_string().contains("unknown option"));
     }
 }

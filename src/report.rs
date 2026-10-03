@@ -8,7 +8,8 @@ use console::style;
 use crate::coverage::{self, RecordingNotes};
 use crate::db::{AnswerCheck, Outcome, StoredAnalysis, StoredNextSteps};
 use crate::metrics::TalkMetrics;
-use crate::models::{Direction, Evidence, Priority, Session, Verdict, fmt_ts};
+use crate::models::{Direction, Evidence, Mode, Priority, Session, Verdict, fmt_ts, parse_ts};
+use crate::temperature::{self, Kind, Signal};
 
 fn dots(score: Option<u8>) -> String {
     match score {
@@ -173,6 +174,8 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
         outln!(" {mark} {}\n    {}", s.signal, quote(&s.evidence));
     }
 
+    print_room(stored, full);
+
     outln!("\n{}", style("By the numbers").bold());
     if notes.incomplete {
         outln!(" {}", style(METRICS_LEFT_OUT).dim());
@@ -247,6 +250,65 @@ pub fn print_report(session: &Session, stored: &StoredAnalysis, outcome: Option<
     }
 }
 
+/// A turn's words, cut to about `max` words.
+fn excerpt(text: &str, max: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() <= max { words.join(" ") } else { format!("{}…", words[..max].join(" ")) }
+}
+
+/// The question each of your answers follows (the last substantive interviewer turn before it).
+fn answers_with_questions(signals: &[Signal]) -> Vec<(&Signal, Option<&Signal>)> {
+    let mut question = None;
+    let mut out = vec![];
+    for s in signals {
+        match s.kind {
+            Kind::Substantive => question = Some(s),
+            Kind::Answer => out.push((s, question)),
+            Kind::Backchannel => {}
+        }
+    }
+    out
+}
+
+fn shift_sentence(shift: &temperature::Shift, signals: &[Signal]) -> String {
+    let at = signals.iter().find(|s| s.turn_idx == shift.after_answer).map_or(0.0, |s| s.start);
+    format!("The room {} most after your answer at {}.", if shift.delta > 0.0 { "warmed" } else { "cooled" }, fmt_ts(at))
+}
+
+pub fn print_room(stored: &StoredAnalysis, full: bool) {
+    let signals = &stored.turn_signals;
+    if !signals.iter().any(|s| s.temperature.is_some()) {
+        return;
+    }
+    let m = temperature::moments(signals);
+    outln!("\n{}", style("How the room felt").bold());
+    let line = |label: &str, s: &Signal| {
+        outln!(" {label} {} {}", style(fmt_ts(s.start)).dim(), style(format!("\"{}\"", excerpt(&s.text, 16))).italic());
+    };
+    match &m.shift {
+        Some(shift) => outln!(" {}", shift_sentence(shift, signals)),
+        None => outln!(" {}", style("No clear shift: the room stayed about the same.").dim()),
+    }
+    for s in m.warmest.iter().take(if full { 3 } else { 1 }) {
+        line(&style("warm").green().to_string(), s);
+    }
+    for s in m.coolest.iter().take(if full { 3 } else { 1 }) {
+        line(&style("cool").red().to_string(), s);
+    }
+    for s in &m.next_steps {
+        line(&style("★").yellow().to_string(), s);
+    }
+    if full {
+        for (answer, question) in answers_with_questions(signals) {
+            let notes = temperature::voice_notes(answer);
+            if !notes.is_empty() {
+                let on = question.map_or(String::new(), |q| format!(" on \"{}\"", excerpt(&q.text, 10)));
+                outln!(" {} you{on}: {}", style(fmt_ts(answer.start)).dim(), notes.join(", "));
+            }
+        }
+    }
+}
+
 // --- HTML -------------------------------------------------------------------------------------
 
 const CSS: &str = r#"
@@ -282,6 +344,17 @@ table.answers { width:100%; border-collapse:collapse; font-size:14px } table.ans
   text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top }
 table.answers th { color:var(--muted); font-weight:600; font-size:12px } .pass { color:var(--good) } .fail { color:var(--bad) }
 .unclear { color:var(--muted) }
+a.ts { text-decoration:none } a.ts:hover { color:var(--accent) }
+svg.room { width:100%; height:auto; display:block; margin:8px 0 4px; overflow:visible }
+svg.room .band { fill:var(--chip) } svg.room a:hover .band { fill:color-mix(in srgb,var(--accent) 16%,transparent) }
+svg.room .zero { stroke:var(--muted); stroke-opacity:.5; stroke-dasharray:3 4 } svg.room .grid { stroke:var(--line) }
+svg.room .line { fill:none; stroke:var(--accent); stroke-width:2; stroke-linejoin:round }
+svg.room circle { stroke:var(--bg); stroke-width:1.5 } svg.room a:hover circle { stroke:var(--fg) }
+svg.room .warm { fill:var(--good) } svg.room .cool { fill:var(--bad) } svg.room .mid { fill:var(--muted) }
+svg.room text { font-size:11px; fill:var(--muted) } svg.room text.mark { font-size:13px; text-anchor:middle; fill:var(--warn) }
+svg.room text.tick { text-anchor:middle } .legend { font-size:13px } .legend i { font-style:normal; font-weight:700 }
+.legend .warm { color:var(--good) } .legend .mid { color:var(--muted) } .legend .cool { color:var(--bad) }
+ul.moments li { margin:0 0 10px } ul.moments .cues { color:var(--muted); font-size:14px }
 .sig-positive::before { content:"+ "; color:var(--good); font-weight:700 } .sig-negative::before { content:"− ";
   color:var(--bad); font-weight:700 } ul.plain { list-style:none; padding:0 } ul.plain li { margin:0 0 14px }
 @media (max-width:600px) { .rubric { grid-template-columns:1fr 90px } .rubric .muted { grid-column:1/-1; margin-bottom:8px } }
@@ -302,8 +375,153 @@ fn esc(s: &str) -> String {
     out
 }
 
+/// A timestamp the app turns into "play from here" (a browser just ignores the link).
+fn seek_html(seconds: f64, label: &str) -> String {
+    format!("<a class='ts' href='#t={seconds:.1}'>{}</a>", esc(label))
+}
+
+fn ts_html(ts: &str) -> String {
+    match parse_ts(ts) {
+        Some(seconds) => seek_html(seconds, ts),
+        None => format!("<span class='ts'>{}</span>", esc(ts)),
+    }
+}
+
 fn q_html(ev: &Evidence) -> String {
-    format!("<blockquote><span class='ts'>{}</span>“{}”</blockquote>", esc(&ev.timestamp), esc(&ev.quote))
+    format!("<blockquote>{}“{}”</blockquote>", ts_html(&ev.timestamp), esc(&ev.quote))
+}
+
+// --- How the room felt ------------------------------------------------------------------------
+
+const SVG_W: f64 = 800.0;
+const SVG_H: f64 = 210.0;
+const PLOT_LEFT: f64 = 40.0;
+const PLOT_RIGHT: f64 = 790.0;
+const PLOT_TOP: f64 = 28.0;
+const PLOT_BOTTOM: f64 = 182.0;
+
+fn temp_class(t: f64) -> &'static str {
+    if t >= temperature::CLEAR {
+        "warm"
+    } else if t <= -temperature::CLEAR {
+        "cool"
+    } else {
+        "mid"
+    }
+}
+
+/// The timeline chart: your answers as shaded bands, each interviewer turn as a dot (warm up, cool
+/// down), the smoothed line, and markers above. Every shape links to its moment. No script.
+fn room_svg(signals: &[Signal], duration: f64) -> String {
+    let duration = duration.max(signals.iter().map(|s| s.end).fold(1.0, f64::max));
+    let x = |t: f64| PLOT_LEFT + (t / duration).clamp(0.0, 1.0) * (PLOT_RIGHT - PLOT_LEFT);
+    let y = |v: f64| PLOT_TOP + (1.0 - v.clamp(-1.0, 1.0)) / 2.0 * (PLOT_BOTTOM - PLOT_TOP);
+    let mut h = format!("<svg class='room' viewBox='0 0 {SVG_W} {SVG_H}' role='img' \
+                         aria-label='How warm or cool each interviewer turn was, over the interview'>");
+    for a in signals.iter().filter(|s| s.kind == Kind::Answer) {
+        let _ = write!(h, "<a href='#t={:.1}'><title>Your answer, {}</title><rect class='band' x='{:.1}' y='{PLOT_TOP}' \
+                           width='{:.1}' height='{:.1}'/></a>",
+                       a.start, fmt_ts(a.start), x(a.start), (x(a.end) - x(a.start)).max(1.0), PLOT_BOTTOM - PLOT_TOP);
+    }
+    let _ = write!(h, "<line class='grid' x1='{PLOT_LEFT}' x2='{PLOT_RIGHT}' y1='{PLOT_TOP}' y2='{PLOT_TOP}'/>\
+                       <line class='grid' x1='{PLOT_LEFT}' x2='{PLOT_RIGHT}' y1='{PLOT_BOTTOM}' y2='{PLOT_BOTTOM}'/>\
+                       <line class='zero' x1='{PLOT_LEFT}' x2='{PLOT_RIGHT}' y1='{0:.1}' y2='{0:.1}'/>\
+                       <text x='0' y='{1:.1}'>warm</text><text x='0' y='{0:.1}'>0</text><text x='0' y='{2:.1}'>cool</text>",
+                   y(0.0) + 4.0, PLOT_TOP + 4.0, PLOT_BOTTOM);
+    let step = [60.0, 120.0, 300.0, 600.0, 900.0, 1800.0, 3600.0].into_iter().find(|s| duration / s <= 8.0).unwrap_or(3600.0);
+    let mut t = 0.0;
+    while t <= duration {
+        let label = if t == 0.0 { "0".to_string() } else { format!("{} min", (t / 60.0).round()) };
+        let _ = write!(h, "<text class='tick' x='{:.1}' y='{:.1}'>{label}</text>", x(t), SVG_H - 6.0);
+        t += step;
+    }
+    let turns: Vec<(&Signal, f64)> = signals.iter().filter_map(|s| Some((s, s.temperature?))).collect();
+    let line: Vec<String> = signals
+        .iter()
+        .filter_map(|s| Some(format!("{:.1},{:.1}", x(s.start), y(s.smoothed?))))
+        .collect();
+    if line.len() > 1 {
+        let _ = write!(h, "<polyline class='line' points='{}'/>", line.join(" "));
+    }
+    for (s, temp) in &turns {
+        let cues = temperature::cues(s);
+        let why = if cues.is_empty() { String::new() } else { format!(" ({})", cues.join(", ")) };
+        let _ = write!(h, "<a href='#t={:.1}'><title>{} {:+.2}{} — “{}”</title><circle class='{}' cx='{:.1}' cy='{:.1}' r='5'/></a>",
+                       s.start, fmt_ts(s.start), temp, esc(&why), esc(&excerpt(&s.text, 24)), temp_class(*temp), x(s.start), y(*temp));
+        let marks: Vec<&str> = temperature::MARKERS.iter().filter(|(id, ..)| temperature::flagged(s, id)).map(|(_, m, _)| *m).collect();
+        if !marks.is_empty() {
+            let _ = write!(h, "<a href='#t={:.1}'><text class='mark' x='{:.1}' y='16'>{}</text></a>", s.start, x(s.start), marks.join(""));
+        }
+    }
+    h.push_str("</svg>");
+    h
+}
+
+fn moment_html(s: &Signal) -> String {
+    let cues = temperature::cues(s);
+    let cues = if cues.is_empty() { String::new() } else { format!("<div class='cues'>{}</div>", esc(&cues.join(" · "))) };
+    format!("<li>{}“{}”{cues}</li>", seek_html(s.start, &fmt_ts(s.start)), esc(&excerpt(&s.text, 40)))
+}
+
+fn room_html(h: &mut String, session: &Session, stored: &StoredAnalysis) {
+    let signals = &stored.turn_signals;
+    if !signals.iter().any(|s| s.temperature.is_some()) {
+        return;
+    }
+    let m = temperature::moments(signals);
+    h.push_str("<h2>How the room felt</h2>");
+    match &m.shift {
+        Some(shift) => {
+            let _ = write!(h, "<p>{}</p>", esc(&shift_sentence(shift, signals)));
+        }
+        None => h.push_str("<p>No clear shift: the room stayed about the same throughout.</p>"),
+    }
+    h.push_str(&room_svg(signals, session.duration_s.unwrap_or(0.0)));
+    h.push_str("<p class='muted legend'><i class='warm'>●</i> warmer <i class='mid'>●</i> neutral <i class='cool'>●</i> cooler \
+                · line: the trend · shaded: your answers");
+    for (id, mark, label) in temperature::MARKERS {
+        if signals.iter().any(|s| temperature::flagged(s, id)) {
+            let _ = write!(h, " · {mark} {label}");
+        }
+    }
+    h.push_str(" · click any point to play it</p>");
+    for (title, list) in [("Warmest moments", &m.warmest), ("Coolest moments", &m.coolest), ("Next steps mentioned", &m.next_steps)] {
+        if !list.is_empty() {
+            let _ = write!(h, "<h3>{title}</h3><ul class='plain moments'>");
+            for s in list.iter() {
+                h.push_str(&moment_html(s));
+            }
+            h.push_str("</ul>");
+        }
+    }
+    let voice: Vec<String> = answers_with_questions(signals)
+        .into_iter()
+        .filter_map(|(answer, question)| {
+            let notes = temperature::voice_notes(answer);
+            (!notes.is_empty()).then(|| {
+                let on = question.map_or(String::new(), |q| format!(" on “{}”", esc(&excerpt(&q.text, 12))));
+                format!("<li>{}You{on}: {}</li>", seek_html(answer.start, &fmt_ts(answer.start)), esc(&notes.join(", ")))
+            })
+        })
+        .collect();
+    if !voice.is_empty() {
+        let _ = write!(h, "<h3>Your voice</h3><ul class='plain moments'>{}</ul>", voice.join(""));
+    }
+    let placed = match &stored.timeline_scorer {
+        Some(scorer) => format!("by its words (checked turn by turn by {}) and by how they sounded compared with the rest of \
+                                 this call", esc(scorer)),
+        None => "only by how they sounded compared with the rest of this call (add a TypeSafe key in Setup to include \
+                 their words)".into(),
+    };
+    let single = if session.mode == Mode::Single {
+        " This recording is one mixed track, so who said what comes from speaker detection: where the transcript mixes \
+         people up, so does this timeline, and the mm-hmms while you talk can't be counted. Record with the app, or \
+         import both tracks, for a reliable read."
+    } else {
+        ""
+    };
+    let _ = write!(h, "<p class='muted'>Each dot is one thing the interviewer said, placed {placed}. It's behaviour, not \
+                       mind-reading: every point is something you can replay.{single} Method {}.</p>", temperature::METHOD);
 }
 
 pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&Outcome>) -> String {
@@ -369,7 +587,7 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
         }
         h.push_str("</tr>");
         for (start, question, checks) in answers_with_checks(&stored.answer_checks) {
-            let _ = write!(h, "<tr><td><span class='ts'>{}</span>{}</td>", esc(&fmt_ts(start)), esc(question));
+            let _ = write!(h, "<tr><td>{}{}</td>", seek_html(start, &fmt_ts(start)), esc(question));
             for (id, _) in ANSWER_CHECKS {
                 match checks.get(id) {
                     Some(c) => { let _ = write!(h, "<td class='{}'>{}</td>", esc(&c.verdict), esc(&check_cell(c))); }
@@ -386,17 +604,19 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
     for s in &a.outlook.signals {
         let _ = write!(h, "<li class='sig-{}'>{}{}</li>", s.direction, esc(&s.signal), q_html(&s.evidence));
     }
-    h.push_str("</ul><h2>Rubric</h2><div class='rubric'>");
+    h.push_str("</ul>");
+    room_html(&mut h, session, stored);
+    h.push_str("<h2>Rubric</h2><div class='rubric'>");
     for (label, s) in a.rubric.items() {
         let _ = write!(h, "<span class='label'>{label}</span><span class='dots'>{}</span><span class='muted'>{}</span>",
                        dots(s.score), esc(&s.rationale));
     }
     h.push_str("</div><h2>Question by question</h2>");
     for q in &a.questions {
-        let _ = write!(h, "<details><summary><span class='ts'>{}</span><span class='dots'>{}</span> {}</summary>\
+        let _ = write!(h, "<details><summary>{}<span class='dots'>{}</span> {}</summary>\
                            <p><span class='label'>You said:</span> {}</p><p><span class='label'>Worked:</span> {}</p>\
                            <p><span class='label'>Missing:</span> {}</p><p><span class='label'>Stronger answer:</span> {}</p></details>",
-                       esc(&q.timestamp), dots(q.score), esc(&q.question), esc(&q.answer_summary),
+                       ts_html(&q.timestamp), dots(q.score), esc(&q.question), esc(&q.answer_summary),
                        esc(&q.what_worked), esc(&q.what_was_missing), esc(&q.stronger_answer));
     }
     h.push_str("<h2>Strengths</h2><ul class='plain'>");
