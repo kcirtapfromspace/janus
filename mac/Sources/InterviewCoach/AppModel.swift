@@ -9,11 +9,10 @@ import Observation
 final class AppModel {
     enum Phase: Equatable {
         case idle
-        case confirmingConsent
         case recording(since: Date)
         case working(String)  // a long `ic` step: transcribing, analysing, importing
 
-        var isBusy: Bool { self != .idle && self != .confirmingConsent }
+        var isBusy: Bool { self != .idle }
         var isRecording: Bool { if case .recording = self { true } else { false } }
     }
 
@@ -58,6 +57,18 @@ final class AppModel {
         updater.onReady = { [unowned self] version in updateReady = version }
         updater.start()
         Task { await refresh() }
+        // The menu is native, so there's no "menu opened" moment to refresh on: keep the interview
+        // list current every 10 s (a quick local read) and setup every minute (it checks Docker,
+        // the proxy and the sign-in).
+        Task { [weak self] in
+            var tick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(10))
+                guard let self else { return }
+                tick += 1
+                await self.refreshQuietly(setupToo: tick % 6 == 0)
+            }
+        }
     }
 
     var selectedSession: SessionSummary? { sessions.first { $0.id == selection } }
@@ -117,17 +128,19 @@ final class AppModel {
         }
     }
 
+    /// A background refresh: never shows an error (the next user action will, if it persists).
+    private func refreshQuietly(setupToo: Bool) async {
+        guard let ic else { return }
+        if let list = try? await ic.decode([SessionSummary].self, ["list", "--json"]), list != sessions {
+            sessions = list
+        }
+        if setupToo, let status = try? await ic.decode(SetupStatus.self, ["setup", "status", "--json"]), status != setup {
+            setup = status
+        }
+    }
+
     // MARK: Recording
 
-    /// Recording needs a "yes, everyone agreed" first — asked inline, not in a modal.
-    func askConsent() {
-        lastError = nil
-        phase = .confirmingConsent
-    }
-
-    func cancelConsent() {
-        phase = .idle
-    }
 
     func startRecording() async {
         guard let ic else { return }

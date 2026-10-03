@@ -8,7 +8,6 @@ import WebKit
 struct MainWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
-    @State private var askingConsent = false
 
     var body: some View {
         @Bindable var model = model
@@ -37,13 +36,7 @@ struct MainWindow: View {
         }
         .task(id: model.selection) { await model.loadDetail() }
         .toolbar { toolbar }
-        .confirmationDialog("Has everyone on the call agreed to be recorded?", isPresented: $askingConsent) {
-            Button("Yes — start recording") { Task { await model.startRecording() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Some places require every participant's consent.")
-        }
-        .task { await model.refresh() }
+        .refreshWhenShown { await model.refresh() }
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -83,7 +76,7 @@ struct MainWindow: View {
             .fixedSize()
             .help("Stop recording")
         default:
-            Button { askingConsent = true } label: {
+            Button { openWindow(id: "record") } label: {
                 Label("Record", systemImage: "record.circle")
                     .foregroundStyle(.red)
             }

@@ -32,7 +32,7 @@ struct SetupView: View {
         }
         .frame(width: 560)
         .frame(minHeight: 420, idealHeight: 640)
-        .task { await model.refresh() }
+        .refreshWhenShown { await model.refresh() }
     }
 
     private var header: some View {

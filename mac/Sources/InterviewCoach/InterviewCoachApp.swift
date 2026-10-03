@@ -13,12 +13,19 @@ struct InterviewCoachApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView()
+            MenuBarMenu()
                 .environment(model)
         } label: {
             MenuBarLabel().environment(model)
         }
-        .menuBarExtraStyle(.window)
+        .menuBarExtraStyle(.menu)
+
+        Window("Record an Interview", id: "record") {
+            RecordWindow()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
 
         Window("Set Up Interview Coach", id: "setup") {
             SetupView()
@@ -57,7 +64,7 @@ struct MenuBarLabel: View {
 extension AppModel.Phase {
     var menuBarSymbol: String {
         switch self {
-        case .idle, .confirmingConsent: "waveform"
+        case .idle: "waveform"
         case .recording: "record.circle.fill"
         case .working: "hourglass"
         }

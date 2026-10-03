@@ -24,7 +24,7 @@ struct ElapsedTime: View {
 struct VerdictBadge: View {
     let session: SessionSummary
 
-    private var label: String {
+    var label: String {
         if let verdict = session.verdictLabel { return verdict }
         switch session.status {
         case "recording": return "Recording"
@@ -89,5 +89,46 @@ struct ProblemRow: View {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
         }
         .textSelection(.enabled)
+    }
+}
+
+/// Runs `action` every time the window holding this view comes to the front, not just the first
+/// time the view appears. The menu-bar panel keeps its view alive between openings, so a plain
+/// `.task` would show whatever was true when it first opened.
+struct RefreshWhenShown: ViewModifier {
+    let action: () async -> Void
+    @State private var window: NSWindow?
+
+    func body(content: Content) -> some View {
+        content
+            .background(WindowReader(window: $window))
+            .task { await action() }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
+                guard let window, note.object as? NSWindow === window else { return }
+                Task { await action() }
+            }
+    }
+}
+
+extension View {
+    func refreshWhenShown(_ action: @escaping () async -> Void) -> some View {
+        modifier(RefreshWhenShown(action: action))
+    }
+}
+
+/// Finds the window a SwiftUI view is in.
+private struct WindowReader: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { window = view.window }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        if view.window !== window {
+            DispatchQueue.main.async { window = view.window }
+        }
     }
 }

@@ -1,159 +1,161 @@
+import AppKit
 import InterviewCoachKit
 import SwiftUI
 
-/// The panel that drops down from the menu-bar icon: record/stop, recent interviews, status.
-struct MenuBarView: View {
+/// The menu under the menu-bar icon, laid out like a native app's status menu: what's happening
+/// now, the main actions with shortcuts, recent interviews, then setup, updates and quit. It's
+/// rebuilt from the current state every time it opens.
+struct MenuBarMenu: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Interview Coach").font(.headline)
+        status
+        Divider()
 
-            if let setup = model.setup, !setup.ready {
-                Button { showSetup() } label: {
-                    Label(setup.remaining == 1 ? "Finish setup (1 thing left)…" : "Finish setup (\(setup.remaining) things left)…",
-                          systemImage: "wrench.and.screwdriver")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.orange)
-            }
-            if let version = model.updateReady, model.phase.isBusy {
-                Label("Version \(version) installs when this finishes", systemImage: "arrow.down.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            controls
-
-            if let error = model.lastError {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .textSelection(.enabled)
-            }
-
-            Divider()
-            recent
-            Divider()
-
-            HStack(spacing: 8) {
-                Button("Open Interview Coach") { showMainWindow() }
-                    .fixedSize()
-                Button("Import…") { model.importRecording() }
-                    .fixedSize()
-                    .disabled(model.phase.isBusy)
-                Spacer(minLength: 0)
-                Menu {
-                    Button("Setup…") { showSetup() }
-                    if model.updater.isAvailable {
-                        Button("Check for Updates…") { model.updater.checkForUpdates() }
-                            .disabled(model.phase.isRecording)
-                    }
-                    Divider()
-                    Button("Quit Interview Coach") { NSApp.terminate(nil) }
-                        .disabled(model.phase.isRecording)
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .menuStyle(.borderlessButton)
-                .menuIndicator(.hidden)
-                .fixedSize()
-                .help(model.phase.isRecording ? "Stop the recording before quitting" : "Setup, updates, and quit")
-            }
-            .controlSize(.small)
+        if case .recording = model.phase {
+            Button { model.stopRecording() } label: { Label("Stop Recording", systemImage: "stop.circle") }
+                .keyboardShortcut(".")
+        } else {
+            Button { show("record") } label: { Label("Record Interview…", systemImage: "record.circle") }
+                .keyboardShortcut("r")
+                .disabled(model.phase.isBusy)
         }
-        .padding(14)
-        .frame(width: 330)
-        .task { await model.refresh() }
+        Button { show("main") } label: { Label("Open Interview Coach", systemImage: "macwindow") }
+            .keyboardShortcut("o")
+        Button { model.importRecording() } label: { Label("Import Recording…", systemImage: "square.and.arrow.down") }
+            .keyboardShortcut("i")
+            .disabled(model.phase.isBusy)
+
+        Divider()
+        Menu("Recent Interviews") {
+            if model.sessions.isEmpty {
+                Text("No interviews yet")
+            }
+            ForEach(model.sessions.prefix(8)) { session in
+                Button(recentTitle(session)) {
+                    model.selection = session.id
+                    show("main")
+                }
+            }
+        }
+
+        Divider()
+        Button(setupTitle) { show("setup") }
+            .keyboardShortcut(",")
+        if model.updater.isAvailable {
+            Button { model.updater.checkForUpdates() } label: {
+                Label(model.updateReady.map { "Update to \($0) Ready" } ?? "Check for Updates…",
+                      systemImage: model.updateReady == nil ? "arrow.triangle.2.circlepath" : "arrow.down.circle")
+            }
+            .disabled(model.phase.isRecording)
+        }
+        Button("About Interview Coach") {
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.orderFrontStandardAboutPanel(nil)
+        }
+
+        Divider()
+        Button("Quit Interview Coach") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
+            .disabled(model.phase.isRecording)
     }
 
-    @ViewBuilder private var controls: some View {
-        @Bindable var model = model
+    /// The first line: a coloured dot and what Interview Coach is doing (not clickable).
+    @ViewBuilder private var status: some View {
+        let (color, text) = statusLine
+        Button {} label: {
+            Label { Text(text) } icon: { Image(nsImage: dot(color)) }
+        }
+        .disabled(true)
+    }
+
+    private var statusLine: (NSColor, String) {
+        if model.captureProblem != nil {
+            return (.systemOrange, "Your mic isn't being recorded")
+        }
         switch model.phase {
-        case .idle:
-            VStack(spacing: 8) {
-                TextField("Title (optional)", text: $model.title)
-                TextField("Company (optional)", text: $model.company)
-                Button { model.askConsent() } label: {
-                    Label("Record interview", systemImage: "record.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.red)
-                .controlSize(.large)
-            }
-            .textFieldStyle(.roundedBorder)
-
-        case .confirmingConsent:
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Has everyone on the call agreed to be recorded?")
-                    .font(.callout.weight(.semibold))
-                Text("Some places require every participant's consent.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("Cancel") { model.cancelConsent() }
-                    Spacer()
-                    Button("Yes — start recording") { Task { await model.startRecording() } }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red)
-                }
-            }
-
         case .recording(let since):
-            HStack {
-                Image(systemName: "record.circle.fill")
-                    .foregroundStyle(.red)
-                    .symbolEffect(.pulse)
-                Text("Recording")
-                ElapsedTime(since: since)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button { model.stopRecording() } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            if let problem = model.captureProblem {
-                ProblemRow(problem: problem)
-            }
-
+            return (.systemRed, "Recording since \(since.formatted(date: .omitted, time: .shortened))")
         case .working(let label):
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(label).font(.callout)
-            }
+            return (.systemBlue, label)
+        default:
+            break
         }
+        if let setup = model.setup, !setup.ready {
+            return (.systemOrange, setup.remaining == 1 ? "Setup: 1 thing left" : "Setup: \(setup.remaining) things left")
+        }
+        if model.lastError != nil {
+            return (.systemRed, "Something went wrong (see the window)")
+        }
+        return (.systemGreen, "Ready to record")
     }
 
-    @ViewBuilder private var recent: some View {
-        Text("Recent").font(.caption).foregroundStyle(.secondary)
-        if model.sessions.isEmpty {
-            Text("No interviews yet.")
-                .font(.callout)
+    private var setupTitle: String {
+        guard let setup = model.setup, !setup.ready else { return "Setup…" }
+        return setup.remaining == 1 ? "Setup… (1 thing left)" : "Setup… (\(setup.remaining) things left)"
+    }
+
+    private func recentTitle(_ s: SessionSummary) -> String {
+        let label = s.verdictLabel ?? VerdictBadge(session: s).label
+        return [s.title, s.company, label].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    private func show(_ window: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: window)
+    }
+
+    /// A coloured status dot. Menu item images are drawn as templates (grey) unless they opt out.
+    private func dot(_ color: NSColor) -> NSImage {
+        let image = NSImage(size: NSSize(width: 10, height: 10), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+}
+
+/// "Record Interview…": an optional title and company, and the consent confirmation, before
+/// recording starts. The same window serves the menu and the main window's Record button.
+struct RecordWindow: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        @Bindable var model = model
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Record an interview").font(.title3.weight(.semibold))
+            Form {
+                TextField("Title", text: $model.title, prompt: Text("Optional, e.g. Hiring manager round"))
+                TextField("Company", text: $model.company, prompt: Text("Optional"))
+            }
+            .formStyle(.columns)
+            Label {
+                Text("Has everyone on the call agreed to be recorded? Some places require every participant's consent.")
+                    .fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: "person.2.wave.2").foregroundStyle(.secondary)
+            }
+            .font(.callout)
+            Text("Records your mic and the call's audio from any app until you choose Stop Recording.")
+                .font(.caption)
                 .foregroundStyle(.secondary)
-        }
-        ForEach(model.sessions.prefix(5)) { session in
-            Button {
-                model.selection = session.id
-                showMainWindow()
-            } label: {
-                SessionRow(session: session)
-                    .contentShape(Rectangle())
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Everyone Agreed — Start Recording") {
+                    dismiss()
+                    Task { await model.startRecording() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(model.phase.isBusy)
             }
-            .buttonStyle(.plain)
         }
-    }
-
-    private func showMainWindow() {
-        openWindow(id: "main")
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func showSetup() {
-        NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "setup")
+        .padding(20)
+        .frame(width: 440)
     }
 }

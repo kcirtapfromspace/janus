@@ -18,7 +18,7 @@ enum Snapshots {
                 model.detail = try? ICClient.decode(SessionDetail.self, from: data)
                 model.selection = model.detail?.session.id
             }
-            await render(MenuBarView().environment(model), size: CGSize(width: 330, height: 0), name: "menu", to: out)
+            await render(RecordWindow().environment(model), size: CGSize(width: 440, height: 0), name: "record", to: out)
             if let detail = model.detail {
                 for width in [540.0, 760, 1000] {
                     for stage in StageStep.allCases {
