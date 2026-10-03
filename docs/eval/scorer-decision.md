@@ -33,7 +33,7 @@ For each check, the winner is the cheapest, fastest arm that meets **all** of th
 | Expected calibration error of its pick probability | Jev only | ≤ 0.10, so its confidence can be trusted for routing |
 | Failed calls | All checks | None |
 
-**If no arm qualifies for a check**, the report shows each arm's reasons, and the check falls back to the most accurate arm. It's then labelled "not fast enough for drills".
+**If no arm qualifies for a check**, the report shows each arm's reasons and names the most accurate arm, which is used as the fallback.
 
 **A cascade is acceptable** if it beats every single arm: use Jev's answer when its pick probability is at or above a threshold, and ask the best Claude arm otherwise. To qualify, its accuracy must be within 0.02 of the best arm, while escalating at most 25% of answers.
 

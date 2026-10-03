@@ -1017,7 +1017,7 @@ fn eval_scorers(settings: &Settings, set: &Path, arm_names: &[String], runs: usi
     for d in &decisions {
         outln!("{:<22} {}", d.check, match (&d.winner, &d.fallback) {
             (Some(w), _) => style(w.clone()).green().to_string(),
-            (None, Some(f)) => style(format!("none qualifies (fallback {f})")).yellow().to_string(),
+            (None, Some(f)) => style(format!("none qualifies (most accurate: {f})")).yellow().to_string(),
             (None, None) => style("none qualifies".to_string()).yellow().to_string(),
         });
     }

@@ -562,7 +562,7 @@ pub fn markdown(stats: &[ArmStats], decisions: &[Decision], cascade_rows: &[(f64
         let why: Vec<String> = d.reasons.iter().filter(|(_, r)| !r.is_empty()).map(|(a, r)| format!("{a}: {}", r.join("; "))).collect();
         let winner = match (&d.winner, &d.fallback) {
             (Some(w), _) => w.clone(),
-            (None, Some(f)) => format!("none ({f} as fallback: not fast enough for drills)"),
+            (None, Some(f)) => format!("none (most accurate: {f})"),
             (None, None) => "none".into(),
         };
         md += &format!("| {} | {} | {} | {} |\n", d.check, winner,
