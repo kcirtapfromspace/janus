@@ -84,9 +84,15 @@ gh release create "v$version" --repo "$feed_repo" --latest \
     --title "Interview Coach $version" --notes-file "$notes" \
     "$evidence/$name" "$evidence/appcast.xml" "$evidence/SHA256SUMS.txt"
 
-# Confirm what installed copies will read.
-served="$(curl -fsSL "$feed")"
+# Confirm what installed copies will read. GitHub's releases/latest redirect is cached briefly, so
+# allow it up to two minutes to move to the new release.
+served=""
+for _ in $(seq 1 12); do
+    served="$(curl -fsSL "$feed" || true)"
+    grep -q "<sparkle:version>$build</sparkle:version>" <<<"$served" && break
+    sleep 10
+done
 grep -q "<sparkle:version>$build</sparkle:version>" <<<"$served" \
-    || { printf '%s\n' 'The public feed does not serve this build yet.' >&2; exit 1; }
+    || { printf '%s\n' 'The public feed still does not serve this build after two minutes.' >&2; exit 1; }
 printf 'Published Interview Coach %s.\n  Download: https://github.com/%s/releases/tag/v%s\n  Feed: %s\n' \
     "$version" "$feed_repo" "$version" "$feed"
