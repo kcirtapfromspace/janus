@@ -1,5 +1,5 @@
-//! OpenAI via LiteLLM's OpenAI pass-through (`/openai_passthrough/v1/responses`), in OpenAI's
-//! native Responses API: strict JSON-schema output and reasoning effort.
+//! OpenAI native Responses API, with optional external LiteLLM pass-through.
+//! Strict JSON-schema output and reasoning effort.
 
 use std::io::BufRead;
 
@@ -17,10 +17,11 @@ pub fn request_body(req: &StructuredRequest) -> Value {
     json!({
         "model": req.model,
         "instructions": req.system,
-        "input": req.user,
+        // ChatGPT plan inference requires message-list input. This form also works with API keys.
+        "input": [{"role": "user", "content": req.user}],
         "max_output_tokens": req.max_tokens,
         "stream": true,
-        // Interview transcripts are personal: don't keep them on OpenAI's servers.
+        // Disable persisted response objects; this is not a zero-retention guarantee.
         "store": false,
         "reasoning": {"effort": req.effort.as_str()},
         "text": {"format": {"type": "json_schema", "name": req.schema_name, "strict": true, "schema": req.schema}},
@@ -286,6 +287,7 @@ mod tests {
             assert!(!headers.contains("litellm") && !headers.contains("never-use-this-proxy-key"));
             assert_eq!(body["store"], false);
             assert_eq!(body["stream"], true);
+            assert_eq!(body["input"], json!([{"role": "user", "content": "example transcript"}]));
         }
         assert!(
             requests[0]
@@ -401,7 +403,7 @@ mod tests {
             max_tokens: 64000,
         });
         assert_eq!(body["instructions"], "sys");
-        assert_eq!(body["input"], "hi");
+        assert_eq!(body["input"], json!([{"role": "user", "content": "hi"}]));
         assert_eq!(body["store"], false);
         assert_eq!(body["reasoning"]["effort"], "high");
         let format = &body["text"]["format"];

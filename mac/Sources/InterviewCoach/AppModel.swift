@@ -199,7 +199,11 @@ final class AppModel {
 
 
     func startRecording() async {
-        guard let ic else { return }
+        guard let ic, !phase.isBusy else { return }
+        // Reserve the recording action before the first await so clicks from another window
+        // cannot create a second session while the CLI prepares the first.
+        phase = .working("Preparing recording…")
+        lastError = nil
         do {
             var args = ["recording", "begin"]
             if !title.isEmpty { args += ["--title", title] }
@@ -256,7 +260,7 @@ final class AppModel {
         recordingID = nil
         if exitCode == 2 {
             phase = .idle
-            lastError = "Couldn't start recording — see recorder.log in the session folder."
+            lastError = "Recording could not start or save its result. Any captured audio remains in the session folder; see recorder.log for details."
             return
         }
         // Exit code 1 (e.g. permission denied) still leaves recorder.json; ic reports the problem.

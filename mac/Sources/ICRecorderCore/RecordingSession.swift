@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import Darwin
 
 public struct RecorderOptions {
     public var sessionDir: URL
@@ -83,32 +84,49 @@ public final class RecordingSession {
     private var errors: [Issue] = []
     private var ownsPidFile = false
     private var finished = false
+    private var startRequested = false
+    private var directoryLock: Int32 = -1
+    private let requestMicrophoneAccess: (@escaping (Bool) -> Void) -> Void
 
     private var pidURL: URL { options.sessionDir.appendingPathComponent("recorder.pid") }
     private var reportURL: URL { options.sessionDir.appendingPathComponent("recorder.json") }
     private var systemURL: URL { options.sessionDir.appendingPathComponent("system.wav") }
     private var micURL: URL { options.sessionDir.appendingPathComponent("mic.wav") }
 
-    public init(options: RecorderOptions, log: Logger, onExit: @escaping (Int32) -> Void) {
+    public convenience init(options: RecorderOptions, log: Logger, onExit: @escaping (Int32) -> Void) {
+        self.init(options: options, log: log, onExit: onExit, requestMicrophoneAccess: MicCapture.requestAccess)
+    }
+
+    init(options: RecorderOptions, log: Logger, onExit: @escaping (Int32) -> Void,
+         requestMicrophoneAccess: @escaping (@escaping (Bool) -> Void) -> Void) {
         self.options = options
         self.log = log
         self.onExit = onExit
+        self.requestMicrophoneAccess = requestMicrophoneAccess
         tap = SystemAudioTap(log: log)
         mic = MicCapture(log: log)
     }
 
+    deinit {
+        if directoryLock >= 0 { close(directoryLock) }
+    }
+
     public func start() {
+        guard !startRequested, !finished else { return }
+        startRequested = true
         log.info("ICRecorder \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev") pid \(getpid()): session \(options.sessionDir.path), duration \(options.duration.map { "\($0)s" } ?? "until stopped"), aec \(options.aec)")
         do {
             try claimDirectory()
         } catch {
             // Don't write recorder.json: the directory may belong to another recording.
             log.error("\(error)")
+            releaseDirectory()
+            finished = true
             onExit(2)
             return
         }
-        MicCapture.requestAccess { [weak self] granted in
-            guard let self else { return }
+        requestMicrophoneAccess { [weak self] granted in
+            guard let self, !self.finished else { return }
             guard granted else {
                 self.fail("mic_permission_denied", "Microphone permission denied. Allow \(appName) in System Settings > Privacy & Security > Microphone.")
                 return
@@ -135,6 +153,16 @@ public final class RecordingSession {
 
     private func claimDirectory() throws {
         let fm = FileManager.default
+        // Keep the lock file's inode stable. Removing it would let another process lock a new
+        // inode while the previous recorder still owns the old one.
+        let lockURL = options.sessionDir.appendingPathComponent(".recorder.lock")
+        directoryLock = open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard directoryLock >= 0 else {
+            throw CaptureError.message("could not lock the recording folder")
+        }
+        guard flock(directoryLock, LOCK_EX | LOCK_NB) == 0 else {
+            throw CaptureError.message("another recorder already owns this recording folder")
+        }
         if let pidText = try? String(contentsOf: pidURL, encoding: .utf8),
            let pid = pid_t(pidText.trimmingCharacters(in: .whitespacesAndNewlines)),
            kill(pid, 0) == 0 {
@@ -148,6 +176,7 @@ public final class RecordingSession {
     }
 
     private func beginCapture() {
+        guard !finished else { return }
         do {
             let systemRate = try tap.prepare()
             let systemWriter = try TrackWriter(url: systemURL, sampleRate: systemRate)
@@ -188,6 +217,12 @@ public final class RecordingSession {
     private func finish(reason: String, exitCode: Int32) {
         guard !finished else { return }
         finished = true
+        guard ownsPidFile else {
+            releaseDirectory()
+            onExit(exitCode)
+            return
+        }
+        var finalExitCode = exitCode
         log.info("stopping (\(reason))")
         tap.stop()
         mic.stop()
@@ -210,6 +245,7 @@ public final class RecordingSession {
             errors.append(Issue(code: "\(name)_write_error", message: stats.writeError!))
         }
 
+        if !errors.isEmpty { finalExitCode = max(finalExitCode, 1) }
         let timestamp = ISO8601DateFormatter()
         let report = RecorderReport(
             sessionDir: options.sessionDir.path,
@@ -229,15 +265,27 @@ public final class RecordingSession {
             try encoder.encode(report).write(to: reportURL, options: .atomic)
         } catch {
             log.error("could not write recorder.json: \(error)")
+            finalExitCode = 2
         }
-        if ownsPidFile { try? FileManager.default.removeItem(at: pidURL) }
+        releaseDirectory()
 
         for (name, stats) in tracks.sorted(by: { $0.key < $1.key }) {
             log.info("\(name): \(String(format: "%.1f", stats.durationSeconds)) s, rms \(String(format: "%.5f", stats.rms)), peak \(String(format: "%.4f", stats.peak)), gap fills \(stats.gapFillEvents)")
         }
         for issue in warnings { log.warn("\(issue.code): \(issue.message)") }
-        log.info("done (exit \(exitCode))")
-        onExit(exitCode)
+        log.info("done (exit \(finalExitCode))")
+        onExit(finalExitCode)
+    }
+
+    private func releaseDirectory() {
+        if ownsPidFile {
+            try? FileManager.default.removeItem(at: pidURL)
+            ownsPidFile = false
+        }
+        if directoryLock >= 0 {
+            close(directoryLock)
+            directoryLock = -1
+        }
     }
 
     /// Flags a track that stopped well before the other one, or that dropped out for a while.

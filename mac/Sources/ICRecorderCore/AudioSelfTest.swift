@@ -58,11 +58,12 @@ public final class AudioSelfTest {
         session.start()
         // Give both tracks a second to start, then make a sound only the call-audio track can hear.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.session != nil else { return }
             let sound = Process()
             sound.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
             sound.arguments = ["/System/Library/Sounds/Glass.aiff"]
             try? sound.run()
-            self?.sound = sound
+            self.sound = sound
         }
     }
 
@@ -88,6 +89,8 @@ public final class AudioSelfTest {
     }
 
     private func cleanUp() {
+        if sound?.isRunning == true { sound?.terminate() }
+        sound = nil
         session = nil
         try? FileManager.default.removeItem(at: directory)
     }

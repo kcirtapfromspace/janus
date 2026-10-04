@@ -7,7 +7,7 @@ private beta before expanding platforms or building a broad application tracker.
 | Order | Deliverable | Acceptance criteria | Status |
 | --- | --- | --- | --- |
 | 1 | ChatGPT sign-in and simple setup | Native provider requests; browser sign-in; verified identity; safe refresh/logout; explicit billing; account-specific model picker; first report without Docker | Implemented in source; live sign-in and provider inference validation pending |
-| 2 | Recording reliability | Test permissions, Bluetooth/device changes, long calls, sleep, crashes and interrupted processing on supported Macs; no silent loss of the user's recording | Existing capture protections; real-device matrix pending |
+| 2 | Recording reliability | Test permissions, Bluetooth/device changes, long calls, sleep, crashes and interrupted processing on supported Macs; no silent loss of the user's recording | Startup cancellation and exclusive session ownership tested; real-device matrix pending |
 | 3 | Trustworthy coaching | Consented real-interview dataset; independent human labels; held-out validation across formats and speakers; quote grounding; uncertainty shown for inferred signals | Scripted evaluations exist; real-interview validation pending |
 | 4 | Practice and preparation | Select one improvement, record a practice answer, compare it with the original, and prepare for the next round using role context | Written plans exist; interactive loop pending |
 | 5 | Brand and commercial launch | Cleared name/domain; consistent identity; tested offer/pricing; billing/licensing; website/demo; support; privacy and terms | Decisions and implementation pending |
@@ -70,3 +70,18 @@ scripted evaluation scores as proof of real-world accuracy.
 
 Defer cloud sync, Windows and calendar integrations until the core improvement loop earns
 repeat use. A local product does not need a hosted backend merely to be launchable.
+
+## Recording reliability: first implementation
+
+- Stopping during the microphone permission prompt permanently closes that recording attempt;
+  a late permission response cannot start capture.
+- An OS file lock protects each recording folder before PID and audio checks. Duplicate starts
+  cannot overwrite existing audio, and stopping releases ownership.
+- The app reserves Record before asynchronous preparation, preventing duplicate sessions from
+  rapid clicks across windows.
+- Recorder errors return failure status; failure to save the final report leaves captured files
+  in place and surfaces an error instead of automatically starting analysis.
+- Six regression tests cover cancellation, repeated start, ownership/release, preserving audio,
+  report-save failure, and denied permission.
+- Still required: live microphone/system-audio checks, Bluetooth changes, sleep/resume, disk-full
+  capture, and long-call soak testing on supported Macs.
