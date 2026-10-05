@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Interview Coach.app for Apple silicon: the SwiftUI app, the bundled `ic` CLI
+# Builds Janus.app for Apple silicon: the SwiftUI app, the bundled `ic` CLI
 # (Contents/MacOS/ic) with the tools it runs (a minimal LGPL ffmpeg and Anthropic's `ant`, next to
 # it, so users install nothing from Homebrew), ICRecorder.app for `ic record` (Contents/Helpers),
 # and Sparkle for in-place updates (Contents/Frameworks). Signs it inside out with the hardened
@@ -8,7 +8,7 @@
 #   IC_RELEASE_VERSION    1.2.3 or 1.2.3-preview.N (default: the version in Cargo.toml)
 #   IC_CODESIGN_IDENTITY  signing identity (default: this Mac's first "Apple Development" identity,
 #                         which keeps privacy permissions across rebuilds)
-#   IC_APP_OUTPUT         the .app to produce (default: mac/build/Interview Coach.app)
+#   IC_APP_OUTPUT         the .app to produce (default: mac/build/Janus.app)
 #   IC_UPDATE_FEED        Sparkle feed URL, or "none". Developer ID (release) builds default to the
 #                         public feed; other builds get none and never replace themselves.
 #
@@ -49,7 +49,7 @@ if [[ -z "$feed" && "$release_build" = true ]]; then
     feed="https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest/download/appcast.xml"
 fi
 
-app="${IC_APP_OUTPUT:-$project_root/mac/build/Interview Coach.app}"
+app="${IC_APP_OUTPUT:-$project_root/mac/build/Janus.app}"
 [[ "$app" = /* ]] || app="$project_root/$app"
 if [[ "$app" != *.app || -L "$app" ]]; then
     printf 'App output must be a non-symlink .app path: %s\n' "$app" >&2
@@ -66,7 +66,7 @@ bin="$(cd mac && swift build -c release --show-bin-path)"
 mkdir -p "$(dirname "$app")"
 stage="$(mktemp -d "$(dirname "$app")/.ic-build.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
-bundle="$stage/Interview Coach.app"
+bundle="$stage/Janus.app"
 recorder="$bundle/Contents/Helpers/ICRecorder.app"
 sparkle="$bundle/Contents/Frameworks/Sparkle.framework"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources" "$bundle/Contents/Frameworks" "$recorder/Contents/MacOS"
@@ -78,6 +78,9 @@ cp "$ffmpeg_dir/LICENSE.txt" "$bundle/Contents/Resources/ffmpeg-LICENSE.txt"
 cp "$ffmpeg_dir/BUILD.txt" "$bundle/Contents/Resources/ffmpeg-BUILD.txt"
 cp "$ant_dir/LICENSE.txt" "$bundle/Contents/Resources/ant-LICENSE.txt"
 cp "$bin/ICRecorder" "$recorder/Contents/MacOS/ICRecorder"
+cp mac/Resources/Brand/AppIcon.icns "$bundle/Contents/Resources/AppIcon.icns"
+cp mac/Resources/Brand/report.css "$bundle/Contents/Resources/report.css"
+cp mac/Resources/Brand/report-brand.html "$bundle/Contents/Resources/report-brand.html"
 cp mac/Resources/InterviewCoach-Info.plist "$bundle/Contents/Info.plist"
 cp mac/Resources/ICRecorder-Info.plist "$recorder/Contents/Info.plist"
 

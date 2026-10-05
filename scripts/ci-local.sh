@@ -7,7 +7,7 @@ cd "$project_root"
 
 dirty=""
 git diff --quiet HEAD -- || dirty=" (+ uncommitted changes)"
-printf 'Interview Coach local validation\n%s, commit %s%s, %s\n\n' \
+printf 'Janus local validation\n%s, commit %s%s, %s\n\n' \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$(git rev-parse --short HEAD)" "$dirty" "$(sw_vers -productVersion | sed 's/^/macOS /')"
 
 printf '%s\n' '== cargo clippy (warnings are errors)'

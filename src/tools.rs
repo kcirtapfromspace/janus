@@ -1,6 +1,6 @@
 //! The external programs ic runs, found the same way everywhere.
 //!
-//! Interview Coach.app carries its own ffmpeg and `ant` next to `ic` (Contents/MacOS), so a new Mac
+//! Janus.app carries its own ffmpeg and `ant` next to `ic` (Contents/MacOS), so a new Mac
 //! needs nothing from Homebrew. Lookup order: an `IC_*` override, the copy bundled next to `ic`,
 //! PATH, then the places each tool's installer uses. The app launches `ic` with a minimal PATH, so
 //! those last locations are what make a Docker Desktop or OrbStack install visible.
@@ -76,7 +76,7 @@ impl Tool {
         self.find().map(|f| f.path).ok_or_else(|| {
             anyhow!(match self {
                 Tool::Ffmpeg | Tool::Ant => format!(
-                    "Interview Coach.app should include {0}, but it's missing — reinstall the app. (Running ic \
+                    "Janus.app should include {0}, but it's missing — reinstall the app. (Running ic \
                      on its own? Set {1} to a {0} binary.)",
                     self.name(),
                     self.env_var()

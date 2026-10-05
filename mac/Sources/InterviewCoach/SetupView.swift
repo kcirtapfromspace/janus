@@ -3,7 +3,7 @@ import ICRecorderCore
 import InterviewCoachKit
 import SwiftUI
 
-/// Everything a Mac needs before Interview Coach works, one row each, with the button that fixes
+/// Everything a Mac needs before Janus works, one row each, with the button that fixes
 /// it. Opens by itself at launch while anything required is missing; also under "Setup…".
 struct SetupView: View {
     @Environment(AppModel.self) private var model
@@ -14,6 +14,8 @@ struct SetupView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    appearanceChoice
+                    Divider()
                     if let setup = model.setup {
                         modelChoice(setup)
                         Divider()
@@ -36,6 +38,25 @@ struct SetupView: View {
         .frame(minHeight: 420, idealHeight: 640)
         .refreshWhenShown { await model.refresh() }
         .task { await model.loadModelOffers() }
+    }
+
+    private var appearanceChoice: some View {
+        @Bindable var model = model
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Appearance").font(.body.weight(.medium))
+                Spacer()
+                Picker("Appearance", selection: $model.appearance) {
+                    ForEach(AppAppearance.allCases) { appearance in
+                        Text(appearance.title).tag(appearance)
+                    }
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 230)
+            }
+            Text("System follows your Mac’s light or dark appearance.")
+                .font(.callout).foregroundStyle(.secondary)
+        }
+        .padding(18)
     }
 
     private func modelChoice(_ setup: SetupStatus) -> some View {
@@ -65,16 +86,18 @@ struct SetupView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center) {
+        HStack(alignment: .center, spacing: 14) {
+            BrandMark(size: 42)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Set up Interview Coach").font(.title2.weight(.semibold))
+                Text("Settings").font(CoachTheme.editorial(25)).foregroundStyle(CoachTheme.ink)
                 Text(summary).font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
             Button("Check again") { Task { await model.refresh() } }
                 .disabled(model.setupActivity != nil)
         }
-        .padding(18)
+        .padding(22)
+        .background(CoachTheme.canvas)
     }
 
     private var summary: String {
@@ -272,7 +295,7 @@ private struct MicrophoneRow: View {
         switch model.micPermission {
         case .authorized: "Your side of each interview is recorded from it."
         case .notDetermined: "Needed to record your side of the interview."
-        default: "Turn on Interview Coach under Privacy & Security › Microphone, then come back."
+        default: "Turn on Janus under Privacy & Security › Microphone, then come back."
         }
     }
 }
@@ -321,7 +344,7 @@ private struct RecordingTestRow: View {
                 result.micOK ? "Your mic: recorded." : "Your mic: nothing was recorded. Check the input device in System Settings › Sound.",
                 result.systemOK
                     ? "Call audio: recorded."
-                    : "Call audio: the test sound wasn't captured. Allow Interview Coach under Privacy & Security › "
+                    : "Call audio: the test sound wasn't captured. Allow Janus under Privacy & Security › "
                         + "Screen & System Audio Recording (System Audio Recording Only), and check your volume isn't muted.",
             ]
             if !(result.micOK && result.systemOK) { lines += result.issues.prefix(2) }

@@ -1,4 +1,4 @@
-//! `ic` — the Interview Coach command line.
+//! `ic` — the Janus command line.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -35,7 +35,7 @@ use interview_coach::{errln, out, outln};
 #[derive(Parser)]
 #[command(
     name = "ic",
-    about = "Interview Coach — record, transcribe, and get coached on your interviews.",
+    about = "Janus — record, transcribe, and get coached on your interviews.",
     version
 )]
 struct Cli {
@@ -75,7 +75,7 @@ enum Cmd {
         #[arg(long)]
         no_analyze: bool,
     },
-    /// Used by the Interview Coach app, which records in-process and hands the result to ic.
+    /// Used by the Janus app, which records in-process and hands the result to ic.
     #[command(hide = true)]
     Recording {
         #[command(subcommand)]
@@ -111,7 +111,7 @@ enum Cmd {
     Transcribe { id: i64 },
     /// List your interview sessions.
     List {
-        /// Machine-readable output (used by the Interview Coach app).
+        /// Machine-readable output (used by the Janus app).
         #[arg(long)]
         json: bool,
         /// Include archived and deleted interviews (and, with --json, every role).
@@ -213,7 +213,7 @@ enum Cmd {
     },
     /// Show what to do next: next-round prep and a practice plan.
     Next { id: i64 },
-    /// Everything about one session as JSON (used by the Interview Coach app).
+    /// Everything about one session as JSON (used by the Janus app).
     #[command(hide = true)]
     Session { id: i64 },
     /// Swap 'You' and 'Interviewer' labels if speaker detection guessed wrong.
@@ -272,14 +272,14 @@ enum Cmd {
         #[arg(long)]
         switch: bool,
     },
-    /// Sign out of the selected provider (only Interview Coach's session).
+    /// Sign out of the selected provider (only Janus's session).
     Logout {
         #[arg(long, default_value = "anthropic")]
         provider: Provider,
         #[arg(long, hide = true)]
         events: bool,
     },
-    /// What this Mac still needs before Interview Coach works, and the steps that set it up.
+    /// What this Mac still needs before Janus works, and the steps that set it up.
     Setup {
         #[command(subcommand)]
         action: SetupCmd,
@@ -875,7 +875,7 @@ fn record(
     finish_recording(&mut db, settings, session.id, analyze, true)
 }
 
-/// `stop_recorder`: signal ICRecorder.app to stop first (the CLI flow). The Interview Coach app
+/// `stop_recorder`: signal ICRecorder.app to stop first (the CLI flow). The Janus app
 /// stops its own in-process recording before calling `ic recording finish`.
 fn finish_recording(
     db: &mut Db,
@@ -1553,7 +1553,7 @@ fn chatgpt_logout(settings: &Settings, events: bool) -> Result<()> {
             let message = if confirmed {
                 "Signed out of ChatGPT. Local session tokens have been cleared."
             } else {
-                "Signed out locally. Remote revocation could not be confirmed; disconnect Interview Coach in ChatGPT Settings."
+                "Signed out locally. Remote revocation could not be confirmed; disconnect this app in ChatGPT Settings."
             };
             if events {
                 out.stage(message);

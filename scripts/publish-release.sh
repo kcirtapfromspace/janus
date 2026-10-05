@@ -39,7 +39,8 @@ git merge-base --is-ancestor "$commit" origin/main || { printf '%s\n' 'Push this
 check="$(mktemp -d "$evidence/.check.XXXXXX")"
 trap 'rm -rf "$check"' EXIT
 /usr/bin/ditto -x -k "$archive" "$check"
-app="$check/Interview Coach.app"
+app="$check/Janus.app"
+[[ -d "$app" ]] || app="$check/Interview Coach.app"
 xcrun stapler validate -q "$app"
 spctl --assess --type execute "$app"
 codesign --verify --deep --strict "$app"
@@ -60,7 +61,7 @@ cp "$archive" "$evidence/$name"
 (cd "$evidence" && shasum -a 256 "$name" > SHA256SUMS.txt)
 cat > "$evidence/BUILD-MANIFEST.json" <<JSON
 {
-  "app": "Interview Coach",
+  "app": "Janus",
   "version": "$version",
   "build": $build,
   "commit": "$commit",
@@ -77,11 +78,11 @@ JSON
 prerelease=()
 [[ "$version" != *-preview.* ]] || prerelease=(--prerelease)
 gh release create "v$version" --repo "$source_repo" --target "$commit" "${prerelease[@]}" \
-    --title "Interview Coach $version" --notes-file "$notes" \
+    --title "Janus $version" --notes-file "$notes" \
     "$evidence/$name" "$evidence/SHA256SUMS.txt" "$evidence/BUILD-MANIFEST.json" \
     "$evidence/local-validation.txt" "$evidence/notarization-validation.txt"
 gh release create "v$version" --repo "$feed_repo" --latest \
-    --title "Interview Coach $version" --notes-file "$notes" \
+    --title "Janus $version" --notes-file "$notes" \
     "$evidence/$name" "$evidence/appcast.xml" "$evidence/SHA256SUMS.txt"
 
 # Confirm what installed copies will read. GitHub's releases/latest redirect is cached briefly, so
@@ -94,5 +95,5 @@ for _ in $(seq 1 12); do
 done
 grep -q "<sparkle:version>$build</sparkle:version>" <<<"$served" \
     || { printf '%s\n' 'The public feed still does not serve this build after two minutes.' >&2; exit 1; }
-printf 'Published Interview Coach %s.\n  Download: https://github.com/%s/releases/tag/v%s\n  Feed: %s\n' \
+printf 'Published Janus %s.\n  Download: https://github.com/%s/releases/tag/v%s\n  Feed: %s\n' \
     "$version" "$feed_repo" "$version" "$feed"

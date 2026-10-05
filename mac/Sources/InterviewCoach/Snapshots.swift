@@ -13,17 +13,18 @@ enum Snapshots {
         Task { @MainActor in
             let out = URL(fileURLWithPath: folder, isDirectory: true)
             try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
-            await model.refresh()
+            model.appearance = .light
+            if env["IC_SNAPSHOT_LIBRARY"] == nil && env["IC_SNAPSHOT_DETAIL"] == nil { await model.refresh() }
             if let path = env["IC_SNAPSHOT_DETAIL"], let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
                 model.detail = try? ICClient.decode(SessionDetail.self, from: data)
                 model.selection = model.detail?.session.id
             }
-            await render(RecordWindow().environment(model), size: CGSize(width: 440, height: 0), name: "record", to: out)
+            await render(RecordWindow().environment(model), size: CGSize(width: 490, height: 0), name: "record", to: out)
             if let detail = model.detail {
                 for width in [540.0, 760, 1000] {
                     for stage in StageStep.allCases {
                         model.selectedStage = stage
-                        await render(PipelineView(detail: detail).environment(model), size: CGSize(width: width, height: 360),
+                        await render(PipelineView(detail: detail).environment(model), size: CGSize(width: width, height: 500),
                                      name: "pipeline-\(Int(width))-\(stage.rawValue)", to: out)
                     }
                 }
@@ -43,15 +44,35 @@ enum Snapshots {
                     await render(EditDetailsSheet(session: one).environment(model), size: CGSize(width: 440, height: 0), name: "edit", to: out)
                 }
             }
-            for width in [820.0, 1100] {
-                await renderWindow(MainWindow().environment(model), size: CGSize(width: width, height: 560),
+            await render(DashboardView().environment(model), size: CGSize(width: 936, height: 800), name: "dashboard", to: out)
+            await render(DashboardView().environment(model), size: CGSize(width: 550, height: 1000), name: "dashboard-narrow", to: out)
+            model.appearance = .dark
+            await render(DashboardView().environment(model), size: CGSize(width: 936, height: 800), name: "dashboard-dark", to: out)
+            model.appearance = .light
+            let savedLibrary = model.library
+            model.library = Library()
+            await render(DashboardView().environment(model), size: CGSize(width: 750, height: 600), name: "dashboard-empty", to: out)
+            model.library = savedLibrary
+            for width in [820.0, 1200] {
+                await renderWindow(MainWindow().environment(model), size: CGSize(width: width, height: 820),
                                    name: "window-\(Int(width))", to: out)
+            }
+            if let detail = model.detail {
+                model.selection = detail.session.id
+                model.selectedStage = .next
+                await renderWindow(MainWindow().environment(model), size: CGSize(width: 1200, height: 820), name: "window-prepare", to: out)
+                model.selectedStage = .transcript
+                await renderWindow(MainWindow().environment(model), size: CGSize(width: 820, height: 700), name: "window-transcript-narrow", to: out)
+                model.selectedStage = .report
+                await renderWindow(MainWindow().environment(model), size: CGSize(width: 1200, height: 820),
+                                   name: "window-review", to: out, appearanceChanges: model)
+                model.appearance = .light
             }
             // The toolbar in its busier states.
             let states: [(String, AppModel.Phase, String?)] = [
                 ("working", .working("Importing 0002-interview-2026-10-02-10-01 system.wav…"), nil),
                 ("recording", .recording(since: Date().addingTimeInterval(-754)), nil),
-                ("error", .idle, "Couldn't reach the AI proxy: connection refused. Is Docker running? Open Setup to start it."),
+                ("error", .idle, "The coaching provider could not be reached. Your recording is saved. Try the review again when your connection returns."),
             ]
             for (name, phase, error) in states {
                 model.phase = phase
@@ -62,6 +83,8 @@ enum Snapshots {
             model.phase = .idle
             model.lastError = nil
             await render(SetupView().environment(model), size: CGSize(width: 560, height: 700), name: "setup", to: out)
+            model.appearance = .dark
+            await render(SetupView().environment(model), size: CGSize(width: 560, height: 700), name: "setup-dark", to: out)
             exit(0)
         }
     }
@@ -81,18 +104,28 @@ enum Snapshots {
     }
 
     /// A whole window, title bar and toolbar included.
-    private static func renderWindow<V: View>(_ view: V, size: CGSize, name: String, to folder: URL) async {
+    private static func renderWindow<V: View>(_ view: V, size: CGSize, name: String, to folder: URL,
+                                             appearanceChanges model: AppModel? = nil) async {
         let host = NSHostingView(rootView: view)
         host.sceneBridgingOptions = [.toolbars, .title]
         let window = NSWindow(contentRect: NSRect(origin: CGPoint(x: -10_000, y: -10_000), size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
-        window.title = "Interview Coach"
+        window.title = "Janus"
         window.toolbarStyle = .unified
         window.contentView = host
         window.orderFrontRegardless()
         try? await Task.sleep(for: .milliseconds(800))
         save(window.contentView?.superview ?? host, name: name, to: folder)
+        // Change the real preference while the same window and report remain open.
+        if let model {
+            for appearance in [AppAppearance.dark, .light, .system] {
+                model.appearance = appearance
+                precondition(NSApp.appearance?.name == (appearance == .system ? nil : appearance == .dark ? .darkAqua : .aqua))
+                try? await Task.sleep(for: .milliseconds(500))
+                save(window.contentView?.superview ?? host, name: "\(name)-\(appearance.rawValue)", to: folder)
+            }
+        }
         window.orderOut(nil)
     }
 

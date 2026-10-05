@@ -39,8 +39,33 @@ struct LibrarySidebar: View {
                 }
             }
         }
+        .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(CoachTheme.canvas)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 20) {
+                BrandLockup()
+                Button { model.listSelection = [] } label: {
+                    HStack(spacing: 10) {
+                        Text("Notebook").font(.system(size: 12, weight: .medium))
+                        Spacer()
+                    }
+                    .foregroundStyle(model.listSelection.isEmpty ? CoachTheme.accent : CoachTheme.muted)
+                    .padding(.horizontal, 12).padding(.vertical, 10)
+                    .overlay(alignment: .leading) {
+                        if model.listSelection.isEmpty { Rectangle().fill(CoachTheme.accent).frame(width: 2, height: 18) }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                Text("Interviews").font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(CoachTheme.muted).padding(.leading, 4)
+            }
+            .padding(.horizontal, 16).padding(.top, 20).padding(.bottom, 8)
+            .background(CoachTheme.canvas)
+        }
         .contextMenu(forSelectionType: Int.self) { ids in sessionMenu(Array(ids)) }
-        .searchable(text: $model.filter.query, placement: .sidebar, prompt: "Search, including transcripts")
+        .searchable(text: $model.filter.query, placement: .sidebar, prompt: "Search interviews")
         .task(id: model.filter.query) {
             try? await Task.sleep(for: .milliseconds(300))
             await model.searchTranscripts(model.filter.query)
@@ -145,7 +170,7 @@ struct CompanyHeader: View {
 
     var body: some View {
         HStack {
-            Text(company.name)
+            Text(company.name).foregroundStyle(CoachTheme.muted)
             Spacer()
             Text("\(company.count)").foregroundStyle(.tertiary).monospacedDigit()
         }
@@ -158,7 +183,7 @@ struct RoleHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "briefcase").foregroundStyle(.secondary)
-            Text(group.role.title).fontWeight(.medium).lineLimit(1)
+            Text(group.role.title).font(.system(size: 12, weight: .medium)).foregroundStyle(CoachTheme.ink).lineLimit(1)
             Spacer(minLength: 4)
             StatusChip(status: group.role.status, label: group.role.statusLabel)
         }
@@ -172,19 +197,16 @@ struct StatusChip: View {
 
     private var color: Color {
         switch status {
-        case "offer", "accepted": .green
-        case "rejected": .red
+        case "offer", "accepted": CoachTheme.accent
+        case "rejected": CoachTheme.alert
         case "withdrawn": .secondary
-        default: .blue
+        default: CoachTheme.accent
         }
     }
 
     var body: some View {
         Text(label)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 1)
-            .background(color.opacity(0.15), in: Capsule())
+            .font(.system(size: 10))
             .foregroundStyle(color)
     }
 }
@@ -231,7 +253,7 @@ struct FilterBar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(CoachTheme.canvas)
     }
 }
 

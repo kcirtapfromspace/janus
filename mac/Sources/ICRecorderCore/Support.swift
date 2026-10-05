@@ -63,5 +63,5 @@ public final class Logger {
     }
 }
 
-/// The running app's name ("ICRecorder" or "Interview Coach"), for permission messages.
+/// The running app's name ("ICRecorder" or "Janus"), for permission messages.
 public let appName: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "ICRecorder"

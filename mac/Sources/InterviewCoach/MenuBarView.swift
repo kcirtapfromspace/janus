@@ -21,7 +21,7 @@ struct MenuBarMenu: View {
                 .keyboardShortcut("r")
                 .disabled(model.phase.isBusy)
         }
-        Button { show("main") } label: { Label("Open Interview Coach", systemImage: "macwindow") }
+        Button { show("main") } label: { Label("Open Janus", systemImage: "macwindow") }
             .keyboardShortcut("o")
         Button { model.importRecording() } label: { Label("Import Recording…", systemImage: "square.and.arrow.down") }
             .keyboardShortcut("i")
@@ -43,6 +43,7 @@ struct MenuBarMenu: View {
         Divider()
         Button(setupTitle) { show("setup") }
             .keyboardShortcut(",")
+        AppearanceMenu()
         if model.updater.isAvailable {
             Button { model.updater.checkForUpdates() } label: {
                 Label(model.updateReady.map { "Update to \($0) Ready" } ?? "Check for Updates…",
@@ -50,18 +51,18 @@ struct MenuBarMenu: View {
             }
             .disabled(model.phase.isRecording)
         }
-        Button("About Interview Coach") {
+        Button("About Janus") {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.orderFrontStandardAboutPanel(nil)
         }
 
         Divider()
-        Button("Quit Interview Coach") { NSApp.terminate(nil) }
+        Button("Quit Janus") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
             .disabled(model.phase.isRecording)
     }
 
-    /// The first line: a coloured dot and what Interview Coach is doing (not clickable).
+    /// The first line: a coloured dot and what Janus is doing (not clickable).
     @ViewBuilder private var status: some View {
         let (color, text) = statusLine
         Button {} label: {
@@ -92,8 +93,8 @@ struct MenuBarMenu: View {
     }
 
     private var setupTitle: String {
-        guard let setup = model.setup, !setup.ready else { return "Setup…" }
-        return setup.remaining == 1 ? "Setup… (1 thing left)" : "Setup… (\(setup.remaining) things left)"
+        guard let setup = model.setup, !setup.ready else { return "Settings…" }
+        return setup.remaining == 1 ? "Settings… (1 setup step left)" : "Settings… (\(setup.remaining) setup steps left)"
     }
 
     private func recentTitle(_ s: SessionSummary) -> String {
@@ -118,44 +119,69 @@ struct MenuBarMenu: View {
     }
 }
 
-/// "Record Interview…": an optional title and company, and the consent confirmation, before
-/// recording starts. The same window serves the menu and the main window's Record button.
+/// Capture starts only after the user explicitly confirms consent.
 struct RecordWindow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openWindow) private var openWindow
+    @State private var consent = false
 
     var body: some View {
         @Bindable var model = model
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Record an interview").font(.title3.weight(.semibold))
-            Form {
-                TextField("Title", text: $model.title, prompt: Text("Optional, e.g. Hiring manager round"))
-                TextField("Company", text: $model.company, prompt: Text("Optional"))
+        VStack(alignment: .leading, spacing: 22) {
+            HStack(spacing: 14) {
+                BrandMark(size: 44)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Record an interview")
+                        .font(CoachTheme.editorial(25)).foregroundStyle(CoachTheme.ink)
+                    Text("Microphone and call audio, saved together.").font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                }
             }
-            .formStyle(.columns)
-            Label {
-                Text("Has everyone on the call agreed to be recorded? Some places require every participant's consent.")
-                    .fixedSize(horizontal: false, vertical: true)
-            } icon: {
-                Image(systemName: "person.2.wave.2").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 14) {
+                field("Interview title", text: $model.title, prompt: "e.g. Hiring manager conversation")
+                field("Company", text: $model.company, prompt: "Optional")
             }
-            .font(.callout)
-            Text("Records your mic and the call's audio from any app until you choose Stop Recording.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack {
+            HStack(spacing: 14) {
+                Label("Your microphone", systemImage: "mic")
+                Label("Call audio", systemImage: "waveform")
                 Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Everyone Agreed — Start Recording") {
+                Button("Check audio") { openWindow(id: "setup") }.buttonStyle(.link)
+            }
+            .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Everyone on this call agreed to be recorded", isOn: $consent)
+                    .toggleStyle(.checkbox).font(.system(size: 12, weight: .medium))
+                Text("Ask before you start. Some places require every participant’s consent.")
+                    .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                Text("Audio stays on your Mac. Transcript text goes to your chosen coaching provider, and excerpts go to TypeSafe for evaluation.")
+                    .font(.system(size: 10)).foregroundStyle(CoachTheme.muted).lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.vertical, 16).frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .top) { CoachRule() }
+            .overlay(alignment: .bottom) { CoachRule() }
+            HStack {
+                Text("Stop anytime from the menu bar.").font(.system(size: 10)).foregroundStyle(CoachTheme.muted)
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button {
                     dismiss()
                     Task { await model.startRecording() }
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(model.phase.isBusy)
+                } label: { Label("Start recording", systemImage: "record.circle") }
+                .buttonStyle(CoachPrimaryButtonStyle())
+                .keyboardShortcut(.defaultAction).disabled(!consent || model.phase.isBusy)
             }
         }
-        .padding(20)
-        .frame(width: 440)
+        .padding(28).frame(width: 490)
+        .background(CoachTheme.canvas).tint(CoachTheme.accent)
+        .onAppear { consent = false }
+    }
+
+    private func field(_ title: String, text: Binding<String>, prompt: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(CoachTheme.ink)
+            TextField(title, text: text, prompt: Text(prompt))
+                .labelsHidden().textFieldStyle(.roundedBorder).controlSize(.large)
+        }
     }
 }

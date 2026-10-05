@@ -25,8 +25,8 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Interview Coach records the other side of your interview calls (Zoom, Meet, Teams, and others) so it can transcribe them. Audio stays on this Mac.</string>
+	<string>Janus records the other side of your interview calls (Zoom, Meet, Teams, and others) so it can transcribe them. Audio stays on this Mac.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Interview Coach records your side of interview calls so it can transcribe them and coach your answers. Audio stays on this Mac.</string>
+	<string>Janus records your side of interview calls so it can transcribe them and coach your answers. Audio stays on this Mac.</string>
 </dict>
 </plist>

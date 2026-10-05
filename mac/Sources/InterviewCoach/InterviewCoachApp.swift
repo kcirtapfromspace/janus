@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Interview Coach: record from the menu bar during any call, review reports in the window.
+/// Janus: record from the menu bar during any call, review reports in the window.
 @main
 struct InterviewCoachApp: App {
     @State private var model: AppModel
@@ -15,30 +15,35 @@ struct InterviewCoachApp: App {
         MenuBarExtra {
             MenuBarMenu()
                 .environment(model)
+                .tint(CoachTheme.accent)
         } label: {
             MenuBarLabel().environment(model)
+                .tint(CoachTheme.accent)
         }
         .menuBarExtraStyle(.menu)
 
         Window("Record an Interview", id: "record") {
             RecordWindow()
                 .environment(model)
+                .tint(CoachTheme.accent)
         }
         .windowResizability(.contentSize)
         .defaultPosition(.center)
 
-        Window("Set Up Interview Coach", id: "setup") {
+        Window("Janus Settings", id: "setup") {
             SetupView()
                 .environment(model)
+                .tint(CoachTheme.accent)
         }
         .windowResizability(.contentSize)
 
-        Window("Interview Coach", id: "main") {
+        Window("Janus", id: "main") {
             MainWindow()
                 .environment(model)
+                .tint(CoachTheme.accent)
                 .frame(minWidth: 820, minHeight: 520)
         }
-        .defaultSize(width: 1100, height: 740)
+        .defaultSize(width: 1200, height: 820)
     }
 }
 
@@ -49,7 +54,17 @@ struct MenuBarLabel: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Image(systemName: model.captureProblem == nil ? model.phase.menuBarSymbol : "exclamationmark.triangle.fill")
+        Group {
+            if model.captureProblem != nil {
+                Image(systemName: "exclamationmark.triangle.fill")
+            } else if model.phase == .idle {
+                Image(nsImage: JanusMark.menuBarImage)
+            } else {
+                Image(systemName: model.phase.menuBarSymbol)
+            }
+        }
+            .accessibilityLabel("Janus")
+            .help("Janus")
             .onChange(of: model.setup) { _, setup in
                 guard !model.setupPromptShown, let setup else { return }
                 model.setupPromptShown = true

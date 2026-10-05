@@ -29,27 +29,27 @@ struct VerdictBadge: View {
         switch session.status {
         case "recording": return "Recording"
         case "failed": return "Failed"
-        case "transcribed": return "Not analysed"
+        case "transcribed": return "Transcript ready"
         default: return session.status.capitalized
         }
     }
 
     private var color: Color {
         switch session.verdict ?? session.status {
-        case "strong", "leaning_positive": .green
-        case "mixed": .orange
-        case "leaning_negative", "weak", "failed", "recording": .red
+        case "strong", "leaning_positive": CoachTheme.accent
+        case "mixed": CoachTheme.caution
+        case "leaning_negative", "weak", "failed", "recording": CoachTheme.alert
         default: .secondary
         }
     }
 
     var body: some View {
-        Text(label)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .foregroundStyle(color)
-            .background(color.opacity(0.15), in: Capsule())
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 4, height: 4).accessibilityHidden(true)
+            Text(label).font(.system(size: 10))
+        }
+        .foregroundStyle(color)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -59,10 +59,10 @@ struct SessionRow: View {
     var inRole = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text(session.title)
-                    .fontWeight(.medium)
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(CoachTheme.ink)
                     .lineLimit(1)
                 Spacer(minLength: 6)
                 VerdictBadge(session: session)
@@ -78,7 +78,7 @@ struct SessionRow: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 6)
     }
 }
 
@@ -106,9 +106,13 @@ struct RefreshWhenShown: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background(WindowReader(window: $window))
-            .task { await action() }
+            .task {
+                guard ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil else { return }
+                await action()
+            }
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { note in
-                guard let window, note.object as? NSWindow === window else { return }
+                guard ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil,
+                      let window, note.object as? NSWindow === window else { return }
                 Task { await action() }
             }
     }

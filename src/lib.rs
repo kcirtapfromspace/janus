@@ -1,4 +1,4 @@
-//! Interview Coach: record, transcribe, and get coached on your job interviews — locally.
+//! Janus: record, transcribe, and get coached on your job interviews — locally.
 
 /// Like `println!`, but a closed stdout (the app that started ic quit, or `| head`) doesn't end
 /// ic mid-step: the output is dropped and the work still finishes and lands in the database.

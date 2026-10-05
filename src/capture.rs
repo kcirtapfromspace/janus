@@ -14,12 +14,13 @@ pub fn app_path() -> PathBuf {
     if let Some(p) = std::env::var_os("IC_RECORDER_APP").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    // `ic` inside Interview Coach.app (maybe reached through a symlink on PATH) is
+    // `ic` inside Janus.app (maybe reached through a symlink on PATH) is
     // Contents/MacOS/ic, with the recorder in Contents/Helpers. A dev build uses the source tree's.
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| Some(e.parent()?.to_path_buf()));
-    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("mac/build/Interview Coach.app/Contents/Helpers/ICRecorder.app");
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("mac/build/Janus.app/Contents/Helpers/ICRecorder.app");
+    let legacy = Path::new(env!("CARGO_MANIFEST_DIR")).join("mac/build/Interview Coach.app/Contents/Helpers/ICRecorder.app");
     let candidates = exe_dir.map(|d| vec![d.join("../Helpers/ICRecorder.app"), d.join("ICRecorder.app")]).unwrap_or_default();
-    candidates.into_iter().find(|p| p.exists()).unwrap_or(dev)
+    candidates.into_iter().find(|p| p.exists()).unwrap_or_else(|| if dev.exists() || !legacy.exists() { dev } else { legacy })
 }
 
 fn pid(dir: &Path) -> Option<i32> {
@@ -79,7 +80,7 @@ fn process_name(pid: i32) -> Option<String> {
 }
 
 /// Stop the CLI recorder (ICRecorder.app) recording into `dir`. Never signals any other process:
-/// the Interview Coach app records in-process, so its sessions are stopped from the app.
+/// the Janus app records in-process, so its sessions are stopped from the app.
 pub fn stop(dir: &Path) -> Result<()> {
     let Some(p) = pid(dir).filter(|&p| alive(p)) else { return Ok(()) };
     let name = process_name(p).unwrap_or_default();
@@ -131,7 +132,7 @@ pub fn report_warnings(report: &Value) -> Vec<String> {
         // which also covers recordings made before the recorder checked for it.
         .filter(|w| !w["code"].as_str().is_some_and(|c| c.ends_with("_stopped") || c.ends_with("_gaps")))
         .map(|w| match w["code"].as_str() {
-            Some("system_silent") => "The interviewer track is silent. Allow the recording app (Interview Coach or ICRecorder) under System Settings > Privacy & \
+            Some("system_silent") => "The interviewer track is silent. Allow the recording app (Janus or ICRecorder) under System Settings > Privacy & \
                 Security > Screen & System Audio Recording > System Audio Recording Only."
                 .to_string(),
             Some("mic_silent") => "Your mic track is silent. Check the input device in System Settings > Sound, and \

@@ -1,4 +1,4 @@
-//! What a Mac needs before Interview Coach works, as checks the app shows in its Setup window
+//! What a Mac needs before Janus works, as checks the app shows in its Setup window
 //! (`ic setup status --json`), and the steps that fix them (`ic setup run <step> --events`).
 //!
 //! `status` is pure logic over a `Probe`, so every state a new Mac can be in is unit-tested
@@ -156,7 +156,7 @@ pub fn status(p: &dyn Probe) -> SetupStatus {
             id: "app",
             status: Status::Action,
             required: true,
-            title: "Reinstall Interview Coach".into(),
+            title: "Reinstall Janus".into(),
             detail: format!("Parts of the app are missing ({}). Download it again and replace the copy in Applications.",
                             missing.join(", ")),
             action: action("Download", ActionKind::OpenUrl {
@@ -177,7 +177,7 @@ pub fn status(p: &dyn Probe) -> SetupStatus {
                 status: Status::Action,
                 required: true,
                 title: "Install Docker Desktop".into(),
-                detail: "Interview Coach runs its AI proxy in Docker. Install Docker Desktop (free for personal use), \
+                detail: "Janus runs its AI proxy in Docker. Install Docker Desktop (free for personal use), \
                          open it once and accept its terms, then come back here."
                     .into(),
                 action: action("Get Docker Desktop", ActionKind::OpenUrl {
@@ -190,7 +190,7 @@ pub fn status(p: &dyn Probe) -> SetupStatus {
                 status: Status::Action,
                 required: true,
                 title: "Start Docker".into(),
-                detail: "Docker is installed but not running. Interview Coach starts it when it needs it; to have it \
+                detail: "Docker is installed but not running. Janus starts it when it needs it; to have it \
                          ready, turn on \u{201c}Start Docker Desktop when you sign in\u{201d} in Docker's settings."
                     .into(),
                 action: action("Start Docker", ActionKind::Run { step: Step::Docker }),

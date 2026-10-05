@@ -47,7 +47,7 @@ struct StageHeader<Actions: View>: View {
 
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.title3.weight(.semibold)).fixedSize()
+            Text(title).font(.system(size: 18, weight: .medium)).fixedSize()
             if !meta.isEmpty {
                 Text(meta).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -119,6 +119,7 @@ struct QuoteView: View {
                 if let t = seconds(fromTimestamp: evidence.timestamp) { model.player.play(from: t) }
             }
             .buttonStyle(.link)
+            .foregroundStyle(CoachTheme.accent)
             .font(.caption.monospacedDigit())
             .help("Play from here")
             Text("“\(evidence.quote)”").italic().textSelection(.enabled)
@@ -218,11 +219,12 @@ struct TranscriptStageView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
                         Button(turn.timestamp) { model.player.play(from: turn.start) }
                             .buttonStyle(.link)
+                            .foregroundStyle(CoachTheme.accent)
                             .font(.caption.monospacedDigit())
                             .help("Play from here")
                         Text(turn.speakerLabel)
                             .fontWeight(.semibold)
-                            .foregroundStyle(turn.isYou ? Color.blue : Color.purple)
+                            .foregroundStyle(turn.isYou ? CoachTheme.accent : CoachTheme.muted)
                             .frame(width: 92, alignment: .leading)
                         Text(turn.text).textSelection(.enabled)
                     }
@@ -246,7 +248,7 @@ struct ReportStageView: View {
         let shown = detail.reports.first { $0.analysisId == chosen } ?? detail.reports.first { $0.isCurrent }
             ?? detail.reports.first
         VStack(spacing: 0) {
-            StageHeader(stage: stage, title: "After-action report") {
+            StageHeader(stage: stage, title: "Your review") {
                 if detail.reports.count > 1 {
                     // Oldest first, numbered like the report's history (v1, v2, …).
                     let versions = Array(detail.reports.sorted { $0.analysisId < $1.analysisId }.enumerated())
@@ -347,13 +349,14 @@ struct NextStepsStageView: View {
     var body: some View {
         let stage = detail.stage(.next)
         VStack(spacing: 0) {
-            StageHeader(stage: stage, title: "What to do next") {
+            StageHeader(stage: stage, title: "Prepare for the next round") {
                 RerunMenu(step: .next, stage: stage, defaultModel: detail.stage(.report)?.model)
             }
             if let next = detail.nextSteps {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        Text(next.plan.headline).font(.title3)
+                        Text(next.plan.headline).font(CoachTheme.editorial(17)).foregroundStyle(CoachTheme.ink)
+                            .lineSpacing(5).frame(maxWidth: 640, alignment: .leading)
                         Text("Next-round prep").font(.headline)
                         ForEach(next.plan.nextRoundPrep) { PrepCard(item: $0) }
                         Text("Practice plan").font(.headline)
@@ -395,10 +398,9 @@ struct PrepCard: View {
             }
         }
         .textSelection(.enabled)
-        .padding(14)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.secondary.opacity(0.2)))
+        .overlay(alignment: .bottom) { CoachRule() }
     }
 }
 
@@ -415,8 +417,7 @@ struct PracticeRow: View {
                     Text(item.skill).fontWeight(.semibold)
                     Text("\(item.minutes) min").font(.caption).foregroundStyle(.secondary)
                     Text(item.priority).font(.caption2.weight(.semibold))
-                        .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(priorityColor.opacity(0.15), in: Capsule())
+
                         .foregroundStyle(priorityColor)
                 }
                 Text(item.drill).strikethrough(done)
@@ -430,8 +431,8 @@ struct PracticeRow: View {
 
     private var priorityColor: Color {
         switch item.priority {
-        case "high": .red
-        case "medium": .orange
+        case "high": CoachTheme.alert
+        case "medium": CoachTheme.caution
         default: .secondary
         }
     }

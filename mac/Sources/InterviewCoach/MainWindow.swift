@@ -13,7 +13,7 @@ struct MainWindow: View {
         @Bindable var model = model
         NavigationSplitView {
             LibrarySidebar()
-                .navigationSplitViewColumnWidth(min: 240, ideal: 290, max: 400)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 264, max: 360)
         } detail: {
             Group {
                 if model.listSelection.count > 1 {
@@ -24,40 +24,64 @@ struct MainWindow: View {
                         PipelineView(detail: detail)
                     }
                 } else if model.selection != nil {
-                    ProgressView()
+                    if let error = model.detailError {
+                        ContentUnavailableView {
+                            Label("Couldn’t open this interview", systemImage: "doc.text")
+                        } description: {
+                            Text(error)
+                        } actions: {
+                            Button("Try again") {
+                                model.lastError = nil
+                                Task { await model.loadDetail() }
+                            }
+                        }
+                    } else {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                            Text("Opening interview…").font(.callout).foregroundStyle(CoachTheme.muted)
+                        }
+                    }
                 } else {
-                    ContentUnavailableView("Select an interview", systemImage: "doc.text.magnifyingglass")
+                    DashboardView()
                 }
             }
+            .background(CoachTheme.canvas)
             .safeAreaInset(edge: .top, spacing: 0) { StatusBanner() }
         }
         .task(id: model.selection) { await model.loadDetail() }
+        .tint(CoachTheme.accent)
         .toolbar { toolbar }
         .refreshWhenShown { await model.refresh() }
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            recordControl
+            if model.selection != nil || model.listSelection.count > 1 {
+                Button { model.listSelection = [] } label: {
+                    Label("Notebook", systemImage: "arrow.left")
+                }
+                .help("Back to notebook")
+            } else {
+                Text("Notebook").font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(CoachTheme.muted)
+            }
         }
         ToolbarItemGroup(placement: .primaryAction) {
-            let selected = model.selectedSession
-            let busy = model.phase.isBusy
             Button("Import", systemImage: "square.and.arrow.down") { model.importRecording() }
-                .help("Import a recording (audio or video)")
-                .disabled(busy)
-            Menu("Outcome", systemImage: "flag") {
-                ForEach(outcomeChoices, id: \.value) { choice in
-                    Button(choice.label) { if let s = selected { model.setOutcome(s.id, choice.value) } }
+                .help("Import an audio or video recording")
+                .disabled(model.phase.isBusy)
+            recordControl
+            Menu {
+                if let selected = model.selectedSession {
+                    Button("Show interview in Finder", systemImage: "folder") { model.revealInFinder(selected) }
+                    Divider()
                 }
+                AppearanceMenu()
+                Button("Settings & audio check", systemImage: "slider.horizontal.3") { openWindow(id: "setup") }
+            } label: {
+                Image(systemName: "ellipsis.circle")
             }
-            .help("Record how the interview actually turned out")
-            .disabled(selected == nil || busy)
-            Button("Show in Finder", systemImage: "folder") { if let s = selected { model.revealInFinder(s) } }
-                .help("Show this interview's folder in Finder")
-                .disabled(selected == nil)
-            Button("Setup", systemImage: "gearshape") { openWindow(id: "setup") }
-                .help("Set up Interview Coach: browser sign-in, coaching model, speech models and recording test")
+            .help("Janus settings and files")
         }
     }
 
@@ -74,8 +98,8 @@ struct MainWindow: View {
             .help("Stop recording")
         default:
             Button { openWindow(id: "record") } label: {
-                Label("Record", systemImage: "record.circle")
-                    .foregroundStyle(.red)
+                Label("Record interview", systemImage: "record.circle")
+                    .foregroundStyle(CoachTheme.accent)
             }
             .labelStyle(.titleAndIcon)
             .fixedSize()
@@ -135,6 +159,7 @@ struct StatusBanner: View {
 /// Shows report.html, reloading when ic rewrites it (e.g. after setting an outcome). Its timestamp
 /// links (`#t=754.0`) hand their moment to `onSeek`; web links open in the browser.
 struct ReportView: NSViewRepresentable {
+    @Environment(\.colorScheme) private var colorScheme
     let path: String
     let onSeek: (Double) -> Void
     /// A link to another version of the report (its analysis id).
@@ -144,10 +169,20 @@ struct ReportView: NSViewRepresentable {
         var loaded: (path: String, modified: Date?)?
         var onSeek: (Double) -> Void
         var onOpenReport: (Int) -> Void
+        var theme = "light"
 
         init(onSeek: @escaping (Double) -> Void, onOpenReport: @escaping (Int) -> Void) {
             self.onSeek = onSeek
             self.onOpenReport = onOpenReport
+        }
+
+        func applyTheme(to webView: WKWebView) {
+            webView.evaluateJavaScript("document.documentElement.dataset.theme = '\(theme)';", completionHandler: nil)
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // Use the latest mode even if it changed while this report was loading.
+            applyTheme(to: webView)
         }
 
         /// WebKit asks here about same-page `#t=` clicks too (HTML and SVG links alike), so the report
@@ -176,7 +211,38 @@ struct ReportView: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek, onOpenReport: onOpenReport) }
 
     func makeNSView(context: Context) -> WKWebView {
-        let view = WKWebView()
+        let configuration = WKWebViewConfiguration()
+        let theme = colorScheme == .dark ? "dark" : "light"
+        context.coordinator.theme = theme
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: "document.documentElement.dataset.theme = '\(theme)';",
+            injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        // Apply the current identity to saved reports too, without rewriting their content.
+        if let url = Bundle.main.url(forResource: "report", withExtension: "css"),
+           let css = try? String(contentsOf: url, encoding: .utf8),
+           let brandURL = Bundle.main.url(forResource: "report-brand", withExtension: "html"),
+           let brand = try? String(contentsOf: brandURL, encoding: .utf8),
+           let data = try? JSONSerialization.data(withJSONObject: [css, brand]),
+           let literal = String(data: data, encoding: .utf8) {
+            let source = """
+            (() => {
+                const style = document.createElement('style');
+                style.textContent = \(literal)[0];
+                document.head.appendChild(style);
+                const main = document.querySelector('main');
+                if (main) {
+                    const stamp = document.createElement('template');
+                    stamp.innerHTML = \(literal)[1];
+                    const current = main.querySelector('#janus-brand');
+                    if (current) current.replaceWith(stamp.content.cloneNode(true));
+                    else main.prepend(stamp.content.cloneNode(true));
+                }
+            })();
+            """
+            configuration.userContentController.addUserScript(
+                WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
+        let view = WKWebView(frame: .zero, configuration: configuration)
         view.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
         view.navigationDelegate = context.coordinator
         return view
@@ -185,6 +251,12 @@ struct ReportView: NSViewRepresentable {
     func updateNSView(_ view: WKWebView, context: Context) {
         context.coordinator.onSeek = onSeek
         context.coordinator.onOpenReport = onOpenReport
+        let theme = colorScheme == .dark ? "dark" : "light"
+        view.appearance = NSAppearance(named: colorScheme == .dark ? .darkAqua : .aqua)
+        if context.coordinator.theme != theme {
+            context.coordinator.theme = theme
+            context.coordinator.applyTheme(to: view)
+        }
         let url = URL(fileURLWithPath: path)
         let modified = (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date
         guard context.coordinator.loaded?.path != path || context.coordinator.loaded?.modified != modified else { return }

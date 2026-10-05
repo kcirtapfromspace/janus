@@ -7,6 +7,16 @@ import Observation
 /// App state shared by the menu-bar panel and the main window.
 @MainActor @Observable
 final class AppModel {
+    var appearance: AppAppearance = .system {
+        didSet {
+            // Fixture renders can switch modes without changing the user's preference.
+            if ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil {
+                UserDefaults.standard.set(appearance.rawValue, forKey: AppAppearance.defaultsKey)
+            }
+            appearance.apply()
+        }
+    }
+
     enum Phase: Equatable {
         case idle
         case recording(since: Date)
@@ -61,6 +71,7 @@ final class AppModel {
     var updateReady: String?
     /// The selected session's whole pipeline, and which stage the window shows.
     var detail: SessionDetail?
+    var detailError: String?
     var selectedStage: StageStep = .report
     let player = AudioPlayer()
     /// While recording: a track that has stopped receiving audio (e.g. a call app took the mic).
@@ -76,8 +87,12 @@ final class AppModel {
     @ObservationIgnored private var runningSelfTest: AudioSelfTest?
 
     init() {
+        appearance = AppAppearance(rawValue: UserDefaults.standard.string(forKey: AppAppearance.defaultsKey) ?? "") ?? .system
+        appearance.apply()
         updater.isIdle = { [unowned self] in phase == .idle }
         updater.onReady = { [unowned self] version in updateReady = version }
+        // Snapshot rendering uses fixtures only: no polling, retention cleanup, or updater.
+        guard ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil else { return }
         updater.start()
         Task {
             await refresh()
@@ -102,20 +117,26 @@ final class AppModel {
 
     /// Load the selected session's stages, transcript, reports, and next steps.
     func loadDetail() async {
+        guard ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil else { return }
+        detailError = nil
         guard let ic, let id = selection else {
             detail = nil
+            player.load(nil)
             return
         }
         do {
             let loaded = try await ic.decode(SessionDetail.self, ["session", "\(id)"])
             guard selection == id else { return }  // the selection moved on while loading
             if detail?.session.id != id {
-                // A different interview: start on its furthest stage that has something to show.
-                selectedStage = loaded.stages.last { $0.hasResult }?.step ?? .recording
+                // Open coaching first when available; otherwise show the latest evidence.
+                selectedStage = loaded.stage(.report)?.hasResult == true ? .report
+                    : loaded.stages.last { $0.hasResult }?.step ?? .recording
             }
             detail = loaded
             player.load(loaded.audio.listenPath)
         } catch {
+            guard selection == id else { return }
+            detailError = error.localizedDescription
             lastError = error.localizedDescription
         }
     }
@@ -276,7 +297,7 @@ final class AppModel {
         panel.allowedContentTypes = [.audio, .movie, .audiovisualContent]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        runIC(["import", url.path], label: "Importing \(url.lastPathComponent)…")
+        runIC(["import", url.path], label: "Importing \(url.lastPathComponent)…", selectNew: true)
     }
 
     func analyze(_ id: Int) {
@@ -499,10 +520,11 @@ final class AppModel {
         filter.searchHits = Set(hits.map(\.sessionId))
     }
 
-    private func runIC(_ args: [String], label: String, select id: Int? = nil) {
+    private func runIC(_ args: [String], label: String, select id: Int? = nil, selectNew: Bool = false) {
         guard let ic else { return }
         lastError = nil
         phase = .working(label)
+        let previousIDs = Set(library.sessions.map(\.id))
         // While ic works, keep the pipeline view live: stage status and progress come from the database.
         let poll = Task { [weak self] in
             while !Task.isCancelled {
@@ -520,6 +542,9 @@ final class AppModel {
             poll.cancel()
             await refresh()
             if let id { selection = id }
+            else if selectNew, let imported = sessions.filter({ !previousIDs.contains($0.id) }).max(by: { $0.id < $1.id }) {
+                selection = imported.id
+            }
             await loadDetail()
             phase = .idle
         }

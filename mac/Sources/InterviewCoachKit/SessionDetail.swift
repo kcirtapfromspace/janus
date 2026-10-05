@@ -86,8 +86,8 @@ public enum StageStep: String, Decodable, CaseIterable, Identifiable {
         switch self {
         case .recording: "Recording"
         case .transcript: "Transcript"
-        case .report: "Report"
-        case .next: "Next steps"
+        case .report: "Review"
+        case .next: "Prepare"
         }
     }
 }

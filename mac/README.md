@@ -2,7 +2,7 @@
 
 This Swift package builds two apps with `mac/build.sh` (which also rebuilds the `ic` CLI first):
 
-- **Interview Coach.app** (`Sources/InterviewCoach`): SwiftUI menu-bar + window app. It records in-process with `ICRecorderCore`, and runs the bundled `ic` (`Contents/MacOS/ic`) for everything else: `ic recording begin|finish`, `ic list --json`, `ic doctor --json`, `ic analyze`, `ic outcome`, `ic import`.
+- **Janus.app** (`Sources/InterviewCoach`): SwiftUI menu-bar + window app. It records in-process with `ICRecorderCore`, and runs the bundled `ic` (`Contents/MacOS/ic`) for everything else: `ic recording begin|finish`, `ic list --json`, `ic doctor --json`, `ic analyze`, `ic outcome`, `ic import`.
 - **ICRecorder.app** (`Sources/ICRecorder`): the headless recorder `ic record` launches from the terminal. Described below.
 
 # ICRecorder

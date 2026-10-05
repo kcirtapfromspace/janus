@@ -269,7 +269,7 @@ impl Attempt {
             ("code_challenge", challenge.as_str()),
         ]);
         if self.client_id == DYNAMIC {
-            query.append_pair("agent_name_hint", "Interview Coach");
+            query.append_pair("agent_name_hint", "Janus");
         }
         if let Some(account) = selected {
             if let Some(tokens) = &account.tokens {
@@ -327,7 +327,7 @@ impl Attempt {
 
 fn browser_response(stream: &mut TcpStream, status: &str, message: &str) {
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Interview Coach</title><p>{message}</p>"
+        "<!doctype html><meta charset=utf-8><title>Janus</title><p>{message}</p>"
     );
     let _ = write!(
         stream,
@@ -373,7 +373,7 @@ fn receive(listener: &TcpListener, attempt: &Attempt) -> Result<(String, String)
                         browser_response(
                             &mut stream,
                             "200 OK",
-                            "Approval received. Return to Interview Coach to finish sign-in.",
+                            "Approval received. Return to Janus to finish sign-in.",
                         );
                         return Ok(result);
                     }
@@ -386,7 +386,7 @@ fn receive(listener: &TcpListener, attempt: &Attempt) -> Result<(String, String)
                         browser_response(
                             &mut stream,
                             "400 Bad Request",
-                            "Sign-in could not be completed. Return to Interview Coach.",
+                            "Sign-in could not be completed. Return to Janus.",
                         );
                         return Err(e);
                     }

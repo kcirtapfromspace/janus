@@ -1,7 +1,7 @@
 import AppKit
 import Sparkle
 
-/// Keeps Interview Coach current from the public release feed. Only release builds carry a
+/// Keeps Janus current from the public release feed. Only release builds carry a
 /// SUFeedURL; development builds never replace themselves. Sparkle checks every four hours,
 /// downloads in the background, and verifies the signed feed, the update's EdDSA signature, and
 /// that it's signed by the same Developer ID. The update then installs and relaunches only while

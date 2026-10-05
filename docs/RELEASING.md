@@ -25,7 +25,7 @@ To use it on another build Mac, import it there with `generate_keys --account de
 
 1. Write `docs/release-notes-vVERSION.md`.
 2. Commit and push.
-3. Notarize. This runs `scripts/ci-local.sh` (clippy, unit and end-to-end tests, Swift tests), builds a Developer ID release with the update feed, submits it to Apple, waits, staples, checks it with Gatekeeper, and writes `dist/InterviewCoach-vVERSION-macos-arm64.zip`:
+3. Notarize. This runs `scripts/ci-local.sh` (clippy, unit and end-to-end tests, Swift tests), builds a Developer ID release with the update feed, submits it to Apple, waits, staples, checks it with Gatekeeper, and writes `dist/InterviewCoach-vVERSION-macos-arm64.zip`. The archive now contains `Janus.app`; the archive prefix and signing identifiers retain their existing names:
 
    ```sh
    export IC_CODESIGN_IDENTITY='Developer ID Application: Patrick Deutsch (67C7724279)'

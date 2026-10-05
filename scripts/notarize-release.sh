@@ -33,7 +33,7 @@ fi
 
 state="$project_root/dist/notarization/v$version"
 evidence="$project_root/dist/release/v$version"
-bundle="$state/Interview Coach.app"
+bundle="$state/Janus.app"
 submission="$state/submission.json"
 input_archive="$state/submitted.zip"
 mkdir -p "$state" "$evidence"
@@ -101,7 +101,9 @@ fi
 (cd "$state" && shasum -a 256 -c submitted.sha256)
 verification="$(mktemp -d "$state/verify.XXXXXX")"
 /usr/bin/ditto -x -k "$input_archive" "$verification"
-app="$verification/Interview Coach.app"
+app="$verification/Janus.app"
+[[ -d "$app" ]] || app="$verification/Interview Coach.app"  # resume an earlier submission
+app_name="$(basename "$app")"
 xcrun stapler staple "$app"
 
 archive_name="InterviewCoach-v$version-macos-arm64.zip"
@@ -110,15 +112,15 @@ COPYFILE_DISABLE=1 /usr/bin/ditto -c -k --norsrc --noextattr --noqtn --keepParen
 final="$verification/final"
 /usr/bin/ditto -x -k "$staged_archive" "$final"
 {
-    printf 'Interview Coach %s notarization\nApple submission %s: %s\n\n' "$version" "$submission_id" "$status"
+    printf 'Janus %s notarization\nApple submission %s: %s\n\n' "$version" "$submission_id" "$status"
     printf '%s\n' '== stapler validate (extracted release archive)'
-    xcrun stapler validate "$final/Interview Coach.app" 2>&1
+    xcrun stapler validate "$final/$app_name" 2>&1
     printf '\n%s\n' '== codesign --verify --deep --strict'
-    codesign --verify --deep --strict --verbose=2 "$final/Interview Coach.app" 2>&1
+    codesign --verify --deep --strict --verbose=2 "$final/$app_name" 2>&1
     printf '\n%s\n' '== Gatekeeper (spctl --assess --type execute)'
-    spctl --assess --type execute --verbose=2 "$final/Interview Coach.app" 2>&1
+    spctl --assess --type execute --verbose=2 "$final/$app_name" 2>&1
     printf '\n%s\n' '== signature'
-    codesign -dv --verbose=2 "$final/Interview Coach.app" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version)='
+    codesign -dv --verbose=2 "$final/$app_name" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version)='
 } | tee "$evidence/notarization-validation.txt"
 mv "$staged_archive" "$project_root/dist/$archive_name"
 (cd "$project_root/dist" && shasum -a 256 "$archive_name" > "$archive_name.sha256")

@@ -1,0 +1,13 @@
+Use case: logo-brand / precise-object-edit.
+Revise the Janus identity by combining TWO supplied references exactly as instructed by the user:
+Image 1 = original Janus mark. It supplies ONLY the classical Roman face silhouette outline: forehead, strong nose, lips and chin seen in profile.
+Image 2 = three quote refinements. Use ONLY "03 — Rhythm", the RIGHTMOST concept, as the base mark, including its two separate bold opening/closing quote shapes, their slight lively tilt, vertical stagger, generous gap, and clean serif Janus wordmark.
+
+User request: "revisit the idea of the first logo, that Roman silhouette; have the curved side of the quote be that silhouette outline; aside from that use the Rhythm Quotes."
+
+Critical construction: each quotation glyph itself is a Roman profile. Replace a SHORT SECTION of its OUTER CURVED EDGE with the graceful classical forehead/nose/lips/chin contour from Image 1. The profile is literally the glyph's perimeter, not a separate head glued beside a quote, not a face drawn in a block, not a bust placed inside it. Preserve the quote's square terminal and most of its sweep so the symbol still instantly reads as a pair of quotation marks. Each quote is one continuous, solid, compact silhouette. Left quote looks outward to the left and curls upward, right quote looks outward to the right and curls downward. Both classical face contours are upright, including the closing quote: do not rotate a face upside down. Delicate but clear Roman contours, calm expressions, no interior facial features. No eyes, smiles, laughter holes or emoji treatment. The combination should feel intelligent, literary, human and distinctly Janus.
+
+Create ONE focused landscape concept board on warm ivory. Large finished mark at left with the title-case Georgia-style serif wordmark "Janus" beside it. Below, show the exact same mark as a cream Mac app icon with forest-green mark and as a pale-sage reversed mark on charcoal, as flat specimens. Generous spacing and precision, no extra alternatives, no slogans, no label paragraphs, no photo mockups. The large mark must be clear enough to inspect the perimeter. Use flat solid colors only: forest green, warm ivory, charcoal and pale sage. Vector-like construction, uniform crisp edges. Compact geometry should work at menu bar size.
+Exact text: "Janus".
+Preserve: recognizable Rhythm quotation marks, relative scale and spacing, classical serif wordmark, the Roman profiles only at the curved outer perimeter.
+Avoid: returning to two full head silhouettes, floating profiles, appended heads, masks, hidden faces inside the block, smileys, eyes or face details, speech bubbles, stock bracket logo, extra tiny cutouts, ornament, gradients, texture, shadows, 3D, glossy tiles, sparkles.

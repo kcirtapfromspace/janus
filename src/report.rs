@@ -312,60 +312,8 @@ pub fn print_room(stored: &StoredAnalysis, full: bool) {
 
 // --- HTML -------------------------------------------------------------------------------------
 
-const CSS: &str = r#"
-:root { --bg:#fbfaf8; --fg:#1d1d1f; --muted:#6b6b70; --line:#e6e3de; --card:#fff; --accent:#2f5bd3;
-  --good:#1f7a4a; --warn:#a86b00; --bad:#b3261e; --chip:#f1efeb; }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#141416; --fg:#ececef;
-  --muted:#9a9aa2; --line:#2b2b30; --card:#1c1c20; --accent:#8aa8ff; --good:#5fcf8f; --warn:#f0b54a;
-  --bad:#ff8a80; --chip:#26262b; } }
-* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--fg);
-  font:16px/1.55 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; }
-main { max-width:860px; margin:0 auto; padding:40px 16px 80px }
-h1 { font-size:28px; line-height:1.2; margin:0 0 6px } h2 { font-size:15px; text-transform:uppercase;
-  letter-spacing:.06em; color:var(--muted); margin:40px 0 12px }
-.meta { color:var(--muted) } .verdict { display:inline-block; padding:6px 14px; border-radius:999px;
-  font-weight:650; margin:20px 12px 8px 0 }
-.v-strong,.v-leaning_positive { background:color-mix(in srgb,var(--good) 18%,transparent); color:var(--good) }
-.v-mixed { background:color-mix(in srgb,var(--warn) 18%,transparent); color:var(--warn) }
-.v-leaning_negative,.v-weak { background:color-mix(in srgb,var(--bad) 16%,transparent); color:var(--bad) }
-.stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px }
-.stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px }
-.stat b { display:block; font-size:22px } .stat span { color:var(--muted); font-size:13px }
-.card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin:12px 0 }
-.card h3 { margin:0 0 6px; font-size:18px }
-.notice { border:1px solid color-mix(in srgb,var(--warn) 45%,transparent); background:color-mix(in srgb,var(--warn) 10%,transparent);
-  border-radius:12px; padding:12px 16px; margin:20px 0 4px } .notice b { color:var(--warn) } .notice p { margin:4px 0 } blockquote { margin:10px 0; padding:8px 12px; border-left:3px solid var(--line);
-  color:var(--fg); font-style:italic } .ts { font-style:normal; font-size:12px; color:var(--muted);
-  background:var(--chip); border-radius:6px; padding:1px 6px; margin-right:6px; font-variant-numeric:tabular-nums }
-.label { font-weight:600 } .rubric { display:grid; grid-template-columns:170px 110px 1fr; gap:6px 14px; align-items:baseline }
-.dots { color:var(--accent); letter-spacing:2px } .muted { color:var(--muted) }
-details { border-top:1px solid var(--line); padding:10px 0 } summary { cursor:pointer; list-style:none }
-summary::-webkit-details-marker { display:none } details p { margin:6px 0 }
-table.answers { width:100%; border-collapse:collapse; font-size:14px } table.answers th, table.answers td {
-  text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top }
-table.answers th { color:var(--muted); font-weight:600; font-size:12px } .pass { color:var(--good) } .fail { color:var(--bad) }
-.unclear { color:var(--muted) }
-a.ts { text-decoration:none } a.ts:hover { color:var(--accent) }
-svg.room { width:100%; height:auto; display:block; margin:8px 0 4px; overflow:visible }
-svg.room .band { fill:var(--chip) } svg.room a:hover .band { fill:color-mix(in srgb,var(--accent) 16%,transparent) }
-svg.room .zero { stroke:var(--muted); stroke-opacity:.5; stroke-dasharray:3 4 } svg.room .grid { stroke:var(--line) }
-svg.room .line { fill:none; stroke:var(--accent); stroke-width:2; stroke-linejoin:round }
-svg.room circle { stroke:var(--bg); stroke-width:1.5 } svg.room a:hover circle { stroke:var(--fg) }
-svg.room .warm { fill:var(--good) } svg.room .cool { fill:var(--bad) } svg.room .mid { fill:var(--muted) }
-svg.room text { font-size:11px; fill:var(--muted) } svg.room text.mark { font-size:13px; text-anchor:middle; fill:var(--warn) }
-svg.room text.tick { text-anchor:middle } .legend { font-size:13px } .legend i { font-style:normal; font-weight:700 }
-.legend .warm { color:var(--good) } .legend .mid { color:var(--muted) } .legend .cool { color:var(--bad) }
-ul.moments li { margin:0 0 10px } ul.moments .cues { color:var(--muted); font-size:14px }
-main a { color:var(--accent) } .version { margin:6px 0 0; font-size:14px } ul.tree, ul.tree ul { list-style:none; margin:0; padding:0 }
-ul.tree > li { margin:0 0 16px } ul.tree ul { margin:8px 0 0 10px; padding-left:14px; border-left:2px solid var(--line) }
-ul.tree ul li { margin:0 0 12px } ul.tree .rev { font-weight:650 } ul.tree .nums { font-size:14px }
-ul.tree .this { background:var(--chip); border-radius:8px; padding:6px 8px; margin-left:-8px }
-.tag { display:inline-block; font-size:12px; padding:0 7px; border-radius:999px; background:var(--chip); color:var(--muted);
-  margin-left:4px } .this .tag { background:var(--card) }
-.sig-positive::before { content:"+ "; color:var(--good); font-weight:700 } .sig-negative::before { content:"− ";
-  color:var(--bad); font-weight:700 } ul.plain { list-style:none; padding:0 } ul.plain li { margin:0 0 14px }
-@media (max-width:600px) { .rubric { grid-template-columns:1fr 90px } .rubric .muted { grid-column:1/-1; margin-bottom:8px } }
-"#;
+const CSS: &str = include_str!("../mac/Resources/Brand/report.css");
+const BRAND: &str = include_str!("../mac/Resources/Brand/report-brand.html");
 
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -634,7 +582,7 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
 
     let notes = notes(session);
 
-    let mut h = String::new();
+    let mut h = String::from(BRAND);
     let _ = write!(h, "<h1>{}</h1><div class='meta'>{}</div>", esc(&session.title), meta.join(" · "));
     if let Some(history) = history {
         h.push_str(&version_line(stored, history));
@@ -734,7 +682,7 @@ pub fn render_html(session: &Session, stored: &StoredAnalysis, outcome: Option<&
     format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>\
          <meta name='viewport' content='width=device-width, initial-scale=1'>\
-         <title>{} — Interview report</title><style>{CSS}</style></head><body><main>{h}</main></body></html>",
+         <title>{} — Janus interview review</title><style>{CSS}</style></head><body><main>{h}</main></body></html>",
         esc(&session.title)
     )
 }
@@ -772,7 +720,7 @@ pub fn write_pages(db: &Db, session: &Session, outcome: Option<&Outcome>) -> any
     let path = Path::new(&session.dir).join("report.html");
     write_if_changed(&path, &format!(
         "<!doctype html><html lang='en'><head><meta charset='utf-8'><meta http-equiv='refresh' content='0; url=reports/{shown}.html'>\
-         <title>{} — Interview report</title></head><body><a href='reports/{shown}.html'>Open the report</a></body></html>",
+         <title>{} — Janus interview review</title></head><body><a href='reports/{shown}.html'>Open the report</a></body></html>",
         esc(&session.title)))?;
     Ok(Some(path))
 }

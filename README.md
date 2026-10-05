@@ -1,12 +1,13 @@
-# Interview Coach
+# Janus
 
-Turn every interview into a better next interview. Record or import an interview, review the
-transcript and evidence behind your feedback, and get a focused practice plan for the next round.
+When an interview ends without useful feedback, Janus gives you another perspective. Record or
+import the conversation, review the transcript and evidence behind your feedback, and prepare
+for the next round.
 Audio is processed locally on your Mac. Transcript text goes to your chosen coaching provider
 (Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe.
 
-The setup below describes the current source. Published previews may still use the earlier
-native provider setup and required Jev evaluation in preview 11.
+Janus continues the existing Interview Coach update feed. Interviews, settings, and sign-ins
+carry forward from earlier previews.
 
 ## Install on a Mac
 
@@ -20,7 +21,7 @@ itself after that. Releasing is described in [docs/RELEASING.md](docs/RELEASING.
 
 ```sh
 mac/build.sh               # builds `ic`, both Mac apps, and the bundled ffmpeg and ant into mac/build/ (signed)
-open "mac/build/Interview Coach.app"   # its Setup window does the rest
+open "mac/build/Janus.app"   # its Setup window does the rest
 ```
 
 From the command line instead: `ic setup status` shows what's left, `ic setup run all` downloads
@@ -30,18 +31,26 @@ or `IC_FFMPEG` / `IC_ANT`.)
 
 ### The Mac app
 
-**Interview Coach.app** lives in the menu bar (waveform icon):
+**Janus.app** lives in the menu bar (Roman profiles formed by opposing quotation marks):
 
 - **Record interview** asks you to confirm everyone agreed to be recorded, then records your mic
   and the call's audio from any app. The icon turns into a red record dot; **Stop** ends it, and
   the app transcribes and analyses the interview (about 1–2 minutes).
-- The panel lists your 5 most recent interviews with their verdicts; click one to open it.
-- **Open Interview Coach** shows the window: your interviews on the left, the selected report on
-  the right, and a toolbar with **Record/Stop**, **Import**, **Analyze**, **Outcome**, **Open in
-  Browser**, and **Show in Finder**.
+- The menu lists recent interviews with their verdicts; click one to open its review.
+- **Open Janus** opens your interview notebook: the latest conversation, earlier
+  interviews, and their reviews. Activity, conversation time, active roles, and recorded outcomes
+  stay together on the page. Choose a time range or return to a review.
+  Your searchable library stays on the left; each interview has **Recording**, **Transcript**,
+  **Review**, and **Prepare** tabs. The toolbar keeps **Record/Stop** and **Import** close by; the
+  review holds report versions, outcome tracking, and browser export.
+- **Appearance** offers **System**, **Light**, and **Dark** in the menu bar and Settings. System is
+  the default; your choice is saved and applies to every window and embedded report.
+
+The [brand assets and dashboard definitions](mac/Resources/Brand/README.md) describe the visual identity
+and how the local analytics are counted.
 
 The app records in-process (the first recording asks for Microphone and System Audio Recording
-permission for "Interview Coach") and hands everything else to the `ic` tool bundled inside it, so
+permission for "Janus") and hands everything else to the `ic` tool bundled inside it, so
 the app and the command line share the same data in `~/InterviewCoach`.
 
 ### Models: Claude or OpenAI
