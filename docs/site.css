@@ -1,0 +1,71 @@
+:root {
+  color-scheme: light dark;
+  --paper: #fcfaf4;
+  --ink: #2b3029;
+  --muted: #6c7064;
+  --accent: #345b49;
+  --line: #d3d1c3;
+  --body: "Avenir Next", Avenir, "Trebuchet MS", sans-serif;
+  --display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 17px/1.6 var(--body); }
+a { color: inherit; text-underline-offset: 5px; text-decoration-thickness: 1px; }
+a:focus-visible { outline: 3px solid var(--accent); outline-offset: 6px; }
+img { max-width: 100%; height: auto; }
+.page { max-width: 1380px; margin: auto; padding: 0 64px; }
+.skip-link { position: absolute; z-index: 2; top: 12px; left: 16px; padding: 8px 16px; background: var(--accent); color: var(--paper); transform: translateY(-180%); }
+.skip-link:focus { transform: none; }
+.hero { min-height: 100svh; min-height: 100dvh; padding: 76px 0 86px; display: grid; grid-template-columns: 1.25fr 1fr; gap: 36px; align-items: center; }
+.brand { display: inline-flex; align-items: center; gap: 11px; margin-bottom: 44px; text-decoration: none; font: 700 28px/1 Georgia, serif; letter-spacing: -1px; }
+.brand img { width: 34px; height: 34px; }
+h1 { margin: 0 0 27px; font: 400 clamp(54px, 5.25vw, 76px)/1.07 var(--display); letter-spacing: -2.8px; }
+h1 em { font-weight: 400; color: var(--accent); }
+.intro { max-width: 445px; margin: 0 0 32px; color: var(--muted); font-size: 18px; line-height: 1.7; }
+.hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 20px 27px; }
+.button { display: inline-flex; align-items: center; justify-content: center; gap: 26px; min-height: 52px; padding: 12px 21px; background: var(--accent); color: var(--paper); border: 1px solid var(--accent); border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600; transition: transform 160ms ease, opacity 160ms ease; }
+.button svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.button:hover { transform: translateY(-2px); opacity: .9; }
+.button:active { transform: translateY(0); }
+.text-link { font-size: 14px; font-weight: 600; }
+.text-link span { display: inline-block; margin-left: 6px; }
+.text-link:hover { color: var(--accent); }
+.requirements { margin: 19px 0 0; color: var(--muted); font-size: 12px; line-height: 1.85; }
+.hero-art { position: relative; display: grid; place-items: center; min-height: 470px; }
+.orbit { position: absolute; width: 100%; max-width: 465px; aspect-ratio: 1; border: 1px solid var(--line); border-radius: 50%; }
+.hero-icon { position: relative; width: min(360px, 83%); transform: rotate(-5deg); }
+.art-note { position: absolute; right: 0; bottom: 8px; padding: 7px 0; font: italic 19px/1.4 var(--display); color: var(--accent); transform: rotate(-3deg); }
+@media (prefers-color-scheme: dark) {
+  :root { --paper: #24251f; --ink: #ece9df; --muted: #b7b7a7; --accent: #b2cab7; --line: #494c40; }
+  .brand img { content: url("assets/mark-dark.svg"); }
+}
+@media (max-width: 1100px) {
+  .page { padding: 0 40px; }
+  .hero { gap: 24px; }
+  h1 { font-size: 59px; letter-spacing: -2.3px; }
+  .hero-art { min-height: 380px; }
+  .hero-icon { width: min(305px, 86%); }
+  .art-note { right: 4px; font-size: 17px; }
+}
+@media (max-width: 780px) {
+  .page { padding: 0 28px; }
+  .hero { grid-template-columns: 1fr; padding: 48px 0 42px; gap: 34px; }
+  .brand { margin-bottom: 32px; }
+  h1 { font-size: clamp(46px, 8.7vw, 68px); letter-spacing: -2px; }
+  .intro { max-width: 490px; font-size: 17px; }
+  .hero-art { min-height: 350px; max-width: 430px; width: 100%; margin: 0 auto; }
+  .orbit { width: 95%; max-width: 345px; }
+  .hero-icon { width: 285px; }
+  .art-note { right: 18px; bottom: 0; }
+}
+@media (max-width: 380px) {
+  .page { padding: 0 22px; }
+  h1 { font-size: 42px; letter-spacing: -1.7px; }
+  .hero-actions { gap: 20px; }
+  .hero-art { min-height: 310px; }
+  .hero-icon { width: 250px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .button { transition: none; }
+  .button:hover { transform: none; }
+}

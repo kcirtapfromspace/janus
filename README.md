@@ -1,6 +1,10 @@
-# Janus releases
+# Janus
 
-Notarized builds of [Janus](https://github.com/kcirtapfromspace/interview-coach) for Apple silicon, and the update feed installed copies follow. The source repository is private; this repository holds only the signed releases.
+An interview notebook for Mac. Revisit your conversations, get useful feedback, and prepare for your next round.
+
+[Website](https://kcirtapfromspace.github.io/janus/) · [Download for Mac](https://github.com/kcirtapfromspace/janus/releases/latest)
+
+This repository hosts the notarized releases, their signed update feed, and the Janus website. The application source remains private.
 
 Janus records your job interviews from any app, transcribes them on your Mac, and tells you how each one went and what to work on.
 
@@ -8,7 +12,7 @@ Janus records your job interviews from any app, transcribes them on your Mac, an
 
 Needs an Apple silicon Mac with macOS 14.4 or later.
 
-1. Download the latest `InterviewCoach-…-macos-arm64.zip` from [Releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest) and unzip it.
+1. Download the latest `InterviewCoach-…-macos-arm64.zip` from [Releases](https://github.com/kcirtapfromspace/janus/releases/latest) and unzip it.
 2. **Move Janus.app to Applications before opening it.** Opened from Downloads, macOS runs it from a temporary read-only copy, which can't update itself.
 3. Open it. The **Setup** window lists what's left, each with one button:
    - **Sign in to Claude or ChatGPT**: approve access in your browser and choose an available coaching model. ChatGPT plan usage requires account permission; an OpenAI API key selects separate API billing.
