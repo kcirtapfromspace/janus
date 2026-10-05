@@ -21,6 +21,9 @@ struct MenuBarMenu: View {
                 .keyboardShortcut("r")
                 .disabled(model.phase.isBusy)
         }
+        Button { show("mock") } label: { Label("Practice Interview…", systemImage: "person.wave.2") }
+            .keyboardShortcut("p")
+            .disabled(model.phase.isBusy)
         Button { show("main") } label: { Label("Open Janus", systemImage: "macwindow") }
             .keyboardShortcut("o")
         Button { model.importRecording() } label: { Label("Import Recording…", systemImage: "square.and.arrow.down") }

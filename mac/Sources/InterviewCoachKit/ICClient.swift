@@ -119,6 +119,9 @@ public struct SessionSummary: Decodable, Identifiable, Hashable {
     public var roleId: Int? = nil
     /// Archived itself, or through its role.
     public var archived: Bool = false
+    /// A mock interview (absent from libraries listed before mocks existed).
+    public var practice: Bool? = nil
+    public var isPractice: Bool { practice ?? false }
     /// In Recently Deleted: days until it's erased.
     public var deletedDaysLeft: Int? = nil
 

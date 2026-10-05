@@ -30,6 +30,14 @@ struct InterviewCoachApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
 
+        Window("Practice Interview", id: "mock") {
+            MockInterviewWindow()
+                .environment(model)
+                .tint(CoachTheme.accent)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+
         Window("Janus Settings", id: "setup") {
             SetupView()
                 .environment(model)

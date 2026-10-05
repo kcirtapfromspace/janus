@@ -105,6 +105,11 @@ struct MainWindow: View {
             .fixedSize()
             .help("Record an interview from any app (your mic + the call's audio)")
             .disabled(model.phase.isBusy)
+            Button { openWindow(id: "mock") } label: { Label("Practice", systemImage: "person.wave.2") }
+                .labelStyle(.titleAndIcon)
+                .fixedSize()
+                .help("A mock interview: real questions from your past interviews, asked out loud, then reviewed")
+                .disabled(model.phase.isBusy)
         }
     }
 }

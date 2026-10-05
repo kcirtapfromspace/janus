@@ -68,6 +68,11 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(SetupEvent.parse(#"{"event":"need_code"}"#), .needCode)
         XCTAssertEqual(SetupEvent.parse(#"{"event":"done"}"#), .done)
         XCTAssertEqual(SetupEvent.parse(#"{"event":"error","message":"Docker didn't start"}"#), .error("Docker didn't start"))
+        XCTAssertEqual(SetupEvent.parse(#"{"done":false,"event":"say","text":"What draws you to this role?"}"#),
+                       .say("What draws you to this role?", done: false))
+        XCTAssertEqual(SetupEvent.parse(#"{"done":true,"event":"say","text":"That's all my questions."}"#),
+                       .say("That's all my questions.", done: true))
+        XCTAssertNil(SetupEvent.parse(#"{"event":"say"}"#), "a turn with nothing to say")
         XCTAssertNil(SetupEvent.parse("Creating profile"), "anything that isn't an event is ignored")
     }
 

@@ -201,6 +201,13 @@ final class AppModel {
         }
     }
 
+    /// A mock interview ended: review it like any recording, and show it.
+    func finishMock(_ id: Int) {
+        selection = id
+        selectedStage = .report
+        runIC(["recording", "finish", "\(id)"], label: "Reviewing your practice interview…", select: id)
+    }
+
     func swapSpeakers() {
         guard let id = selection else { return }
         selectedStage = .transcript
@@ -461,7 +468,7 @@ final class AppModel {
             setupActivity?.message = "Paste the code the page shows."
         case .error(let message):
             if let check = setupActivity?.checkID { setupErrors[check] = message }
-        case .log, .done:
+        case .log, .done, .say:
             break
         }
     }

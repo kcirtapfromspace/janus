@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- Version 7: archived, in Recently Deleted, and whether its role was set (by filing or by you).
     archived_at TEXT,
     deleted_at TEXT,
-    role_set INTEGER NOT NULL DEFAULT 0
+    role_set INTEGER NOT NULL DEFAULT 0,
+    -- Version 8: a mock interview, for practice (not a real one).
+    practice INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -300,7 +302,7 @@ pub struct Db {
 }
 
 /// Schema version; `migrate` brings older databases up to it.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| {
@@ -353,6 +355,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         archived_at: r.get("archived_at")?,
         deleted_at: r.get("deleted_at")?,
         role_set: r.get("role_set")?,
+        practice: r.get("practice")?,
     })
 }
 
@@ -462,6 +465,8 @@ impl Db {
             ("sessions", "archived_at TEXT"),
             ("sessions", "deleted_at TEXT"),
             ("sessions", "role_set INTEGER NOT NULL DEFAULT 0"),
+            // Version 8: mock interviews.
+            ("sessions", "practice INTEGER NOT NULL DEFAULT 0"),
             ("roles", "status TEXT NOT NULL DEFAULT 'interviewing'"),
             ("roles", "archived_at TEXT"),
         ] {
@@ -561,6 +566,12 @@ impl Db {
              status = ?7, error = ?8 WHERE id = ?1",
             params![s.id, s.source_path, s.dir, s.duration_s, s.num_speakers, s.consent, s.status.as_str(), s.error],
         )?;
+        Ok(())
+    }
+
+    /// Mark a session as a mock interview.
+    pub fn set_practice(&self, id: i64) -> Result<()> {
+        self.conn.execute("UPDATE sessions SET practice = 1 WHERE id = ?1", [id])?;
         Ok(())
     }
 

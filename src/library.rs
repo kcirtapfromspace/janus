@@ -191,6 +191,8 @@ pub struct Entry {
     pub archived: bool,
     /// In Recently Deleted: days until it's erased.
     pub deleted_days_left: Option<i64>,
+    /// A mock interview, for practice.
+    pub practice: bool,
 }
 
 /// A role, as the app lists it.
@@ -246,6 +248,7 @@ pub fn library(db: &Db) -> Result<Library> {
                 role_id: s.role_id,
                 archived: s.archived_at.is_some() || role.is_some_and(|r| r.archived_at.is_some()),
                 deleted_days_left: s.deleted_at.as_deref().map(|d| days_left(d, now)),
+                practice: s.practice,
                 created_at: s.created_at,
                 title: s.title,
                 dir: s.dir,

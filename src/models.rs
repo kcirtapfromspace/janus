@@ -139,6 +139,8 @@ pub struct Session {
     pub deleted_at: Option<String>,
     /// The role was set (by filing or by you), so reports don't file it again.
     pub role_set: bool,
+    /// A mock interview, for practice.
+    pub practice: bool,
 }
 
 pub fn speaker_label(speaker: &str) -> String {

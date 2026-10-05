@@ -41,7 +41,8 @@ public struct LibraryAnalytics {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let today = calendar.startOfDay(for: now)
-        let dated = library.sessions.filter { !$0.isDeleted && !$0.archived }.compactMap { session -> (SessionSummary, Date)? in
+        // Mock interviews are practice, not interviews: they're left out of every count here.
+        let dated = library.sessions.filter { !$0.isDeleted && !$0.archived && !$0.isPractice }.compactMap { session -> (SessionSummary, Date)? in
             guard let date = formatter.date(from: session.createdAt) ?? fractional.date(from: session.createdAt), date <= now else { return nil }
             return (session, date)
         }

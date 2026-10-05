@@ -54,6 +54,17 @@ or `IC_FFMPEG` / `IC_ANT`.)
   Your searchable library stays on the left; each interview has **Recording**, **Transcript**,
   **Review**, and **Prepare** tabs. The toolbar keeps **Record/Stop** and **Import** close by; the
   review holds report versions, outcome tracking, and browser export.
+- **Practice Interview** (menu bar, or **Practice** in the window) runs a mock interview.
+  - **Questions:** the interviewer asks real questions from your earlier interviews. It starts
+    with the company and role you name, then the questions you answered least well, and fills in
+    with classic questions.
+  - **Conversation:** it speaks out loud and listens to your answers, which are transcribed on
+    this Mac. It follows up the way an interviewer would (at most twice per question).
+  - **Review:** the mock is recorded as a two-track interview and reviewed like a real one. It's
+    tagged "practice" and kept out of your interview counts.
+
+  Echo cancellation keeps the interviewer's voice out of your track, but headphones are still
+  clearer.
 - **Appearance** offers **System**, **Light**, and **Dark** in the menu bar and Settings. System is
   the default; your choice is saved and applies to every window and embedded report.
 
@@ -167,6 +178,7 @@ ic transcript 3                         # full transcript with speakers and time
 ic report 3 [--full] [--open]           # analysis in the terminal, or as an HTML page
 ic outcome 3 advanced                   # record what actually happened
 ic swap 3                               # if a single-track import got You/Interviewer backwards
+ic questions [--company Acme]           # every interviewer question from your reviews, merged, with your scores
 ```
 
 Recording and importing both transcribe and analyse automatically. `ic transcribe N` and

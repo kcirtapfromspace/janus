@@ -103,6 +103,8 @@ public enum SetupEvent: Equatable {
     case openURL(URL)
     case needCode
     case log(String)
+    /// A mock interviewer's turn (`ic mock run`): what to say, and whether it ends the interview.
+    case say(String, done: Bool)
     case done
     case error(String)
 
@@ -120,6 +122,7 @@ public enum SetupEvent: Equatable {
         case "open_url": return (object["url"] as? String).flatMap(URL.init(string:)).map(SetupEvent.openURL)
         case "need_code": return .needCode
         case "log": return .log(message)
+        case "say": return (object["text"] as? String).map { .say($0, done: object["done"] as? Bool ?? false) }
         case "done": return .done
         case "error": return .error(message)
         default: return nil

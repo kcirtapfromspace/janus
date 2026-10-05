@@ -250,6 +250,21 @@ enum Cmd {
     /// Rebuild how the room felt for an analysed interview (no new Claude analysis; uses Jev when
     /// its key is set).
     Timeline { id: i64 },
+    /// Every interviewer question from your reviews, merged across interviews, with how your answers
+    /// went: the registry mock interviews draw from.
+    Questions {
+        /// Only questions asked by this company.
+        #[arg(long)]
+        company: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Practise with a mock interview: an interviewer agent asks real questions from your registry
+    /// out loud (the app's Mock interview), and the review scores it like any other.
+    Mock {
+        #[command(subcommand)]
+        action: MockCmd,
+    },
     /// Record how an interview actually turned out — coaching learns from real results.
     Outcome {
         id: i64,
@@ -313,6 +328,30 @@ enum Cmd {
     Jev {
         #[command(subcommand)]
         action: JevCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum MockCmd {
+    /// Plan a mock interview and create its session; prints {"id", "dir", "plan"} as JSON.
+    Begin {
+        #[arg(long)]
+        company: Option<String>,
+        #[arg(long)]
+        role: Option<String>,
+        /// The round, e.g. "Hiring manager".
+        #[arg(long)]
+        round: Option<String>,
+        /// How many questions.
+        #[arg(long, default_value_t = 5)]
+        count: usize,
+    },
+    /// Run the interviewer for a mock session (the app drives it): JSON-lines events out, each
+    /// answer in as {"answer": "<wav>"} on stdin; {"stop": true} ends it early.
+    Run {
+        id: i64,
+        #[arg(long)]
+        events: bool,
     },
 }
 
@@ -2027,6 +2066,109 @@ fn eval_video(
     Ok(())
 }
 
+/// `ic questions`: the registry, most asked first.
+fn list_questions(settings: &Settings, company: Option<String>, json: bool) -> Result<()> {
+    use interview_coach::questions;
+    let db = open_db(settings)?;
+    let mut all = questions::registry(&db)?;
+    if let Some(company) = &company {
+        let want = company.to_lowercase();
+        all.retain(|q| q.companies().iter().any(|c| c.to_lowercase().contains(&want)));
+    }
+    if json {
+        outln!("{}", serde_json::to_string(&all)?);
+        return Ok(());
+    }
+    if all.is_empty() {
+        outln!("No questions yet: they come from your interviews' reviews.");
+        return Ok(());
+    }
+    for q in &all {
+        let companies: Vec<String> = q.companies().into_iter().collect();
+        let score = q.latest_score().map_or(String::new(), |s| format!(" · last answer {s}/5"));
+        let practice = q.asked.iter().filter(|a| a.practice).count();
+        let practice = if practice > 0 { format!(" · practised {practice}×") } else { String::new() };
+        outln!("{} {}", style(format!("{}×", q.times())).bold(), q.text);
+        outln!("   {}", style(format!("{}{}{score}{practice}", q.kind, if companies.is_empty() { String::new() } else { format!(" · {}", companies.join(", ")) })).dim());
+    }
+    Ok(())
+}
+
+/// `ic mock begin`: plan the questions and create the session the app records into.
+fn mock_begin(settings: &Settings, company: Option<String>, role: Option<String>, round: Option<String>, count: usize) -> Result<()> {
+    use interview_coach::{mock, questions};
+    let db = open_db(settings)?;
+    let target = questions::Target { company: company.clone(), role: role.clone(), round };
+    let plan = questions::plan(&questions::registry(&db)?, &target, count.clamp(1, 12));
+    let title = match (&role, &company) {
+        (Some(r), Some(c)) => format!("Mock: {r} at {c}"),
+        (Some(r), None) => format!("Mock: {r}"),
+        (None, Some(c)) => format!("Mock: {c}"),
+        (None, None) => "Mock interview".to_string(),
+    };
+    let session = pipeline::create_recording_session(&db, settings, &title, company)?;
+    db.set_practice(session.id)?;
+    let state = mock::MockState::new(target, &plan)?;
+    state.save(Path::new(&session.dir))?;
+    outln!("{}", serde_json::json!({"id": session.id, "dir": session.dir, "plan": state.plan}));
+    Ok(())
+}
+
+/// `ic mock run`: the interviewer, turn by turn. Whisper stays loaded between answers, so each one
+/// is heard in seconds.
+fn mock_run(settings: &Settings, id: i64, events: bool) -> Result<()> {
+    use interview_coach::mock;
+    use std::io::BufRead;
+    let mut ev = JsonEvents::new();
+    let result = (|| -> Result<()> {
+        if let Some(reason) = blocker_for(settings, &settings.model) {
+            bail!("The interviewer needs a coaching model: {reason}");
+        }
+        let db = open_db(settings)?;
+        let dir = PathBuf::from(db.get_session(id)?.dir);
+        let mut state = mock::MockState::load(&dir)?;
+        ev.stage("Getting the interviewer ready");
+        let transcriber = interview_coach::transcribe::Transcriber::load(settings, &mut ev)?;
+        let llm = llm::configured_client(settings, &settings.model)?;
+        let say = |ev: &mut JsonEvents, text: &str, done: bool| ev.emit(serde_json::json!({"event": "say", "text": text, "done": done}));
+        if state.done {
+            return Ok(());
+        }
+        let first = state.start();
+        state.save(&dir)?;
+        say(&mut ev, &first, false);
+        for line in std::io::stdin().lock().lines() {
+            let command: serde_json::Value = serde_json::from_str(&line?).context("a command isn't JSON")?;
+            if command["stop"].as_bool() == Some(true) {
+                break;
+            }
+            let path = command["answer"].as_str().context("expected {\"answer\": \"<wav>\"} or {\"stop\": true}")?;
+            ev.stage("Listening back");
+            let samples = interview_coach::audio::load(Path::new(path))?;
+            let heard: String = transcriber.transcribe(&samples, &mut ev)?.iter().map(|s| s.text.trim()).collect::<Vec<_>>().join(" ");
+            let (text, done) = if heard.split_whitespace().count() < 2 {
+                (state.repeat_please(), false)
+            } else {
+                state.answer(&heard);
+                ev.stage("The interviewer is thinking");
+                mock::next(llm.as_ref(), &settings.model.name, &mut state)?
+            };
+            state.save(&dir)?;
+            say(&mut ev, &text, done);
+            if done {
+                break;
+            }
+        }
+        Ok(())
+    })();
+    match &result {
+        Ok(()) if events => ev.done(),
+        Err(e) if events => ev.error(&format!("{e:#}")),
+        _ => {}
+    }
+    result
+}
+
 /// `ic eval correct`: one answer's video cues as you saw them, with what was measured then.
 fn eval_correct(settings: &Settings, id: i64, start: f64, labels: Option<String>) -> Result<()> {
     let labels = match labels {
@@ -2460,6 +2602,9 @@ fn run() -> Result<()> {
         }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
         Cmd::Timeline { id } => refresh_timeline(&settings, id),
+        Cmd::Questions { company, json } => list_questions(&settings, company, json),
+        Cmd::Mock { action: MockCmd::Begin { company, role, round, count } } => mock_begin(&settings, company, role, round, count),
+        Cmd::Mock { action: MockCmd::Run { id, events } } => mock_run(&settings, id, events),
         Cmd::Models { json } => list_models(&settings, json),
         Cmd::Outcome { id, result, notes } => outcome(&settings, id, result, notes),
         Cmd::Proxy { action } => match action {

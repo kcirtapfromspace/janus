@@ -67,7 +67,7 @@ struct SessionRow: View {
                 Spacer(minLength: 6)
                 VerdictBadge(session: session)
             }
-            Text([inRole ? session.stage : nil, session.date, formatDuration(session.durationS),
+            Text([session.isPractice ? "practice" : nil, inRole ? session.stage : nil, session.date, formatDuration(session.durationS),
                   session.isDeleted ? "\(session.deletedDaysLeft ?? 0)d left" : nil, session.archived ? "archived" : nil]
                 .compactMap { $0 }.joined(separator: " · "))
                 .font(.caption)
