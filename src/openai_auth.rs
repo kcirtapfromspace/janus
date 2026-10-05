@@ -768,6 +768,10 @@ mod tests {
             language: Some("en".into()),
             model: "openai/gpt-5.6".parse().unwrap(),
             scorer: crate::config::ScorerRef::Off,
+            share_questions: false,
+            share_company: false,
+            diagnostics: false,
+            registry_url: crate::registry::DEFAULT_URL.into(),
         }
     }
 

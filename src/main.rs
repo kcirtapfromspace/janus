@@ -259,6 +259,12 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The shared question registry: pull the approved questions, withdraw what you shared, and
+    /// (maintainers, with wrangler) moderate contributions.
+    Registry {
+        #[command(subcommand)]
+        action: RegistryCmd,
+    },
     /// Practise with a mock interview: an interviewer agent asks real questions from your registry
     /// out loud (the app's Mock interview), and the review scores it like any other.
     Mock {
@@ -329,6 +335,27 @@ enum Cmd {
         #[command(subcommand)]
         action: JevCmd,
     },
+}
+
+#[derive(Subcommand)]
+enum RegistryCmd {
+    /// Download the approved shared questions now.
+    Pull,
+    /// Share one interview's questions now (when sharing is on; reviews do it by themselves).
+    Share { id: i64 },
+    /// Withdraw everything this Mac shared.
+    Withdraw,
+    /// Maintainers: contributions waiting for review.
+    Pending,
+    /// Maintainers: publish contributions (merged into the same approved question when there is one).
+    Approve {
+        ids: Vec<i64>,
+        /// Publish with this wording instead (one contribution at a time).
+        #[arg(long = "as")]
+        as_text: Option<String>,
+    },
+    /// Maintainers: turn contributions down.
+    Reject { ids: Vec<i64> },
 }
 
 #[derive(Subcommand)]
@@ -581,6 +608,14 @@ enum ConfigKey {
     WhisperModel,
     /// Who checks each answer: typesafe/jev-latest, anthropic/<model>, or off.
     Scorer,
+    /// Share your interviews' questions, names removed, with the shared registry: on or off.
+    ShareQuestions,
+    /// Include the company with shared questions (moderation only, never published): on or off.
+    ShareCompany,
+    /// Send anonymous, content-free diagnostics: on or off.
+    Diagnostics,
+    /// The shared registry's address.
+    RegistryUrl,
 }
 
 #[derive(Subcommand)]
@@ -751,13 +786,29 @@ fn run_analysis(
     };
     let stored = pipeline::analyze_session_with(db, client.as_ref(), model, id, extras, &mut ui);
     ui.finish();
-    let stored = stored?;
     let session = db.get_session(id)?;
+    let has_video = Path::new(&session.dir).join(video::VIDEO_FILE).exists();
+    interview_coach::diagnostics::capture(settings, "report_finished", serde_json::json!({
+        "ok": stored.is_ok(), "provider": model.provider.as_str(), "mode": session.mode.as_str(), "video": has_video,
+        "practice": session.practice, "minutes": interview_coach::diagnostics::minutes(session.duration_s.unwrap_or(0.0)),
+    }));
+    let stored = stored?;
     let outcome = db.get_outcome(id)?;
     let path = report::write_pages(db, &session, outcome.as_ref())?.context("no report page")?;
     report::print_report(&session, &stored, outcome.as_ref(), full);
     if open {
         Command::new("open").arg(path).status()?;
+    }
+    // Sharing is extra: a failure is reported, never fails the review.
+    if settings.share_questions {
+        match interview_coach::registry::contribute_session(settings, db, client.as_ref(), &model.name, id) {
+            Ok(0) => {}
+            Ok(n) => {
+                interview_coach::diagnostics::capture(settings, "questions_shared", serde_json::json!({"shared": n}));
+                outln!("{}", style(format!("Shared {n} of this interview's questions (names removed) with the registry.")).dim())
+            }
+            Err(e) => warn(&format!("This interview's questions weren't shared: {e:#}")),
+        }
     }
     Ok(())
 }
@@ -1053,6 +1104,11 @@ fn finish_recording(
     let mut ui = Ui::new();
     let processed = pipeline::process_recording(db, id, &mic, &system, &mut ui);
     ui.finish();
+    let codes: Vec<String> = report["warnings"].as_array().into_iter().flatten().filter_map(|w| w["code"].as_str().map(String::from)).collect();
+    interview_coach::diagnostics::capture(settings, "recording_processed", serde_json::json!({
+        "ok": processed.is_ok(), "video": dir.join(video::VIDEO_FILE).exists(), "warnings": codes,
+        "faces_read": dir.join(video::FACES_FILE).exists(),
+    }));
     session = processed.with_context(|| {
         format!(
             "Couldn't process the recording; the raw audio is still in {}",
@@ -1732,7 +1788,20 @@ fn config_show(settings: &Settings) {
     outln!("whisper_model  {}", settings.whisper_model);
     outln!("scorer         {}", settings.scorer);
     outln!("models_dir     {}", settings.models_dir.display());
+    let on = |b: bool| if b { "on" } else { "off" };
+    outln!("share_questions {}", on(settings.share_questions));
+    outln!("share_company  {}", on(settings.share_company));
+    outln!("diagnostics    {}", on(settings.diagnostics));
+    outln!("registry_url   {}", settings.registry_url);
     outln!("{}", style("Environment variables IC_MODEL, IC_LANGUAGE, IC_WHISPER_MODEL, IC_MODELS_DIR override the file.").dim());
+}
+
+fn on_off(value: &str) -> Result<bool> {
+    match value.to_lowercase().as_str() {
+        "on" | "true" | "yes" => Ok(true),
+        "off" | "false" | "no" => Ok(false),
+        other => bail!("{other:?} isn't on or off"),
+    }
 }
 
 fn config_set(settings: &Settings, key: ConfigKey, value: &str) -> Result<()> {
@@ -1747,6 +1816,13 @@ fn config_set(settings: &Settings, key: ConfigKey, value: &str) -> Result<()> {
             )
         }
         ConfigKey::Language => file.language = Some(value.to_string()),
+        ConfigKey::ShareQuestions => file.share_questions = Some(on_off(value)?),
+        ConfigKey::ShareCompany => file.share_company = Some(on_off(value)?),
+        ConfigKey::Diagnostics => file.diagnostics = Some(on_off(value)?),
+        ConfigKey::RegistryUrl => {
+            anyhow::ensure!(value.starts_with("https://") || value.starts_with("http://127.0.0.1"), "registry_url must be https (or a local test server)");
+            file.registry_url = Some(value.trim_end_matches('/').to_string());
+        }
         ConfigKey::WhisperModel => file.whisper_model = Some(value.to_string()),
         ConfigKey::Scorer => {
             let scorer = value
@@ -2094,12 +2170,59 @@ fn list_questions(settings: &Settings, company: Option<String>, json: bool) -> R
     Ok(())
 }
 
+fn registry_cmd(settings: &Settings, action: RegistryCmd) -> Result<()> {
+    use interview_coach::registry;
+    match action {
+        RegistryCmd::Pull => {
+            let questions = registry::pull(settings, Duration::from_secs(15))?;
+            outln!("{} {} shared questions from {}", style("✓").green(), questions.len(), settings.registry_url);
+        }
+        RegistryCmd::Share { id } => {
+            if !settings.share_questions {
+                bail!("Sharing is off. Turn it on in Settings, or: ic config set share-questions on");
+            }
+            let db = open_db(settings)?;
+            let client = llm::configured_client(settings, &settings.model)?;
+            let n = registry::contribute_session(settings, &db, client.as_ref(), &settings.model.name, id)?;
+            outln!("{} Shared {n} questions (names removed).", style("✓").green());
+        }
+        RegistryCmd::Withdraw => {
+            let n = registry::withdraw(settings)?;
+            outln!("{} Withdrew {n} shared questions. Questions already approved stay: they're generic, and others may have shared them too.", style("✓").green());
+        }
+        RegistryCmd::Pending => {
+            let pending = registry::pending()?;
+            if pending.is_empty() {
+                outln!("Nothing is waiting.");
+            }
+            for p in pending {
+                let context = [p.round.as_deref(), p.role.as_deref(), p.company.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                outln!("{} {} {}", style(format!("#{}", p.id)).bold(), p.text, style(format!("[{}{}{}]", p.kind, if context.is_empty() { "" } else { " · " }, context)).dim());
+            }
+        }
+        RegistryCmd::Approve { ids, as_text } => {
+            if as_text.is_some() && ids.len() != 1 {
+                bail!("--as rewords one contribution at a time");
+            }
+            for line in registry::approve(&ids, as_text.as_deref())? {
+                outln!("{} {line}", style("✓").green());
+            }
+        }
+        RegistryCmd::Reject { ids } => {
+            let n = registry::reject(&ids)?;
+            outln!("{} Turned down {n}.", style("✓").green());
+        }
+    }
+    Ok(())
+}
+
 /// `ic mock begin`: plan the questions and create the session the app records into.
 fn mock_begin(settings: &Settings, company: Option<String>, role: Option<String>, round: Option<String>, count: usize) -> Result<()> {
     use interview_coach::{mock, questions};
     let db = open_db(settings)?;
     let target = questions::Target { company: company.clone(), role: role.clone(), round };
-    let plan = questions::plan(&questions::registry(&db)?, &target, count.clamp(1, 12));
+    let candidates = interview_coach::registry::merge(questions::registry(&db)?, interview_coach::registry::shared(settings));
+    let plan = questions::plan(&candidates, &target, count.clamp(1, 12));
     let title = match (&role, &company) {
         (Some(r), Some(c)) => format!("Mock: {r} at {c}"),
         (Some(r), None) => format!("Mock: {r}"),
@@ -2156,6 +2279,9 @@ fn mock_run(settings: &Settings, id: i64, events: bool) -> Result<()> {
             state.save(&dir)?;
             say(&mut ev, &text, done);
             if done {
+                interview_coach::diagnostics::capture(settings, "mock_finished", serde_json::json!({
+                    "questions": state.plan.len(), "turns": state.turns.len(),
+                }));
                 break;
             }
         }
@@ -2196,6 +2322,10 @@ fn eval_correct(settings: &Settings, id: i64, start: f64, labels: Option<String>
         "face_height": cues.face_h, "layout": null, "labels": labels, "measured": cues,
         "method": report.video_method.as_deref().unwrap_or(video::METHOD), "labelled_at": interview_coach::db::now_iso(),
     }))?;
+    interview_coach::diagnostics::capture(settings, "video_corrected", serde_json::json!({
+        "checks": labels.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),
+        "method": report.video_method.as_deref().unwrap_or(video::METHOD),
+    }));
     outln!("{} Saved your correction for the answer at {}.", style("✓").green(), fmt_ts(answer.start));
     Ok(())
 }
@@ -2238,7 +2368,14 @@ fn eval_video_health(settings: &Settings, json: bool) -> Result<()> {
 fn setup_status(settings: &Settings, json: bool) -> Result<()> {
     let status = setup::status(&setup::System { settings });
     if json {
-        outln!("{}", serde_json::to_string(&status)?);
+        let mut value = serde_json::to_value(&status)?;
+        // What leaves this Mac besides the coaching model and TypeSafe: both off unless chosen.
+        value["privacy"] = serde_json::json!({
+            "share_questions": settings.share_questions,
+            "share_company": settings.share_company,
+            "diagnostics": settings.diagnostics,
+        });
+        outln!("{}", serde_json::to_string(&value)?);
         return Ok(());
     }
     for check in &status.checks {
@@ -2603,6 +2740,7 @@ fn run() -> Result<()> {
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
         Cmd::Timeline { id } => refresh_timeline(&settings, id),
         Cmd::Questions { company, json } => list_questions(&settings, company, json),
+        Cmd::Registry { action } => registry_cmd(&settings, action),
         Cmd::Mock { action: MockCmd::Begin { company, role, round, count } } => mock_begin(&settings, company, role, round, count),
         Cmd::Mock { action: MockCmd::Run { id, events } } => mock_run(&settings, id, events),
         Cmd::Models { json } => list_models(&settings, json),
@@ -2717,6 +2855,11 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(e) = run() {
+        // Which command failed, never the error's text (it can hold paths and names).
+        let command = std::env::args().nth(1).filter(|c| c.len() <= 20 && c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-'));
+        if let (Some(command), Ok(settings)) = (command, Settings::load()) {
+            interview_coach::diagnostics::capture(&settings, "command_failed", serde_json::json!({"command": command}));
+        }
         errln!("{} {e:#}", style("Error:").red().bold());
         std::process::exit(1);
     }

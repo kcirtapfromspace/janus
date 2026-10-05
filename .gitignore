@@ -6,3 +6,4 @@ mac/build/
 mac/vendor/
 mac/.swiftpm/
 .DS_Store
+.wrangler/

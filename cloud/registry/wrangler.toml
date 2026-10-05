@@ -1,0 +1,16 @@
+# The shared question registry: a Worker in front of a D1 database (cloud/registry/README.md).
+name = "janus-registry"
+main = "src/index.js"
+compatibility_date = "2026-04-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "janus-registry"
+# Filled in by `wrangler d1 create janus-registry` (not a secret).
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[vars]
+# Contributions accepted per day, across every install, and per install: they protect the free
+# tier's write quota. Moderation is what keeps the registry clean.
+DAILY_CAP = "2000"
+INSTALL_DAILY_CAP = "100"

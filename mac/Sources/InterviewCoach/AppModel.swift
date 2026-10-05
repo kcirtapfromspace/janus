@@ -397,6 +397,31 @@ final class AppModel {
         }
     }
 
+    /// Turn a privacy choice on or off (`ic config set`): share-questions, share-company, diagnostics.
+    func setPrivacy(_ key: String, _ on: Bool) {
+        guard let ic else { return }
+        setupErrors["privacy"] = nil
+        Task {
+            do {
+                _ = try await ic.run(["config", "set", key, on ? "on" : "off"])
+            } catch {
+                setupErrors["privacy"] = error.localizedDescription
+            }
+            await refresh()
+        }
+    }
+
+    /// Withdraw everything this Mac shared with the registry.
+    func withdrawSharedQuestions() async -> String {
+        guard let ic else { return "Couldn't find the ic tool." }
+        do {
+            return try await ic.run(["registry", "withdraw"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "✓ ", with: "")
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     func refreshScreenPermission() {
         screenPermission = ScreenCapture.hasPermission()
     }

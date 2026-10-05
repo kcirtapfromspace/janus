@@ -8,8 +8,16 @@ public struct SetupStatus: Decodable, Equatable {
     public let model: String
     public let checks: [SetupCheck]
     public let openai: ChatGPTStatus?
+    /// What you've chosen to share (absent from older `ic`s: nothing).
+    public let privacy: Privacy?
 
     public func check(_ id: String) -> SetupCheck? { checks.first { $0.id == id } }
+}
+
+public struct Privacy: Decodable, Equatable {
+    public let shareQuestions: Bool
+    public let shareCompany: Bool
+    public let diagnostics: Bool
 }
 
 /// Basic account information only; credentials never cross the CLI/app status boundary.

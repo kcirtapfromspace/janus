@@ -4,7 +4,11 @@ When an interview ends without useful feedback, Janus gives you another perspect
 import the conversation, review the transcript and evidence behind your feedback, and prepare
 for the next round.
 Audio and video are processed locally on your Mac. Transcript text goes to your chosen coaching
-provider (Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe.
+provider (Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe. Two more
+things leave your Mac, and only if you turn them on in Settings:
+- **Sharing your interviews' questions:** rewritten first so they name no person, company or
+  product, and visible to other Janus users once approved (cloud/registry).
+- **Anonymous diagnostics:** counts and outcomes, never content.
 
 [Website](https://kcirtapfromspace.github.io/janus/) · [Download for Mac](https://github.com/kcirtapfromspace/janus/releases/latest)
 

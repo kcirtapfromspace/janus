@@ -32,6 +32,10 @@ struct SetupView: View {
                     Divider()
                     ScreenRecordingRow()
                     Divider()
+                    SharingRow()
+                    Divider()
+                    DiagnosticsRow()
+                    Divider()
                     RecordingTestRow()
                 }
             }
@@ -299,6 +303,69 @@ private struct MicrophoneRow: View {
         case .notDetermined: "Needed to record your side of the interview."
         default: "Turn on Janus under Privacy & Security › Microphone, then come back."
         }
+    }
+}
+
+/// Sharing your interviews' questions with the shared registry, for everyone's practice interviews.
+private struct SharingRow: View {
+    @Environment(AppModel.self) private var model
+    @State private var withdrawn: String?
+
+    var body: some View {
+        let privacy = model.setup?.privacy
+        HStack(alignment: .top, spacing: 12) {
+            SetupStatusIcon(status: .optional, running: false).frame(width: 20)
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Share my interview questions", isOn: Binding(
+                    get: { privacy?.shareQuestions ?? false },
+                    set: { model.setPrivacy("share-questions", $0) }
+                ))
+                .toggleStyle(.switch).font(.body.weight(.medium))
+                Text("After each review, its interviewer questions are rewritten to name no person, company or product, checked again, and sent to Janus's question registry. Once approved, they're visible to other Janus users for practice interviews. Never your answers, transcripts, audio or video.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if privacy?.shareQuestions == true {
+                    Toggle("Include the company (for review only, never published)", isOn: Binding(
+                        get: { privacy?.shareCompany ?? false },
+                        set: { model.setPrivacy("share-company", $0) }
+                    ))
+                    .toggleStyle(.checkbox).font(.callout)
+                }
+                HStack {
+                    Button("Withdraw what I've shared") {
+                        Task { withdrawn = await model.withdrawSharedQuestions() }
+                    }
+                    .buttonStyle(.link)
+                    if let withdrawn { Text(withdrawn).font(.caption).foregroundStyle(.secondary) }
+                }
+                if let error = model.setupErrors["privacy"] {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+}
+
+/// Anonymous diagnostics: counts and outcomes, never content.
+private struct DiagnosticsRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            SetupStatusIcon(status: .optional, running: false).frame(width: 20)
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Send anonymous diagnostics", isOn: Binding(
+                    get: { model.setup?.privacy?.diagnostics ?? false },
+                    set: { model.setPrivacy("diagnostics", $0) }
+                ))
+                .toggleStyle(.switch).font(.body.weight(.medium))
+                Text("Whether recording, reading the video, reviews and practice worked: counts, outcomes and warning codes, with a random id for this Mac. Never transcripts, questions, names, file paths, audio, video or faces.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
     }
 }
 

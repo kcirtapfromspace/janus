@@ -211,6 +211,18 @@ pub struct FileConfig {
     /// Who checks each answer: "typesafe/jev-latest", "anthropic/<model>", or "off".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scorer: Option<ScorerRef>,
+    /// Share your interviews' questions (names removed) with the shared registry. Off by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_questions: Option<bool>,
+    /// Include the company with shared questions (for moderation only; never published). Off by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub share_company: Option<bool>,
+    /// Send anonymous, content-free diagnostics. Off by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<bool>,
+    /// The shared registry's address (cloud/registry).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registry_url: Option<String>,
 }
 
 impl FileConfig {
@@ -267,6 +279,10 @@ pub struct Settings {
     pub model: ModelRef,
     /// Who checks each answer (used only when it's available: a TypeSafe key, or a Claude sign-in).
     pub scorer: ScorerRef,
+    pub share_questions: bool,
+    pub share_company: bool,
+    pub diagnostics: bool,
+    pub registry_url: String,
 }
 
 fn home() -> PathBuf {
@@ -304,6 +320,13 @@ impl Settings {
             scorer: env_parse::<ScorerRef>("IC_SCORER")?
                 .or(file.scorer)
                 .unwrap_or_else(default_scorer),
+            share_questions: file.share_questions.unwrap_or(false),
+            share_company: file.share_company.unwrap_or(false),
+            diagnostics: file.diagnostics.unwrap_or(false),
+            registry_url: env::var("IC_REGISTRY_URL")
+                .ok()
+                .or(file.registry_url)
+                .unwrap_or_else(|| crate::registry::DEFAULT_URL.into()),
             data_dir,
         })
     }

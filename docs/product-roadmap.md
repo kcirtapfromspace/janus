@@ -69,7 +69,10 @@ Set release thresholds before reviewing results, and document failures instead o
 scripted evaluation scores as proof of real-world accuracy.
 
 Defer cloud sync, Windows and calendar integrations until the core improvement loop earns
-repeat use. A local product does not need a hosted backend merely to be launchable.
+repeat use. A local product does not need a hosted backend merely to be launchable. The one
+exception, decided 2026-10-05, is the opt-in shared question registry: a free Cloudflare Worker
+and D1 database (cloud/registry), until volume calls for something sturdier. Interviews
+themselves stay local.
 
 ## Recording reliability: first implementation
 

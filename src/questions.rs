@@ -42,6 +42,14 @@ pub struct Question {
     pub stronger_answer: Option<String>,
     /// "yours", "shared" (the published registry) or "built-in".
     pub source: String,
+    /// Shared questions: how many people contributed it.
+    #[serde(default)]
+    pub contributors: usize,
+    /// Shared questions: the rounds and roles it was asked in.
+    #[serde(default)]
+    pub rounds: Vec<String>,
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 impl Question {
@@ -125,6 +133,9 @@ pub fn registry(db: &Db) -> Result<Vec<Question>> {
                     asked: vec![asked],
                     stronger_answer: Some(q.stronger_answer.clone()).filter(|s| !s.trim().is_empty()),
                     source: "yours".into(),
+                    contributors: 0,
+                    rounds: vec![],
+                    roles: vec![],
                 })),
             }
         }
@@ -151,7 +162,16 @@ pub fn built_in() -> Vec<Question> {
         ("behavioral", "Tell me about a time you got critical feedback. What did you do with it?"),
     ]
     .into_iter()
-    .map(|(kind, text)| Question { text: text.into(), kind: kind.into(), asked: vec![], stronger_answer: None, source: "built-in".into() })
+    .map(|(kind, text)| Question {
+        text: text.into(),
+        kind: kind.into(),
+        asked: vec![],
+        stronger_answer: None,
+        source: "built-in".into(),
+        contributors: 0,
+        rounds: vec![],
+        roles: vec![],
+    })
     .collect()
 }
 
@@ -175,23 +195,25 @@ fn matches(field: &Option<String>, want: &Option<String>) -> bool {
 }
 
 /// How well a question suits a mock interview for `target`: the same company, role and round count
-/// most, then a weak answer last time (worth practising), then how often it comes up.
+/// most, then a weak answer last time (worth practising), then how often it comes up (asked of
+/// you, or shared by others).
 pub fn relevance(q: &Question, target: &Target) -> f64 {
     let any = |f: &dyn Fn(&Asked) -> bool| q.asked.iter().any(f);
+    let listed = |list: &[String], want: &Option<String>| list.iter().any(|item| matches(&Some(item.clone()), want));
     let mut score = 0.0;
     if any(&|a| matches(&a.company, &target.company)) {
         score += 3.0;
     }
-    if any(&|a| matches(&a.role, &target.role)) {
+    if any(&|a| matches(&a.role, &target.role)) || listed(&q.roles, &target.role) {
         score += 2.0;
     }
-    if any(&|a| matches(&a.round, &target.round)) {
+    if any(&|a| matches(&a.round, &target.round)) || listed(&q.rounds, &target.round) {
         score += 1.0;
     }
     if q.latest_score().is_some_and(|s| s <= 3) {
         score += 2.0;
     }
-    score + (1.0 + q.times() as f64).ln() * 0.5
+    score + (1.0 + q.times() as f64).ln() * 0.5 + (1.0 + q.contributors as f64).ln() * 0.4
 }
 
 /// How many of one kind a mock interview asks at most.
@@ -235,7 +257,8 @@ mod tests {
     use super::*;
 
     fn q(kind: &str, text: &str, asked: Vec<Asked>) -> Question {
-        Question { text: text.into(), kind: kind.into(), asked, stronger_answer: None, source: "yours".into() }
+        Question { text: text.into(), kind: kind.into(), asked, stronger_answer: None, source: "yours".into(), contributors: 0,
+                   rounds: vec![], roles: vec![] }
     }
 
     fn asked(company: &str, score: Option<u8>, practice: bool) -> Asked {
