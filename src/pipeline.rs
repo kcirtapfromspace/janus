@@ -284,9 +284,11 @@ fn record_stage(
             let video_file = dir.join(video::VIDEO_FILE);
             if video_file.exists() {
                 progress.stage("Finding the faces in the video");
-                if let Err(e) = video::extract(&video_file, &dir.join(video::FACES_FILE), progress) {
-                    db.set_run_warnings(run, &[format!("The video's faces couldn't be read, so the report leaves out what the video showed: {e:#}")])?;
-                }
+                let warnings = match video::extract(&video_file, &dir.join(video::FACES_FILE), progress) {
+                    Ok(warnings) => warnings,
+                    Err(e) => vec![format!("The video's faces couldn't be read, so the report leaves out what the video showed: {e:#}")],
+                };
+                db.set_run_warnings(run, &warnings)?;
             }
             db.set_status(session_id, Status::New, None)?;
             Ok((db.get_session(session_id)?, None))

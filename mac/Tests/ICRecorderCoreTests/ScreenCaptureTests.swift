@@ -64,10 +64,18 @@ final class ScreenCaptureTests: XCTestCase {
     func testVideoTimesStartAtT0AndOnlyMoveForward() {
         var clock = VideoClock()
         XCTAssertNil(clock.time(forSecondsSinceT0: -0.2), "frames from before t0 are dropped")
-        XCTAssertEqual(clock.time(forSecondsSinceT0: 0), 0)
-        XCTAssertEqual(clock.time(forSecondsSinceT0: 0.1), 0.1)
+        XCTAssertEqual(clock.time(forSecondsSinceT0: 0)?.seconds, 0)
+        XCTAssertEqual(clock.time(forSecondsSinceT0: 0.1)?.seconds ?? 0, 0.1, accuracy: 1e-9)
         XCTAssertNil(clock.time(forSecondsSinceT0: 0.1), "a repeated time")
         XCTAssertNil(clock.time(forSecondsSinceT0: 0.05), "an earlier time")
-        XCTAssertEqual(clock.time(forSecondsSinceT0: 125.4), 125.4, "a window that appears late keeps its real time")
+        XCTAssertEqual(clock.time(forSecondsSinceT0: 125.4)?.seconds ?? 0, 125.4, accuracy: 1e-9, "a window that appears late keeps its real time")
+    }
+
+    /// The reviewer's case: frames under half a 1/600 s tick apart would round to the same time and fail the writer.
+    func testFramesInsideOneTickAreDropped() {
+        var clock = VideoClock()
+        XCTAssertNotNil(clock.time(forSecondsSinceT0: 1.0))
+        XCTAssertNil(clock.time(forSecondsSinceT0: 1.0005), "0.5 ms later: the same tick once rounded")
+        XCTAssertNotNil(clock.time(forSecondsSinceT0: 1.0034), "the next tick")
     }
 }

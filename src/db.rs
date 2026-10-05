@@ -226,6 +226,8 @@ pub struct StoredAnalysis {
     pub turn_signals: Vec<crate::temperature::Signal>,
     /// Which scorer judged the timeline's turns, e.g. `typesafe/jev-1.13.0` (None: voice only).
     pub timeline_scorer: Option<String>,
+    /// The video cues' method (`video::Params::name`), when the call's video was read.
+    pub video_method: Option<String>,
     /// What the report was built from (None for reports made before versions were recorded).
     pub inputs: Option<crate::versions::Manifest>,
     /// The version this one was re-run from.
@@ -924,6 +926,7 @@ impl Db {
             answer_checks: self.answer_checks(id)?,
             turn_signals,
             timeline_scorer,
+            video_method: self.video_method(id)?,
             inputs: inputs.as_deref().and_then(|j| serde_json::from_str(j).ok()),
             parent_id,
         }))
@@ -964,6 +967,19 @@ impl Db {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Which method read the video for a report's timeline, if any did.
+    pub fn video_method(&self, analysis_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT json_extract(features_json, '$.video_method') FROM turn_signals
+                 WHERE analysis_id = ?1 AND json_extract(features_json, '$.video_method') IS NOT NULL LIMIT 1",
+                [analysis_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
     }
 
     /// A run's timeline in turn order, and the scorer that judged it.
@@ -1142,6 +1158,7 @@ impl Db {
                         answer_checks: self.answer_checks(id)?,
                         turn_signals,
                         timeline_scorer,
+                        video_method: self.video_method(id)?,
                         inputs: inputs.as_deref().and_then(|j| serde_json::from_str(j).ok()),
                         parent_id,
                     })

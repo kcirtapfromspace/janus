@@ -42,6 +42,8 @@ const PAGE: &str = include_str!("label.html");
 const VIDEO_CHUNK: u64 = 4 << 20;
 const MAX_HEAD: u64 = 16 << 10;
 const MAX_BODY: usize = 64 << 10;
+/// Connections handled at once; more wait their turn (the page needs only a few).
+const MAX_CONNECTIONS: usize = 16;
 
 pub fn default_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("eval/video")
@@ -303,26 +305,35 @@ pub struct Server {
     store: Store,
     token: String,
     port: u16,
+    open: std::sync::atomic::AtomicUsize,
 }
 
 impl Server {
     pub fn new(dir: &Path, token: &str, port: u16) -> Self {
-        Server { store: Store::new(dir), token: token.to_string(), port }
+        Server { store: Store::new(dir), token: token.to_string(), port, open: Default::default() }
     }
 
-    /// Answer requests until the process ends (Ctrl+C), one thread per connection.
+    /// Answer requests until the process ends (Ctrl+C), one thread per connection, at most
+    /// `MAX_CONNECTIONS` at once, so a stalled client can't pile up threads.
     pub fn run(self: Arc<Self>, listener: TcpListener) {
+        use std::sync::atomic::Ordering;
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
+            while self.open.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            self.open.fetch_add(1, Ordering::SeqCst);
             let server = self.clone();
             std::thread::spawn(move || {
                 let _ = server.handle(stream);
+                server.open.fetch_sub(1, Ordering::SeqCst);
             });
         }
     }
 
     fn handle(&self, mut stream: TcpStream) -> Result<()> {
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         let Ok(req) = Request::read(&stream) else {
             return respond(&mut stream, 400, "text/plain", b"Bad request", &[]);
         };
@@ -467,30 +478,34 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8],
 }
 
 /// The bytes a Range header asks for, inclusive, at most `VIDEO_CHUNK` of them; None when it's
-/// unsatisfiable. No header means from the start.
+/// unsatisfiable or missing (a request without one gets the whole file).
 pub fn byte_range(header: Option<&str>, len: u64) -> Option<(u64, u64)> {
     if len == 0 {
         return None;
     }
-    let (start, end) = match header.and_then(|h| h.strip_prefix("bytes=")) {
-        None => (0, len - 1),
-        Some(spec) => {
-            let (a, b) = spec.split(',').next()?.split_once('-')?;
-            match (a.trim().parse::<u64>().ok(), b.trim().parse::<u64>().ok()) {
-                (Some(a), Some(b)) => (a, b.min(len - 1)),
-                (Some(a), None) => (a, len - 1),
-                (None, Some(n)) if n > 0 => (len.saturating_sub(n), len - 1),
-                _ => return None,
-            }
-        }
+    let spec = header?.strip_prefix("bytes=")?;
+    let (a, b) = spec.split(',').next()?.split_once('-')?;
+    let (start, end) = match (a.trim().parse::<u64>().ok(), b.trim().parse::<u64>().ok()) {
+        (Some(a), Some(b)) => (a, b.min(len - 1)),
+        (Some(a), None) => (a, len - 1),
+        (None, Some(n)) if n > 0 => (len.saturating_sub(n), len - 1),
+        _ => return None,
     };
     (start <= end && start < len).then(|| (start, end.min(start + VIDEO_CHUNK - 1)))
 }
 
-/// Video in pieces (206 Partial Content), so the browser can seek straight to a clip.
+/// Video in pieces (206 Partial Content), so the browser can seek straight to a clip. Without a
+/// Range header, the whole file (200).
 fn send_video(stream: &mut TcpStream, path: &Path, range: Option<&str>) -> Result<()> {
     let mut file = std::fs::File::open(path)?;
     let len = file.metadata()?.len();
+    if range.is_none() {
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {len}\r\nAccept-Ranges: bytes\r\n\
+                            Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n");
+        stream.write_all(head.as_bytes())?;
+        std::io::copy(&mut file, stream)?;
+        return Ok(());
+    }
     let Some((start, end)) = byte_range(range, len) else {
         return respond(stream, 416, "text/plain", b"", &[("Content-Range", format!("bytes */{len}"))]);
     };
@@ -642,7 +657,8 @@ mod tests {
 
     #[test]
     fn ranges_are_clamped_to_the_file_and_to_one_piece() {
-        assert_eq!(byte_range(None, 100), Some((0, 99)));
+        assert_eq!(byte_range(None, 100), None, "no header: the whole file, not a range");
+        assert_eq!(byte_range(Some("items=0-5"), 100), None);
         assert_eq!(byte_range(Some("bytes=10-19"), 100), Some((10, 19)));
         assert_eq!(byte_range(Some("bytes=90-"), 100), Some((90, 99)));
         assert_eq!(byte_range(Some("bytes=-10"), 100), Some((90, 99)));
@@ -683,6 +699,8 @@ mod tests {
 
         let video = call(format!("GET /video/s001?t=tok HTTP/1.1\r\nHost: {host}\r\nRange: bytes=10-13\r\n\r\n"));
         assert!(video.starts_with("HTTP/1.1 206") && video.contains("Content-Range: bytes 10-13/256"), "{video}");
+        let whole = call(format!("GET /video/s001?t=tok HTTP/1.1\r\nHost: {host}\r\n\r\n"));
+        assert!(whole.starts_with("HTTP/1.1 200") && whole.contains("Content-Length: 256"), "no Range: the whole file");
         assert!(call(format!("GET /video/..%2F..?t=tok HTTP/1.1\r\nHost: {host}\r\n\r\n")).starts_with("HTTP/1.1 404"),
                 "only an interview's own video");
 

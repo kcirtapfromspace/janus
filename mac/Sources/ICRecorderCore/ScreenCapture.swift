@@ -87,16 +87,21 @@ public enum CallWindows {
 }
 
 /// Presentation times for the video file, where 0 is t0, the instant both audio tracks start.
-/// Frames from before t0, or not after the previous frame, are dropped (the writer needs strictly
-/// increasing times).
+/// Frames from before t0, or not after the previous frame, are dropped: the writer needs strictly
+/// increasing times, compared in the file's own ticks (1/600 s), since two frames under a tick
+/// apart would round to the same time and fail the writer.
 struct VideoClock {
-    private(set) var last: Double?
+    static let timescale: CMTimeScale = 600
+    private(set) var last: CMTime?
 
-    mutating func time(forSecondsSinceT0 seconds: Double) -> Double? {
+    var lastSeconds: Double? { last?.seconds }
+
+    mutating func time(forSecondsSinceT0 seconds: Double) -> CMTime? {
         guard seconds >= 0 else { return nil }
-        if let last, seconds <= last + 0.001 { return nil }
-        last = seconds
-        return seconds
+        let time = CMTime(value: CMTimeValue((seconds * Double(Self.timescale)).rounded()), timescale: Self.timescale)
+        if let last, CMTimeCompare(time, last) <= 0 { return nil }
+        last = time
+        return time
     }
 }
 
@@ -204,7 +209,9 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.sync {
             if writer.status == .writing {
                 input.markAsFinished()
-                writer.endSession(atSourceTime: CMTime(seconds: max(end, clock.last ?? 0), preferredTimescale: 600))
+                let lastFrame = clock.last ?? .zero
+                let stop = CMTime(seconds: max(end, 0), preferredTimescale: VideoClock.timescale)
+                writer.endSession(atSourceTime: CMTimeMaximum(stop, lastFrame))
             }
         }
         // Blocks the caller (the main queue) while the file is finalized: recorder.json must
@@ -262,7 +269,7 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let switching = CallWindows.shouldSwitch(from: stream == nil ? nil : current, to: best, available: candidates)
         guard switching, let best, let window = pairs.first(where: { $0.0.windowID == best.windowID })?.1 else { return }
         current = best
-        windows.append(best.label)
+        if windows.last != best.label { windows.append(best.label) }  // retries after a failed start add nothing
         log.info("video: recording \(best.label)")
         let filter = SCContentFilter(desktopIndependentWindow: window)
         if let stream {
@@ -341,9 +348,9 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             dropped += 1
             return
         }
-        if adaptor.append(pixels, withPresentationTime: CMTime(seconds: pts, preferredTimescale: 600)) {
+        if adaptor.append(pixels, withPresentationTime: pts) {
             frames += 1
-            if firstFrame == nil { firstFrame = pts }
+            if firstFrame == nil { firstFrame = pts.seconds }
         } else {
             dropped += 1
         }

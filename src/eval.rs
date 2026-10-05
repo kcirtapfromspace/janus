@@ -1,7 +1,8 @@
 //! The Jev vs Claude comparison (`ic eval scorers`): every arm scores the same labelled items several
 //! times, with choice options rotated each run. A check set says what's scored: your answers
 //! (tests/fixtures/answers.jsonl, docs/eval/scorer-decision.md) or interviewer turns
-//! (tests/fixtures/interviewer_turns.jsonl, docs/eval/interviewer-decision.md). Raw results are
+//! (tests/fixtures/interviewer_turns.jsonl, docs/eval/interviewer-decision.md), or the call's video
+//! against labelled clips with local arms (video_eval.rs, docs/eval/video-decision.md). Raw results are
 //! cached, so re-running or re-analysing costs nothing. Each summary applies its set's rule, written
 //! down before the first run.
 
@@ -66,6 +67,8 @@ pub fn load_items(path: &Path) -> Result<Vec<Item>> {
 pub enum ArmKind {
     Jev { model: String },
     Claude { model: String, effort: Effort },
+    /// `video.rs` on this Mac, with one version's parameters (`video::Params::named`).
+    Local { method: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -93,9 +96,10 @@ impl Arm {
                 model: "claude-opus-5-5".into(),
                 effort: Effort::Low,
             },
+            local if crate::video::Params::named(local).is_some() => ArmKind::Local { method: local.into() },
             other => {
                 return Err(format!(
-                    "unknown arm {other:?} (expected jev, haiku, sonnet, opus)"
+                    "unknown arm {other:?} (expected jev, haiku, sonnet, opus, video-v1 or video-v1.1)"
                 ));
             }
         };
@@ -107,7 +111,7 @@ impl Arm {
 
     /// Cheapest and fastest first: the decision rule prefers earlier arms when several qualify.
     pub fn cost_rank(&self) -> usize {
-        ["jev", "haiku", "sonnet", "opus"]
+        ["video-v1.1", "video-v1", "jev", "haiku", "sonnet", "opus"]
             .iter()
             .position(|n| *n == self.name)
             .unwrap_or(9)
@@ -116,6 +120,7 @@ impl Arm {
     fn model(&self) -> &str {
         match &self.kind {
             ArmKind::Jev { model } | ArmKind::Claude { model, .. } => model,
+            ArmKind::Local { method } => method,
         }
     }
 }
@@ -148,6 +153,10 @@ fn assess(
                 effort: *effort,
             }
             .assess(input, set, rotation)
+        }
+        ArmKind::Local { method } => {
+            let params = crate::video::Params::named(method).with_context(|| format!("no video method {method}"))?;
+            crate::video_eval::VideoScorer { params }.assess(input, set, rotation)
         }
     }
 }
@@ -804,13 +813,14 @@ pub fn markdown(
     runs: usize,
     set: &CheckSet,
 ) -> String {
-    let (what, rule_doc) = match set.id {
-        "answers" => ("answer", "docs/eval/scorer-decision.md"),
-        _ => ("interviewer-turn", "docs/eval/interviewer-decision.md"),
+    let (title, rule_doc, runs_vary) = match set.id {
+        "answers" => ("Jev vs Claude: answer checks", "docs/eval/scorer-decision.md", "choice options rotated"),
+        "video" => ("Video cues against labelled clips", "docs/eval/video-decision.md", "the sampling grid shifted"),
+        _ => ("Jev vs Claude: interviewer-turn checks", "docs/eval/interviewer-decision.md", "choice options rotated"),
     };
     let mut md = format!(
-        "# Jev vs Claude: {what} checks\n\n{items} labelled items × {runs} runs per arm, choice \
-                          options rotated each run. Rule: {rule_doc}.\n\n## Speed and cost\n\n\
+        "# {title}\n\n{items} labelled items × {runs} runs per arm, {runs_vary} each run. \
+                          Rule: {rule_doc}.\n\n## Speed and cost\n\n\
                           | Arm | Model | Calls | Failed | p50 | p95 | Input tokens / item |\n|---|---|---|---|---|---|---|\n"
     );
     for s in stats {
@@ -853,8 +863,10 @@ pub fn markdown(
             );
         }
     }
-    md +=
-        "\n## Decision\n\n| Check | Winner | Qualified | Why others didn't |\n|---|---|---|---|\n";
+    // The video set decides with its own, longer rule (video_eval::decisions) and passes none here.
+    if !decisions.is_empty() {
+        md += "\n## Decision\n\n| Check | Winner | Qualified | Why others didn't |\n|---|---|---|---|\n";
+    }
     for d in decisions {
         let why: Vec<String> = d
             .reasons

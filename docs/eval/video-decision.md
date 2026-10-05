@@ -3,10 +3,16 @@
 **Draft for review.** The rule below freezes when the first designed clips are labelled, before
 anything is scored, so the results can't shape it. This is Jev's discipline applied to the
 call's video: a cue is shown only after it passes a test against labelled clips. The code will
-be `eval::decide` with `video::video_set()`; its constants must match this page. Checks that pass
-go in `video::VIDEO_PASSED`.
+is `video_eval::decisions` with `video_eval::video_set()` (`ic eval scorers --set video`); its
+constants must match this page. The review shows cues through `video::GATE`:
+- checks that pass go in `passed` and show plainly;
+- checks that fail go in `failed` and aren't shown;
+- checks not yet tested show as experimental.
 
-Until then, preview.14's **What the video showed** stays marked experimental.
+Every run writes the gate its results suggest, but the gate only changes once the rule is
+really met.
+
+Until then, the review's **What the video showed** stays marked experimental.
 
 ## What's scored
 
@@ -42,19 +48,22 @@ called yours is wrong.
 
 | Arm | What it is | Runs on |
 |---|---|---|
-| `video-v1` | `src/video.rs` as shipped in preview.14, with its thresholds frozen (`NOD_DROP` 0.06, `NOD_WINDOW_S` 0.8, `AWAY_YAW` 30°, `AWAY_PITCH` 25°, `MIN_FACE_H` 0.04) | this Mac |
-| `video-v2` (candidate) | MediaPipe face landmarks and blendshapes: adds smiles and steadier head pitch. Its thresholds are tuned on the designed clips only | this Mac |
+| `video-v1` | `src/video.rs` as shipped in preview.14, with its thresholds frozen (`nod_drop` 0.06, `nod_window_s` 0.8, `away_yaw` 30°, `away_pitch` 25°, `min_face_h` 0.04). Kept to measure what later versions change | this Mac |
+| `video-v1.1` | The review's current method: v1's thresholds plus three fixes found reviewing it. Pieces of one face (looking down, a layout change) are pooled by tile before telling you apart. Faces that can't be told apart are left out instead of counted as someone else, since your own head movements were becoming "their nods". Coverage counts frames that stood still | this Mac |
+| `video-mp` (candidate) | MediaPipe face landmarks and blendshapes: adds smiles and steadier head pitch. Its thresholds are tuned on the designed clips only | this Mac |
 | `opus-frames` (optional baseline) | Claude Opus 5.5 looking at 1-frame-per-second stills. Claude takes images, not video, so it can't score `nodded` or `nod_count`. Designed clips only | Anthropic API |
 
-Per check, the cheapest qualifying arm wins (`video-v1` first, then `video-v2`, then
-`opus-frames`), as in `eval::decide`. A cloud arm is a baseline for comparison. It is never used
+Each arm is judged on its own. The review uses the one named in `video::CURRENT`; changing it
+means a new method name, which must pass the rule again. A cloud arm is a baseline for comparison. It is never used
 on real interviews unless the user opts in, because the review promises that nothing about
 faces leaves the Mac.
 
-**Runs:** each clip is scored 3 times, each time sampling the frames at a different starting
-point. `ic-vision` reads the clip once at 10 frames per second, and each run takes every other
-sample starting from a different frame. This is the video version of rotating Jev's options.
-A cue that flips when its frames shift by a sixth of a second sits on a threshold edge.
+**Runs:** each clip is scored 3 times, each time sampling the frames from a different starting
+point. `ic-vision` reads each interview once, densely (10 frames a second, `faces-dense.json` next
+to the review's `faces.json`). Each run re-samples it on the review's 6-a-second grid, starting 0,
+1/18 or 1/9 of a second in, and scores the whole interview the way the review would: tracks,
+telling you apart, nods. This is the video version of rotating Jev's options. A cue that flips
+when its frames shift by a fraction of a second sits on a threshold edge.
 
 ## The rule
 
@@ -67,15 +76,17 @@ A check passes when its arm meets **all** of these on the **realistic set** (bel
 | No more than this below its designed-set score | 0.10 |
 | Failed clips (the tool errored, or no video) | none |
 | Positives in the realistic set, per yes/no answer and per choice option | at least 30 before the run counts |
+| Labelled realistic clips, for a level check (`nod_count`) | at least 30 |
 
 **Tile size:** results are also broken down by the size of the face in the frame: under 8%,
 8–15%, and over 15% of the frame's height. If a passing check falls below 0.75 within one size
-band, the review hides that cue for faces of that size rather than dropping the check. Face size
+band (with at least 10 clips in it), the review hides that cue for faces of that size rather than
+dropping the check. Face size
 is something the product can measure; layout isn't, so layout is reported but not used as a
 gate.
 
 **A check that fails** is not shown: it's not counted, named or summarised. It can be re-tested
-after the method changes (`video-v2`, new thresholds) with the same rule, on clips the change
+after the method changes (new thresholds, `video-mp`) with the same rule, on clips the change
 was not tuned on.
 
 ## Clips and labels
@@ -167,18 +178,45 @@ ic eval label                            # label them in the browser; Ctrl+C whe
 - The page plays the recorder's video in Chrome, which was tested with the labelling page.
   Safari is expected to work, since it plays QuickTime natively, but hasn't been tried.
 
-## Code to add when this is adopted
+## Scoring
 
-- `video::video_set()` and `video::you_set()` as `CheckSet`s. Their `input_from` builds a
-  `ClipInput` (`session_dir`, `start`, `end`) whose state is that window of `faces.json`.
-- `ArmKind::Local { method }` in `eval.rs`, and a `VideoScorer: Scorer` that runs `video.rs` on
-  the clip. Its `rotation` is the sampling offset. Each yes/no check returns probability 0 or 1
-  (`video-v1` isn't probabilistic, so calibration isn't gated).
-- `ic eval scorers --set video --items <path>`, defaulting to `tests/fixtures/video_clips.jsonl`
-  for the designed set.
-- `video::VIDEO_PASSED` and the tile-size bands, gating `video::notes` and the review section the
-  way `temperature::EVAL_PASSED` gates the timeline. The "experimental" tag comes off only for
-  checks that pass.
+Built (`src/video_eval.rs`):
+
+```sh
+ic eval scorers --set video          # both arms against ~/InterviewCoach/eval/video/clips.jsonl
+ic eval video-health                 # capture and face reading in every recording with video
+```
+
+`dist/eval/video/summary.md` has these sections:
+- **Accuracy by check:** balanced accuracy, or within one level, plus stability.
+- **Coverage:** clips each arm answered or abstained on, either because too little video covered
+  the clip or because no face's angle was measured.
+- **The rule, check by check:** pass, fail or "not yet", with the reasons.
+- **Results by face size and by layout.**
+- **Label counts, by origin.**
+- **Who is you.**
+- **Tuning:** a sweep of each threshold on the designed clips only.
+- **The gate these results suggest.**
+- **The clips where each arm disagrees with its label, to re-check.**
+
+`video.json` has the same results for tools. Each yes/no check answers with probability 0 or 1,
+because the local arms aren't probabilistic, so calibration isn't gated.
+
+`ic eval video-health` reports, per recording:
+- frames dropped, and when the call window first appeared;
+- whether the video could be read to the end;
+- how much of it shows a readable face, and how big the faces are;
+- whether your face was told apart, and how many others were usually on screen;
+- how much face time couldn't be told apart;
+- cues found per answer.
+
+It flags what makes cues unreliable, so a bad recording isn't labelled and blamed on the
+thresholds.
+
+## Code to add
+
+- `video-mp` (smiles), and an Opus baseline arm on designed clips.
+- The agreement report between two labellers (Cohen's kappa per check).
 
 ## Known limits
 

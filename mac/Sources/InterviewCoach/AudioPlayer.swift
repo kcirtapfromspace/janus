@@ -46,6 +46,8 @@ final class AudioPlayer {
             let at = player.currentTime()
             player.replaceCurrentItem(with: AVPlayerItem(asset: both))
             if at.seconds > 0 { await player.seek(to: at, toleranceBefore: .zero, toleranceAfter: .zero) }
+            // Another interview may have been opened during the seek.
+            guard self.player === player, self.videoPath == video else { return }
             self.hasVideo = true
         }
     }

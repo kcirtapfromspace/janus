@@ -1,7 +1,7 @@
 //! `ic` — the Janus command line.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -360,14 +360,17 @@ enum CompanyCmd {
 enum EvalCmd {
     /// Score every labelled item with each arm, then apply the set's rule in docs/eval/.
     Scorers {
-        /// What to score: answers (your answers' checks) or interviewer (the timeline's turn checks).
+        /// What to score: answers (your answers' checks), interviewer (the timeline's turn checks),
+        /// or video (the video cues against your labelled clips).
         #[arg(long, value_enum, default_value_t = EvalSet::Answers)]
         set: EvalSet,
-        /// The labelled items (default: tests/fixtures/answers.jsonl or interviewer_turns.jsonl).
+        /// The labelled items (default: tests/fixtures/answers.jsonl or interviewer_turns.jsonl;
+        /// for video, the clips you labelled: ~/InterviewCoach/eval/video/clips.jsonl).
         #[arg(long)]
         items: Option<PathBuf>,
-        /// Any of: jev, haiku, sonnet, opus.
-        #[arg(long, value_delimiter = ',', default_value = "jev,haiku,sonnet,opus")]
+        /// Any of jev, haiku, sonnet, opus (default: all four); for video, video-v1.1 and video-v1
+        /// (default: both).
+        #[arg(long, value_delimiter = ',')]
         arms: Vec<String>,
         #[arg(long, default_value_t = 3)]
         runs: usize,
@@ -392,6 +395,12 @@ enum EvalCmd {
         /// Where the labels live (default: ~/InterviewCoach/eval/video, outside the repository).
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+    /// How capture and face reading went in every interview recorded with video: what to fix
+    /// before trusting (or labelling) its cues.
+    VideoHealth {
+        #[arg(long)]
+        json: bool,
     },
     /// Label the clips in the browser, on a page served to this Mac only.
     Label {
@@ -426,6 +435,7 @@ impl ClipOrigin {
 enum EvalSet {
     Answers,
     Interviewer,
+    Video,
 }
 
 impl EvalSet {
@@ -433,21 +443,32 @@ impl EvalSet {
         match self {
             EvalSet::Answers => interview_coach::scoring::answer_set(),
             EvalSet::Interviewer => interview_coach::temperature::interviewer_set(),
+            EvalSet::Video => interview_coach::video_eval::video_set(),
         }
     }
 
-    fn default_items(self) -> PathBuf {
-        PathBuf::from(match self {
-            EvalSet::Answers => "tests/fixtures/answers.jsonl",
-            EvalSet::Interviewer => "tests/fixtures/interviewer_turns.jsonl",
-        })
+    fn default_items(self, settings: &Settings) -> PathBuf {
+        match self {
+            EvalSet::Answers => PathBuf::from("tests/fixtures/answers.jsonl"),
+            EvalSet::Interviewer => PathBuf::from("tests/fixtures/interviewer_turns.jsonl"),
+            EvalSet::Video => label::default_dir(&settings.data_dir).join(label::CLIPS_FILE),
+        }
     }
 
     fn default_out(self) -> PathBuf {
         PathBuf::from(match self {
             EvalSet::Answers => "dist/eval",
             EvalSet::Interviewer => "dist/eval/interviewer",
+            EvalSet::Video => "dist/eval/video",
         })
+    }
+
+    fn default_arms(self) -> Vec<String> {
+        let names: &[&str] = match self {
+            EvalSet::Video => &["video-v1.1", "video-v1"],
+            _ => &["jev", "haiku", "sonnet", "opus"],
+        };
+        names.iter().map(|s| s.to_string()).collect()
     }
 }
 
@@ -1812,7 +1833,7 @@ fn eval_scorers(
     let set = which.check_set();
     let out = out.unwrap_or_else(|| which.default_out());
     let out = out.as_path();
-    let mut items = eval::load_items(&items_path.unwrap_or_else(|| which.default_items()))?;
+    let mut items = eval::load_items(&items_path.unwrap_or_else(|| which.default_items(settings)))?;
     if let Some(n) = limit {
         items.truncate(n);
     }
@@ -1905,6 +1926,121 @@ fn eval_scorers(
         );
     }
     outln!("Summary: {}", path.display());
+    Ok(())
+}
+
+/// `ic eval scorers --set video`: the video cues against the clips labelled with `ic eval label`,
+/// under docs/eval/video-decision.md's rule. Everything runs on this Mac.
+fn eval_video(
+    settings: &Settings,
+    items_path: Option<PathBuf>,
+    arm_names: &[String],
+    runs: usize,
+    out: Option<PathBuf>,
+    limit: Option<usize>,
+    concurrency: usize,
+) -> Result<()> {
+    use interview_coach::{eval, video_eval};
+    let set = video_eval::video_set();
+    let path = items_path.unwrap_or_else(|| EvalSet::Video.default_items(settings));
+    let mut items = video_eval::load_clips(&path)?;
+    if let Some(n) = limit {
+        items.truncate(n);
+    }
+    if items.is_empty() {
+        bail!("No labelled clips in {}. Cut some with `ic eval clips <interview ids>`, then label them with `ic eval label`.", path.display());
+    }
+    let marks = label::Store::new(path.parent().unwrap_or(Path::new("."))).read(label::YOU_FILE)?;
+    let arms: Vec<eval::Arm> = arm_names.iter().map(|a| eval::Arm::parse(a)).collect::<Result<_, _>>().map_err(|e| anyhow::anyhow!(e))?;
+    if let Some(a) = arms.iter().find(|a| !matches!(a.kind, eval::ArmKind::Local { .. })) {
+        bail!("{} doesn't score video; use video-v1.1 or video-v1", a.name);
+    }
+    let out = out.unwrap_or_else(|| EvalSet::Video.default_out());
+    let mut ui = Ui::new();
+    let read = video_eval::read_dense(&video_eval::session_dirs(&items, &marks), &mut ui);
+    ui.finish();
+    for w in read? {
+        warn(&w);
+    }
+    outln!("Scoring {} clips × {runs} runs with {} → {}", items.len(),
+           arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "), out.display());
+    let plan = eval::Plan { set: &set, items: &items, arms: &arms, runs, concurrency, out_dir: &out };
+    let results = eval::run(&plan, settings, &|r, done, total| {
+        if let Err(e) = &r.result {
+            errln!("[{done}/{total}] {} {} run {} failed: {}", r.arm, r.item, r.run, e.lines().next().unwrap_or_default());
+        }
+    })?;
+    let stats = eval::summarize(&results, &items, &arms, &set);
+    let decisions = video_eval::decisions(&results, &items, &arms, &set);
+    let mut md = eval::markdown(&stats, &[], &[], "-", items.len(), runs, &set);
+    md += &video_eval::markdown(&results, &items, &arms, &set, &decisions);
+    let mut you = vec![];
+    if !marks.is_empty() {
+        for arm in &arms {
+            if let eval::ArmKind::Local { method } = &arm.kind
+                && let Some(params) = video::Params::named(method)
+            {
+                you.push((arm.name.clone(), video_eval::you_rows(&marks, &params)?));
+            }
+        }
+        md += &video_eval::you_markdown(&you);
+    }
+    let sweep = video_eval::sweep(&items, &video::CURRENT, &set)?;
+    md += &video_eval::sweep_markdown(&sweep, &set, &video::CURRENT);
+    let gate = video_eval::suggested_gate(&decisions, video::CURRENT.name);
+    md += &format!("\n## The gate these results suggest ({})\n\nFor `video::GATE`, once the rule is met for real: the \
+                    passing checks show plainly, failing ones are hidden, and the rest stay experimental.\n\n```rust\n{gate}\n```\n",
+                   video::CURRENT.name);
+    md += &eval::disagreements(&results, &items, &arms, &set);
+    let summary = eval::write_summary(&out, &stats, &[], &md)?;
+    std::fs::write(out.join("video.json"), serde_json::to_string_pretty(&serde_json::json!({
+        "decisions": decisions, "you": you, "sweep": sweep, "suggested_gate": gate,
+    }))?)?;
+    for d in decisions.iter().filter(|d| d.arm == video::CURRENT.name) {
+        let result = if d.reasons.is_empty() {
+            style("passes".to_string()).green().to_string()
+        } else if d.undecided {
+            style(format!("not yet: {}", d.reasons.join("; "))).dim().to_string()
+        } else {
+            style(format!("fails: {}", d.reasons.join("; "))).yellow().to_string()
+        };
+        outln!("{:<12} {result}", d.check);
+    }
+    outln!("Summary: {}", summary.display());
+    Ok(())
+}
+
+/// `ic eval video-health`: capture and face reading for every interview recorded with video.
+fn eval_video_health(settings: &Settings, json: bool) -> Result<()> {
+    let db = open_db(settings)?;
+    let mut rows = vec![];
+    for session in db.list_sessions()? {
+        if session.deleted_at.is_some() || !Path::new(&session.dir).join(video::VIDEO_FILE).is_file() {
+            continue;
+        }
+        let segments = db.get_segments(session.id)?;
+        rows.push(interview_coach::video_eval::health(&session, &segments)?);
+    }
+    if json {
+        outln!("{}", serde_json::to_string(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        outln!("No interviews have video yet. Record one with video on (Janus 0.1.0-preview.14 or later).");
+        return Ok(());
+    }
+    for h in &rows {
+        let share = |v: Option<f64>| v.map_or("—".to_string(), |v| format!("{:.0}%", v * 100.0));
+        outln!("{} {} · {} of video · faces in {} · typical face {} · {} track(s) · you {} · others {} · cues for {} of {} answers · {} nods",
+               style(format!("{:>4}", h.id)).bold(), h.title,
+               h.video_s.map_or("?".into(), fmt_ts), share(h.with_faces),
+               h.face_h.map_or("—".into(), |f| format!("{:.0}% tall", f * 100.0)), h.tracks,
+               if h.you_found { "found" } else { "not found" }, h.others.map_or("—".into(), |n| n.to_string()),
+               h.answers_with_cues, h.answers, h.nods);
+        for p in &h.problems {
+            outln!("     {} {p}", style("!").yellow());
+        }
+    }
     Ok(())
 }
 
@@ -2357,7 +2493,17 @@ fn run() -> Result<()> {
                     limit,
                     concurrency,
                 },
-        } => eval_scorers(&settings, set, items, &arms, runs, out, limit, concurrency),
+        } => {
+            let arms = if arms.is_empty() { set.default_arms() } else { arms };
+            if set == EvalSet::Video {
+                eval_video(&settings, items, &arms, runs, out, limit, concurrency)
+            } else {
+                eval_scorers(&settings, set, items, &arms, runs, out, limit, concurrency)
+            }
+        }
+        Cmd::Eval {
+            action: EvalCmd::VideoHealth { json },
+        } => eval_video_health(&settings, json),
         Cmd::Eval {
             action: EvalCmd::Clips { ids, origin, dir },
         } => eval_clips(&settings, &ids, origin, dir),

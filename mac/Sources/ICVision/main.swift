@@ -10,10 +10,13 @@ import Vision
 /// there, in src/video.rs.
 
 let usage = """
-usage: ICVision faces --video <file> --out <faces.json> [--fps <samples per second>] [--progress]
+usage: ICVision faces --video <file> --out <faces.json> [--fps <samples per second>]
+                      [--ranges <from-to,from-to,…>] [--progress]
 
-Writes every face Vision finds, sampled from the video, to <faces.json>. With --progress,
-prints {"progress": 0.42} lines to stdout as it goes.
+Writes every face Vision finds, sampled from the video, to <faces.json>. --ranges (seconds) reads
+only those stretches. With --progress, prints {"progress": 0.42} lines to stdout as it goes.
+A frame Vision can't read is skipped and counted; if the video can't be read to the end, what was
+read is still written, with "complete": false.
 """
 
 func die(_ message: String, code: Int32 = 2) -> Never {
@@ -26,6 +29,7 @@ struct Options {
     var video: URL
     var out: URL
     var fps = 6.0
+    var ranges: [(Double, Double)] = []
     var progress = false
 }
 
@@ -33,6 +37,7 @@ func parse(_ arguments: [String]) -> Options {
     guard arguments.count > 1, arguments[1] == "faces" else { die("expected the `faces` command") }
     var video: String?, out: String?
     var fps = 6.0
+    var ranges: [(Double, Double)] = []
     var progress = false
     var index = 2
     func value(_ flag: String) -> String {
@@ -47,6 +52,12 @@ func parse(_ arguments: [String]) -> Options {
         case "--fps":
             guard let v = Double(value("--fps")), v > 0, v <= 30 else { die("--fps must be between 0 and 30") }
             fps = v
+        case "--ranges":
+            for spec in value("--ranges").split(separator: ",") {
+                let ends = spec.split(separator: "-").compactMap { Double($0) }
+                guard ends.count == 2, ends[0] >= 0, ends[1] > ends[0] else { die("--ranges takes from-to pairs in seconds, like 12.5-32.5") }
+                ranges.append((ends[0], ends[1]))
+            }
         case "--progress": progress = true
         case "-h", "--help":
             print(usage)
@@ -56,7 +67,7 @@ func parse(_ arguments: [String]) -> Options {
         index += 1
     }
     guard let video, let out else { die("--video and --out are required") }
-    return Options(video: URL(fileURLWithPath: video), out: URL(fileURLWithPath: out), fps: fps, progress: progress)
+    return Options(video: URL(fileURLWithPath: video), out: URL(fileURLWithPath: out), fps: fps, ranges: ranges, progress: progress)
 }
 
 /// One face in one sample. Positions are fractions of the frame, from its top-left corner;
@@ -84,6 +95,10 @@ struct Output: Encodable {
     var height: Int
     var durationS: Double
     var samples: [Sample]
+    /// False when the video couldn't be read to the end; the samples run up to where it stopped.
+    var complete: Bool
+    /// Frames Vision couldn't read, left out.
+    var skipped: Int
 }
 
 func rounded(_ v: Double, _ places: Double = 10_000) -> Double { (v * places).rounded() / places }
@@ -130,44 +145,62 @@ do {
 }
 let size = (try? await track.load(.naturalSize)) ?? .zero
 
-let reader: AVAssetReader
-do {
-    reader = try AVAssetReader(asset: asset)
-} catch {
-    die("couldn't read \(options.video.path): \(error.localizedDescription)", code: 1)
-}
-let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
-    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-])
-output.alwaysCopiesSampleData = false
-reader.add(output)
-guard reader.startReading() else {
-    die("couldn't decode \(options.video.path): \(reader.error?.localizedDescription ?? "unknown error")", code: 1)
-}
-
 var samples: [Sample] = []
+var skipped = 0
+var complete = true
+var failure = ""
 let interval = 1 / options.fps
-var next = 0.0
 var reported = -1.0
-while let buffer = output.copyNextSampleBuffer() {
-    let t = buffer.presentationTimeStamp.seconds
-    guard t.isFinite, t + 1e-6 >= next, let pixels = buffer.imageBuffer else { continue }
-    // Sample on a fixed grid; a frame that stood still for a while (the recorder only writes
-    // frames that changed) is sampled once, and the next sample waits for the next frame.
-    while next <= t + 1e-6 { next += interval }
+// The whole video, or each requested stretch of it, read in order.
+let spans: [(Double, Double)] = options.ranges.isEmpty ? [(0, duration)] : options.ranges.sorted { $0.0 < $1.0 }
+let total = max(spans.reduce(0) { $0 + min($1.1, duration) - $1.0 }, 1e-6)
+var doneBefore = 0.0
+
+for (from, to) in spans where from < duration {
+    let reader: AVAssetReader
     do {
-        samples.append(Sample(t: rounded(t, 1000), faces: try faces(in: pixels)))
+        reader = try AVAssetReader(asset: asset)
     } catch {
-        die("Vision failed at \(t) s: \(error.localizedDescription)", code: 1)
+        die("couldn't read \(options.video.path): \(error.localizedDescription)", code: 1)
     }
-    if options.progress, duration > 0, t / duration - reported >= 0.02 {
-        reported = t / duration
-        print("{\"progress\": \(rounded(min(reported, 1), 1000))}")
-        fflush(stdout)
+    if !options.ranges.isEmpty {
+        reader.timeRange = CMTimeRange(start: CMTime(seconds: from, preferredTimescale: 600),
+                                       end: CMTime(seconds: min(to, duration), preferredTimescale: 600))
     }
-}
-if reader.status == .failed {
-    die("decoding stopped: \(reader.error?.localizedDescription ?? "unknown error")", code: 1)
+    let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    ])
+    output.alwaysCopiesSampleData = false
+    reader.add(output)
+    guard reader.startReading() else {
+        die("couldn't decode \(options.video.path): \(reader.error?.localizedDescription ?? "unknown error")", code: 1)
+    }
+    var next = from
+    while let buffer = output.copyNextSampleBuffer() {
+        let t = buffer.presentationTimeStamp.seconds
+        guard t.isFinite, t + 1e-6 >= next, t <= to + 1e-6, let pixels = buffer.imageBuffer else { continue }
+        // Sample on a fixed grid; a frame that stood still for a while (the recorder only writes
+        // frames that changed) is sampled once, and the next sample waits for the next frame.
+        while next <= t + 1e-6 { next += interval }
+        do {
+            samples.append(Sample(t: rounded(t, 1000), faces: try faces(in: pixels)))
+        } catch {
+            skipped += 1  // one unreadable frame doesn't cost the rest
+        }
+        if options.progress, (doneBefore + t - from) / total - reported >= 0.02 {
+            reported = (doneBefore + t - from) / total
+            print("{\"progress\": \(rounded(min(reported, 1), 1000))}")
+            fflush(stdout)
+        }
+    }
+    if reader.status == .failed {
+        // A recording cut short (the recorder writes in fragments so this still plays): keep what
+        // was read, and say where it stopped.
+        complete = false
+        failure = reader.error?.localizedDescription ?? "unknown error"
+        break
+    }
+    doneBefore += min(to, duration) - from
 }
 
 let encoder = JSONEncoder()
@@ -175,11 +208,14 @@ encoder.keyEncodingStrategy = .convertToSnakeCase
 do {
     let data = try encoder.encode(Output(
         video: options.video.lastPathComponent, fps: options.fps, width: Int(size.width), height: Int(size.height),
-        durationS: rounded(duration, 1000), samples: samples
+        durationS: rounded(duration, 1000), samples: samples, complete: complete, skipped: skipped
     ))
     try data.write(to: options.out, options: .atomic)
 } catch {
     die("couldn't write \(options.out.path): \(error.localizedDescription)", code: 1)
+}
+if !complete {
+    FileHandle.standardError.write("ICVision: decoding stopped at \(samples.last?.t ?? 0) s: \(failure)\n".data(using: .utf8)!)
 }
 if options.progress {
     print("{\"progress\": 1}")
