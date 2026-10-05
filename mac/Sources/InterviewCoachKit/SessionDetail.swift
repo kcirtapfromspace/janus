@@ -10,6 +10,30 @@ public struct SessionDetail: Decodable, Equatable {
     public let reports: [ReportRun]
     public let nextSteps: StoredNextSteps?
     public let outcome: OutcomeInfo?
+    /// Your answers with what the call's video showed, for correcting (absent before video existed).
+    public let videoAnswers: [VideoAnswer]?
+    public var correctableAnswers: [VideoAnswer] { videoAnswers ?? [] }
+
+    public struct VideoAnswer: Decodable, Equatable, Identifiable {
+        public let start: Double
+        public let end: Double
+        public let timestamp: String
+        public let question: String?
+        public let cues: VideoCues
+        public let notes: [String]
+        /// Your correction, if you made one.
+        public let corrected: [String: LabelValue]?
+        public var id: Double { start }
+    }
+
+    /// What the video measured during one answer (video.rs `VideoCues`).
+    public struct VideoCues: Decodable, Equatable {
+        public let onCamera: Double
+        public let nods: Int
+        public let lookingAway: Double?
+        public let seenS: Double
+        public let faceH: Double?
+    }
 
     public struct Info: Decodable, Equatable {
         public let id: Int

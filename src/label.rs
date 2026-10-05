@@ -26,6 +26,9 @@ pub const MIN_ANSWER_S: f64 = 10.0;
 pub const MAX_CLIPS_PER_ANSWER: usize = 3;
 pub const CLIPS_FILE: &str = "clips.jsonl";
 pub const YOU_FILE: &str = "you.jsonl";
+/// Corrections made in reviews: labels for whole answers, given after seeing the cues, so they're
+/// reported apart from the blind clip labels and never count towards the rule.
+pub const CORRECTIONS_FILE: &str = "corrections.jsonl";
 
 /// What each clip is labelled with (docs/eval/video-decision.md). A check left out is one the
 /// labeller couldn't tell.
@@ -104,6 +107,11 @@ pub fn session_clips(session: &Session, segments: &[Segment], faces: Option<&Fac
         }
     }
     out
+}
+
+/// A correction's id: one per answer, so correcting it again replaces the earlier one.
+pub fn correction_id(session_id: i64, start: f64) -> String {
+    format!("s{session_id:03}-a{start:.1}-fix")
 }
 
 /// Check a clip's labels against the conventions, including that they agree with each other.
@@ -254,6 +262,16 @@ impl Store {
         lines.push(line.clone());
         self.write(YOU_FILE, &lines)?;
         Ok(line)
+    }
+
+    /// Save a correction from a review (one line per answer, replaced when corrected again).
+    pub fn correct(&self, correction: Value) -> Result<()> {
+        check_labels(correction["labels"].as_object().context("a correction needs labels")?)?;
+        let id = correction["id"].as_str().context("a correction needs an id")?.to_string();
+        let _held = self.lock()?;
+        let mut lines: Vec<Value> = self.read(CORRECTIONS_FILE)?.into_iter().filter(|l| l["id"] != id.as_str()).collect();
+        lines.push(correction);
+        self.write(CORRECTIONS_FILE, &lines)
     }
 
     /// What the page shows: every clip (without its folder) and where your face is per interview.
@@ -653,6 +671,24 @@ mod tests {
         let lines = Store::new(&dir).read(CLIPS_FILE).unwrap();
         assert_eq!(lines.len(), 9, "every added clip is there");
         assert!(lines[0]["labelled_at"].is_string(), "and the label wasn't overwritten by an add");
+    }
+
+    #[test]
+    fn correcting_an_answer_again_replaces_the_earlier_correction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::new(tmp.path());
+        let fix = |nodded: bool| json!({"id": correction_id(3, 95.04), "set": "s003", "variant": "answer", "origin": "correction",
+                                        "session_dir": "/tmp/s3", "start": 95.04, "end": 130.0, "labels": {"nodded": nodded}});
+        assert_eq!(correction_id(3, 95.04), "s003-a95.0-fix");
+        store.correct(fix(true)).unwrap();
+        store.correct(fix(false)).unwrap();
+        let lines = store.read(CORRECTIONS_FILE).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["labels"]["nodded"], false);
+        let mut contradictory = fix(false);
+        contradictory["labels"]["nod_count"] = json!("3-5");
+        assert!(store.correct(contradictory).is_err(), "the labelling conventions apply to corrections too");
+        assert!(store.read(CLIPS_FILE).unwrap().is_empty(), "corrections never mix with the blind clip labels");
     }
 
     #[test]

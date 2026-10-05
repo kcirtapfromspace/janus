@@ -280,6 +280,8 @@ struct ReportStageView: View {
     @Environment(AppModel.self) private var model
     let detail: SessionDetail
     @State private var chosen: Int?
+    /// The answer being corrected (its start), while the Correct video cues sheet is open.
+    @State private var correcting: Double?
 
     var body: some View {
         let stage = detail.stage(.report)
@@ -299,6 +301,10 @@ struct ReportStageView: View {
                     }
                     .help("Every version is kept. The report's Versions section shows how they relate.")
                 }
+                if let first = detail.correctableAnswers.first {
+                    Button("Correct video cues…") { correcting = first.start }
+                        .help("Say what the video really showed during an answer: it helps measure these cues")
+                }
                 RerunMenu(step: .report, stage: stage, defaultModel: model.setup?.model)
                 Menu("Outcome") {
                     ForEach(outcomeChoices, id: \.value) { choice in
@@ -317,12 +323,117 @@ struct ReportStageView: View {
                     CallVideo(player: model.player, compact: true).padding(.horizontal, 16).padding(.bottom, 8)
                     PlayerBar(player: model.player, videoToggle: true).padding(.horizontal, 16).padding(.bottom, 8)
                 }
-                ReportView(path: shown.htmlPath, onSeek: { model.player.play(from: $0) }, onOpenReport: { chosen = $0 })
+                ReportView(path: shown.htmlPath, onSeek: { model.player.play(from: $0) }, onOpenReport: { chosen = $0 },
+                           onFix: { start in correcting = start })
             } else {
                 EmptyStage(stage: stage, step: .report)
             }
         }
         .onChange(of: detail.session.id) { chosen = nil }
+        .sheet(isPresented: Binding(get: { correcting != nil }, set: { if !$0 { correcting = nil } })) {
+            VideoCorrectionsSheet(answers: detail.correctableAnswers, selected: correcting ?? 0) { correcting = nil }
+        }
+    }
+}
+
+/// Correct video cues: every answer the video covered, with what it measured; pick one, watch it,
+/// and say what you saw. Saved as a label for measuring accuracy (`ic eval correct`).
+struct VideoCorrectionsSheet: View {
+    @Environment(AppModel.self) private var model
+    let answers: [SessionDetail.VideoAnswer]
+    @State var selected: Double
+    let done: () -> Void
+    @State private var form: VideoCorrection?
+    @State private var status: String?
+    @State private var saving = false
+
+    private var answer: SessionDetail.VideoAnswer? { answers.first { $0.start == selected } ?? answers.first }
+
+    var body: some View {
+        HSplitView {
+            List(answers, selection: Binding(get: { answer?.id }, set: { if let id = $0 { selected = id } })) { a in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(a.timestamp).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        if a.corrected != nil {
+                            Text("corrected").font(.caption2).foregroundStyle(CoachTheme.accent)
+                        }
+                    }
+                    Text(a.question ?? "Your answer").lineLimit(2)
+                    Text(a.notes.isEmpty ? "Nothing noted" : a.notes.joined(separator: ", "))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                .tag(a.id)
+            }
+            .frame(minWidth: 220, idealWidth: 260)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    if let answer {
+                        if model.player.hasVideo, let player = model.player.player {
+                            CallVideoView(player: player)
+                                .aspectRatio(16 / 9, contentMode: .fit)
+                                .frame(maxHeight: 240)
+                                .background(Color.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        HStack {
+                            Button("Play this answer") { model.player.play(from: answer.start) }
+                            Text("\(answer.timestamp), \(formatDuration(answer.end - answer.start))")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("What the review measured: \(answer.notes.isEmpty ? "nothing noted" : answer.notes.joined(separator: ", ")). Change what it got wrong.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let binding = Binding($form) {
+                            ForEach(VideoCorrection.checks) { check in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(check.title).font(.callout.weight(.semibold))
+                                    Text(check.hint).font(.caption).foregroundStyle(.secondary)
+                                    Picker(check.title, selection: Binding(
+                                        get: { binding.wrappedValue.pick(check.id) },
+                                        set: { binding.wrappedValue.set(check.id, $0) }
+                                    )) {
+                                        ForEach(check.options, id: \.value) { option in Text(option.title).tag(option.value) }
+                                        Text("Can't tell").tag(VideoCorrection.unsure)
+                                    }
+                                    .pickerStyle(.segmented).labelsHidden()
+                                }
+                            }
+                        }
+                        Text("Saved on this Mac with your labels, to measure how accurate these cues are. It doesn't change the review.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if let status {
+                            Text(status).font(.callout).foregroundStyle(status.hasPrefix("Saved") ? CoachTheme.accent : .red)
+                        }
+                    }
+                }
+                .padding(16)
+            }
+            .frame(minWidth: 420)
+        }
+        .frame(minWidth: 720, minHeight: 520)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) { Button("Done") { done() } }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save correction") {
+                    guard let answer, let form else { return }
+                    saving = true
+                    Task {
+                        let error = await model.correctVideo(start: answer.start, correction: form)
+                        status = error ?? "Saved your correction for \(answer.timestamp)."
+                        saving = false
+                    }
+                }
+                .disabled(form == nil || saving)
+            }
+        }
+        .onAppear { loadForm() }
+        .onChange(of: selected) { loadForm() }
+    }
+
+    private func loadForm() {
+        status = nil
+        guard let answer else { form = nil; return }
+        form = answer.corrected.map(VideoCorrection.init(corrected:)) ?? VideoCorrection(measured: answer.cues)
     }
 }
 

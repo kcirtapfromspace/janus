@@ -26,6 +26,22 @@ pub struct SessionView {
     pub reports: Vec<ReportSummary>,
     pub next_steps: Option<StoredNextSteps>,
     pub outcome: Option<OutcomeView>,
+    /// Your answers with what the call's video showed (from the current report), for correcting.
+    pub video_answers: Vec<VideoAnswer>,
+}
+
+#[derive(Serialize)]
+pub struct VideoAnswer {
+    pub start: f64,
+    pub end: f64,
+    pub timestamp: String,
+    /// The interviewer's question before it.
+    pub question: Option<String>,
+    pub cues: crate::video::VideoCues,
+    /// What the review says about it.
+    pub notes: Vec<String>,
+    /// Your correction, if you made one (`ic eval correct`).
+    pub corrected: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -261,7 +277,34 @@ pub fn build(db: &Db, id: i64) -> Result<SessionView> {
         reports,
         next_steps,
         outcome: outcome.map(|o| OutcomeView { result: o.result.as_str(), label: o.result.label(), notes: o.notes }),
+        video_answers: current_report.as_ref().map(|r| video_answers(&r.turn_signals)).unwrap_or_default(),
     })
+}
+
+fn video_answers(signals: &[crate::temperature::Signal]) -> Vec<VideoAnswer> {
+    use crate::temperature::Kind;
+    let mut question: Option<String> = None;
+    let mut out = vec![];
+    for s in signals {
+        match s.kind {
+            Kind::Substantive => question = Some(s.text.clone()),
+            Kind::Answer => {
+                if let Some(cues) = s.video {
+                    out.push(VideoAnswer {
+                        start: s.start,
+                        end: s.end,
+                        timestamp: fmt_ts(s.start),
+                        question: question.clone(),
+                        cues,
+                        notes: crate::video::notes(&cues, &crate::video::GATE),
+                        corrected: None,
+                    });
+                }
+            }
+            Kind::Backchannel => {}
+        }
+    }
+    out
 }
 
 fn info(s: &Session) -> SessionInfo {

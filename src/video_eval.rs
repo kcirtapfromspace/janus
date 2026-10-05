@@ -524,6 +524,48 @@ pub fn suggested_gate(decisions: &[VideoDecision], arm: &str) -> String {
     format!("pub const GATE: Gate = Gate {{ passed: &[{passed}], failed: &[{failed}], hidden_below: &[{}] }};", hidden.join(", "))
 }
 
+// --- corrections from reviews ---------------------------------------------------------------------
+
+/// How the corrections made in reviews compare with what was measured then, and with each arm now.
+/// Corrections are biased (people correct what looks wrong), so they never count towards the rule:
+/// they show where the cues fail in real reviews, and which fixes would help.
+pub fn corrections_markdown(results: &[RawResult], corrections: &[Item], arms: &[eval::Arm], set: &CheckSet) -> String {
+    if corrections.is_empty() {
+        return "\n## Corrections from reviews\n\nNone yet. In Janus, Correct video cues on a review adds one.\n".into();
+    }
+    let mut md = format!(
+        "\n## Corrections from reviews\n\n{} answers corrected. Not part of the rule: people correct what looks wrong. \
+         \"Then\" is the review's measurement when it was corrected; each arm's column is how often it agrees with the \
+         correction now.\n\n| Check | Corrected | Then wrong | {} |\n|---|---|---|{}\n",
+        corrections.len(),
+        arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(" | "),
+        "---|".repeat(arms.len())
+    );
+    for check in &set.checks {
+        let labelled: Vec<&Item> = corrections.iter().filter(|i| i.expected(check.id).is_some()).collect();
+        if labelled.is_empty() {
+            continue;
+        }
+        let wrong_then = labelled
+            .iter()
+            .filter(|i| {
+                let measured: Option<video::VideoCues> = i.input.get("measured").and_then(|m| serde_json::from_value(m.clone()).ok());
+                verdicts(measured.as_ref()).get(check.id).map(|v| v.pick.clone()) != i.expected(check.id)
+            })
+            .count();
+        let now: Vec<String> = arms
+            .iter()
+            .map(|arm| {
+                let preds = eval::predictions(results, corrections, &arm.name, check.id);
+                let agree = preds.iter().filter(|p| p.pick == p.expected).count();
+                if preds.is_empty() { "—".into() } else { pct(Some(agree as f64 / preds.len() as f64)) }
+            })
+            .collect();
+        md += &format!("| {} | {} | {wrong_then} | {} |\n", check.id, labelled.len(), now.join(" | "));
+    }
+    md
+}
+
 // --- who is you -----------------------------------------------------------------------------------
 
 /// One interview's "which face is yours", scored.
@@ -855,6 +897,30 @@ mod tests {
     fn clip(id: &str, dir: &Path, start: f64, end: f64, origin: &str, labels: Value) -> Value {
         json!({"id": id, "set": "s001", "variant": id, "origin": origin, "session_dir": dir, "start": start, "end": end,
                "face_height": 0.25, "layout": "gallery", "labels": labels, "labelled_at": "2026-10-05T00:00:00+00:00"})
+    }
+
+    /// A correction that says they nodded, where the review had measured none: "then wrong", and
+    /// each arm's agreement now.
+    #[test]
+    fn corrections_show_where_the_review_was_wrong() {
+        let tmp = tempfile::tempdir().unwrap();
+        interview(tmp.path());
+        let mut fix = clip("s001-a0.0-fix", tmp.path(), 0.0, 30.0, "correction", json!({"nodded": true, "on_camera": "1"}));
+        fix["measured"] = json!({"on_camera": 1.0, "nods": 0, "looking_away": null, "seen_s": 30.0});
+        let path = tmp.path().join("corrections.jsonl");
+        std::fs::write(&path, fix.to_string()).unwrap();
+        let corrections = load_clips(&path).unwrap();
+        let set = video_set();
+        let arms = vec![eval::Arm::parse("video-v1.1").unwrap()];
+        let settings = crate::config::Settings::load().unwrap();
+        let out = tmp.path().join("out");
+        let plan = eval::Plan { set: &set, items: &corrections, arms: &arms, runs: 1, concurrency: 1, out_dir: &out };
+        let results = eval::run(&plan, &settings, &|_, _, _| {}).unwrap();
+        let md = corrections_markdown(&results, &corrections, &arms, &set);
+        assert!(md.contains("1 answers corrected"), "{md}");
+        assert!(md.contains("| nodded | 1 | 1 | 100% |"), "the review said no nod; v1.1 now finds them: {md}");
+        assert!(md.contains("| on_camera | 1 | 0 | 100% |"), "{md}");
+        assert!(corrections_markdown(&results, &[], &arms, &set).contains("None yet"));
     }
 
     #[test]

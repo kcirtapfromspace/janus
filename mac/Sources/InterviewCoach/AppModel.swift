@@ -189,6 +189,18 @@ final class AppModel {
         }
     }
 
+    /// Save what you saw during one answer as a correction (`ic eval correct`, the labels on stdin).
+    func correctVideo(start: Double, correction: VideoCorrection) async -> String? {
+        guard let ic, let id = selection else { return "No interview is selected." }
+        do {
+            _ = try await ic.run(["eval", "correct", "\(id)", "--start", String(start)], stdin: correction.labelsJSON)
+            await loadDetail()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     func swapSpeakers() {
         guard let id = selection else { return }
         selectedStage = .transcript

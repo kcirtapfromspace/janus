@@ -603,9 +603,16 @@ fn the_videos_faces_add_cues_to_your_answers() {
     assert!(html.contains("While you answered on “Tell me about a tough prioritization call.”: they nodded 3 times"));
     assert!(html.contains("never expressions or emotions"));
     assert!(html.contains("<title>Your answer, 00:00:05 (they nodded 3 times)</title>"), "the chart's band says so too");
+    assert!(html.contains("<a class='fix muted' href='#fix=5.0'>Not what you saw?</a>"), "each noted answer can be corrected");
 
     let view = serde_json::to_value(session_view::build(&db, id).unwrap()).unwrap();
     assert_eq!(view["audio"]["video_path"], tmp.path().join("video.mov").display().to_string());
+    let answers = view["video_answers"].as_array().unwrap();
+    assert_eq!(answers.len(), 1, "the app lists every answer the video covered, for correcting");
+    assert_eq!((answers[0]["start"].as_f64(), answers[0]["cues"]["nods"].as_u64()), (Some(5.0), Some(3)));
+    assert_eq!(answers[0]["question"], "Tell me about a tough prioritization call.");
+    assert_eq!(answers[0]["notes"][0], "they nodded 3 times");
+    assert_eq!(answers[0]["corrected"], serde_json::Value::Null);
     assert!(view["stages"][0]["summary"].as_str().unwrap().contains("+ video"));
 }
 

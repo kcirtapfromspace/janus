@@ -396,6 +396,18 @@ enum EvalCmd {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+    /// Correct what the video showed during one of your answers (the app's Correct video cues):
+    /// saved as a label for measuring accuracy, apart from the blind clip labels.
+    Correct {
+        /// The interview.
+        id: i64,
+        /// When the answer starts, in seconds (as the session's video answers list it).
+        #[arg(long)]
+        start: f64,
+        /// What you saw, as JSON (the labelling page's checks): read from stdin when absent.
+        #[arg(long)]
+        labels: Option<String>,
+    },
     /// How capture and face reading went in every interview recorded with video: what to fix
     /// before trusting (or labelling) its cues.
     VideoHealth {
@@ -1950,21 +1962,25 @@ fn eval_video(
     if items.is_empty() {
         bail!("No labelled clips in {}. Cut some with `ic eval clips <interview ids>`, then label them with `ic eval label`.", path.display());
     }
-    let marks = label::Store::new(path.parent().unwrap_or(Path::new("."))).read(label::YOU_FILE)?;
+    let labels_dir = path.parent().unwrap_or(Path::new("."));
+    let marks = label::Store::new(labels_dir).read(label::YOU_FILE)?;
+    let corrections_path = labels_dir.join(label::CORRECTIONS_FILE);
+    let corrections = if corrections_path.exists() { video_eval::load_clips(&corrections_path)? } else { vec![] };
     let arms: Vec<eval::Arm> = arm_names.iter().map(|a| eval::Arm::parse(a)).collect::<Result<_, _>>().map_err(|e| anyhow::anyhow!(e))?;
     if let Some(a) = arms.iter().find(|a| !matches!(a.kind, eval::ArmKind::Local { .. })) {
         bail!("{} doesn't score video; use video-v1.1 or video-v1", a.name);
     }
     let out = out.unwrap_or_else(|| EvalSet::Video.default_out());
     let mut ui = Ui::new();
-    let read = video_eval::read_dense(&video_eval::session_dirs(&items, &marks), &mut ui);
+    let everything: Vec<eval::Item> = items.iter().chain(&corrections).cloned().collect();
+    let read = video_eval::read_dense(&video_eval::session_dirs(&everything, &marks), &mut ui);
     ui.finish();
     for w in read? {
         warn(&w);
     }
-    outln!("Scoring {} clips × {runs} runs with {} → {}", items.len(),
+    outln!("Scoring {} clips and {} corrections × {runs} runs with {} → {}", items.len(), corrections.len(),
            arms.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "), out.display());
-    let plan = eval::Plan { set: &set, items: &items, arms: &arms, runs, concurrency, out_dir: &out };
+    let plan = eval::Plan { set: &set, items: &everything, arms: &arms, runs, concurrency, out_dir: &out };
     let results = eval::run(&plan, settings, &|r, done, total| {
         if let Err(e) = &r.result {
             errln!("[{done}/{total}] {} {} run {} failed: {}", r.arm, r.item, r.run, e.lines().next().unwrap_or_default());
@@ -1985,6 +2001,7 @@ fn eval_video(
         }
         md += &video_eval::you_markdown(&you);
     }
+    md += &video_eval::corrections_markdown(&results, &corrections, &arms, &set);
     let sweep = video_eval::sweep(&items, &video::CURRENT, &set)?;
     md += &video_eval::sweep_markdown(&sweep, &set, &video::CURRENT);
     let gate = video_eval::suggested_gate(&decisions, video::CURRENT.name);
@@ -2007,6 +2024,37 @@ fn eval_video(
         outln!("{:<12} {result}", d.check);
     }
     outln!("Summary: {}", summary.display());
+    Ok(())
+}
+
+/// `ic eval correct`: one answer's video cues as you saw them, with what was measured then.
+fn eval_correct(settings: &Settings, id: i64, start: f64, labels: Option<String>) -> Result<()> {
+    let labels = match labels {
+        Some(text) => text,
+        None => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+            text
+        }
+    };
+    let labels: serde_json::Value = serde_json::from_str(labels.trim()).context("the labels aren't JSON")?;
+    let db = open_db(settings)?;
+    let session = db.get_session(id)?;
+    let report = pipeline::current_report(&db, id)?.with_context(|| format!("Interview {id} has no review yet"))?;
+    let answer = report
+        .turn_signals
+        .iter()
+        .find(|s| s.kind == interview_coach::temperature::Kind::Answer && (s.start - start).abs() < 0.05)
+        .with_context(|| format!("Interview {id} has no answer starting at {}", fmt_ts(start)))?;
+    let cues = answer.video.with_context(|| format!("The video showed nothing for the answer at {}", fmt_ts(start)))?;
+    let set = format!("s{id:03}");
+    label::Store::new(&label::default_dir(&settings.data_dir)).correct(serde_json::json!({
+        "id": label::correction_id(id, answer.start), "set": set, "variant": format!("answer {}", fmt_ts(answer.start)),
+        "origin": "correction", "title": session.title, "session_dir": session.dir, "start": answer.start, "end": answer.end,
+        "face_height": cues.face_h, "layout": null, "labels": labels, "measured": cues,
+        "method": report.video_method.as_deref().unwrap_or(video::METHOD), "labelled_at": interview_coach::db::now_iso(),
+    }))?;
+    outln!("{} Saved your correction for the answer at {}.", style("✓").green(), fmt_ts(answer.start));
     Ok(())
 }
 
@@ -2401,10 +2449,13 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Session { id } => {
-            outln!(
-                "{}",
-                serde_json::to_string(&session_view::build(&open_db(&settings)?, id)?)?
-            );
+            let mut view = session_view::build(&open_db(&settings)?, id)?;
+            // Your corrections live with the labels, outside the database.
+            let corrections = label::Store::new(&label::default_dir(&settings.data_dir)).read(label::CORRECTIONS_FILE).unwrap_or_default();
+            for answer in &mut view.video_answers {
+                answer.corrected = corrections.iter().find(|c| c["id"] == label::correction_id(id, answer.start)).map(|c| c["labels"].clone());
+            }
+            outln!("{}", serde_json::to_string(&view)?);
             Ok(())
         }
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
@@ -2504,6 +2555,9 @@ fn run() -> Result<()> {
         Cmd::Eval {
             action: EvalCmd::VideoHealth { json },
         } => eval_video_health(&settings, json),
+        Cmd::Eval {
+            action: EvalCmd::Correct { id, start, labels },
+        } => eval_correct(&settings, id, start, labels),
         Cmd::Eval {
             action: EvalCmd::Clips { ids, origin, dir },
         } => eval_clips(&settings, &ids, origin, dir),

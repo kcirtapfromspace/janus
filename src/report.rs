@@ -509,7 +509,8 @@ fn video_html(h: &mut String, signals: &[Signal], method: Option<&str>) {
             let notes = video::notes(answer.video.as_ref()?, gate);
             (!notes.is_empty()).then(|| {
                 let on = question.map_or(String::new(), |q| format!(" on “{}”", esc(&excerpt(&q.text, 12))));
-                format!("<li>{}While you answered{on}: {}</li>", seek_html(answer.start, &fmt_ts(answer.start)), esc(&notes.join(", ")))
+                format!("<li>{}While you answered{on}: {} <a class='fix muted' href='#fix={:.1}'>Not what you saw?</a></li>",
+                        seek_html(answer.start, &fmt_ts(answer.start)), esc(&notes.join(", ")), answer.start)
             })
         })
         .collect();
@@ -532,7 +533,9 @@ fn video_html(h: &mut String, signals: &[Signal], method: Option<&str>) {
     };
     let _ = write!(h, "<p class='muted'>From the call's window, read on this Mac: where faces were and which way they \
                        pointed, never expressions or emotions, and nothing that identifies anyone. Your own face is told \
-                       apart by whose speech its mouth moves with. {checked} Method {}.</p>",
+                       apart by whose speech its mouth moves with. {checked} If the video got an answer wrong or missed \
+                       something, correct it in Janus (Correct video cues): each correction helps measure how accurate \
+                       these are. Method {}.</p>",
                    esc(method.unwrap_or(video::METHOD)));
 }
 

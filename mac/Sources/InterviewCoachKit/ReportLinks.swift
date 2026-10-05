@@ -15,10 +15,19 @@ public func reportID(fromLink link: URL, currentPage: URL) -> Int? {
 }
 
 public func seekSeconds(fromFragment fragment: String?) -> Double? {
+    seconds(fromFragment: fragment, key: "t")
+}
+
+/// The answer a "Not what you saw?" link (`#fix=95.0`) asks to correct, by its start in seconds.
+public func fixSeconds(fromFragment fragment: String?) -> Double? {
+    seconds(fromFragment: fragment, key: "fix")
+}
+
+private func seconds(fromFragment fragment: String?, key: String) -> Double? {
     guard var text = fragment?.trimmingCharacters(in: .whitespaces) else { return nil }
     if text.hasPrefix("#") { text.removeFirst() }
     let parts = text.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-    guard parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == "t" else { return nil }
+    guard parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == key else { return nil }
     let value = parts[1].trimmingCharacters(in: .whitespaces)
     // Plain decimals only: Double(_:) would also take a sign, an exponent, hex, "inf" and "nan".
     guard value.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }),

@@ -213,6 +213,24 @@ because the local arms aren't probabilistic, so calibration isn't gated.
 It flags what makes cues unreliable, so a bad recording isn't labelled and blamed on the
 thresholds.
 
+## Corrections from reviews
+
+In Janus, **Correct video cues** on a review lists every answer the video covered, with what it
+measured; each video note in the review also has a "Not what you saw?" link. You watch the
+answer and say what you saw, with the same checks and "Can't tell" as the labelling page.
+
+`ic eval correct` saves it to `~/InterviewCoach/eval/video/corrections.jsonl`: one line per
+answer, holding what was measured then and by which method. The review itself doesn't change.
+
+Corrections are labels given after seeing the cues, and mostly where they look wrong. So they
+never count towards the rule. The eval reports them in their own section:
+- how many answers were corrected, per check;
+- how often the review's measurement was wrong then;
+- how often each arm agrees with them now.
+
+That shows where the cues fail on real interviews, and whether a tuning change fixes those
+cases, before the change is tested on blind labels.
+
 ## Code to add
 
 - `video-mp` (smiles), and an Opus baseline arm on designed clips.

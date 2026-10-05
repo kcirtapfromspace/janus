@@ -164,16 +164,20 @@ struct ReportView: NSViewRepresentable {
     let onSeek: (Double) -> Void
     /// A link to another version of the report (its analysis id).
     var onOpenReport: (Int) -> Void = { _ in }
+    /// A "Not what you saw?" link: correct the video cues of the answer starting then.
+    var onFix: (Double) -> Void = { _ in }
 
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate {
         var loaded: (path: String, modified: Date?)?
         var onSeek: (Double) -> Void
         var onOpenReport: (Int) -> Void
+        var onFix: (Double) -> Void
         var theme = "light"
 
-        init(onSeek: @escaping (Double) -> Void, onOpenReport: @escaping (Int) -> Void) {
+        init(onSeek: @escaping (Double) -> Void, onOpenReport: @escaping (Int) -> Void, onFix: @escaping (Double) -> Void) {
             self.onSeek = onSeek
             self.onOpenReport = onOpenReport
+            self.onFix = onFix
         }
 
         func applyTheme(to webView: WKWebView) {
@@ -195,6 +199,10 @@ struct ReportView: NSViewRepresentable {
                let seconds = seekSeconds(fromFragment: url.fragment(percentEncoded: false)) {
                 onSeek(seconds)
                 decisionHandler(.cancel)
+            } else if url.isFileURL, url.path == webView.url?.path,
+                      let start = fixSeconds(fromFragment: url.fragment(percentEncoded: false)) {
+                onFix(start)
+                decisionHandler(.cancel)
             } else if action.navigationType == .linkActivated, let page = webView.url,
                       let id = reportID(fromLink: url, currentPage: page) {
                 onOpenReport(id)
@@ -208,7 +216,7 @@ struct ReportView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek, onOpenReport: onOpenReport) }
+    func makeCoordinator() -> Coordinator { Coordinator(onSeek: onSeek, onOpenReport: onOpenReport, onFix: onFix) }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
