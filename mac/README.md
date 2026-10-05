@@ -153,6 +153,7 @@ Sources/ICRecorderCore/SystemAudioTap.swift    process tap + private aggregate d
 Sources/ICRecorderCore/MicCapture.swift        AVAudioEngine mic, optional voice processing
 Sources/ICRecorderCore/TrackWriter.swift       t0-aligned mono WAV writer
 Sources/ICRecorderCore/ScreenCapture.swift     the call's window: choosing it, t0-aligned video writer
+Sources/ICRecorderCore/MockRecorder.swift      mock interviews: your mic + the interviewer's synthesized voice as two tracks
 Sources/ICVision/main.swift                    `ic-vision faces`: Vision face positions/angles → faces.json
 Resources/Info.plist, Resources/ICRecorder.entitlements
 Tests/ICRecorderCoreTests/                      TrackWriter, continuity, lifecycle and window-choice tests

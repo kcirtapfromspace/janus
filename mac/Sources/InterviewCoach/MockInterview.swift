@@ -152,6 +152,12 @@ final class MockInterview {
     }
 
     private func fail(_ message: String, model: AppModel) {
+        // Once it's finishing (the review has started) or back at the start, a late error from the
+        // interviewer process (e.g. after "stop") changes nothing.
+        switch phase {
+        case .finishing, .setup, .failed: return
+        default: break
+        }
         meter?.invalidate()
         stream?.cancel()
         stream = nil

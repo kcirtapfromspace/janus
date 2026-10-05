@@ -59,9 +59,12 @@ or `IC_FFMPEG` / `IC_ANT`.)
     with the company and role you name, then the questions you answered least well, and fills in
     with classic questions.
   - **Conversation:** it speaks out loud and listens to your answers, which are transcribed on
-    this Mac. It follows up the way an interviewer would (at most twice per question).
+    this Mac. Each answer's transcript goes to your coaching model during the session, so it can
+    choose its next question. It follows up the way an interviewer would (at most twice per
+    question).
   - **Review:** the mock is recorded as a two-track interview and reviewed like a real one. It's
-    tagged "practice" and kept out of your interview counts.
+    tagged "practice" and kept out of your interview counts. The review's recording checks don't
+  apply to it, so a mic that dropped out during practice isn't flagged.
 
   Echo cancellation keeps the interviewer's voice out of your track, but headphones are still
   clearer.

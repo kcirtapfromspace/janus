@@ -53,7 +53,10 @@ called yours is wrong.
 | `video-mp` (candidate) | MediaPipe face landmarks and blendshapes: adds smiles and steadier head pitch. Its thresholds are tuned on the designed clips only | this Mac |
 | `opus-frames` (optional baseline) | Claude Opus 5.5 looking at 1-frame-per-second stills. Claude takes images, not video, so it can't score `nodded` or `nod_count`. Designed clips only | Anthropic API |
 
-Each arm is judged on its own. The review uses the one named in `video::CURRENT`; changing it
+Each arm is judged on its own. The review uses the one named in `video::CURRENT`, now
+`video-v1.1`: reviews built from now on compute the cues with its fixes, so an interview reviewed
+again can show different cues than before. Each timeline records which method read the video
+(`turn_signals.features_json["video_method"]`), and the review shows it. Changing `CURRENT`
 means a new method name, which must pass the rule again. A cloud arm is a baseline for comparison. It is never used
 on real interviews unless the user opts in, because the review promises that nothing about
 faces leaves the Mac.
