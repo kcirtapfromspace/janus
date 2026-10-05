@@ -63,3 +63,4 @@ pub mod temperature;
 pub mod tools;
 pub mod transcribe;
 pub mod versions;
+pub mod video;

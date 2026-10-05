@@ -88,9 +88,12 @@ struct EmptyStage: View {
     }
 }
 
-/// Play/pause and a scrubber over the listening copy.
+/// Play/pause and a scrubber over the listening copy. With `videoToggle`, a button shows or hides
+/// the call's video above the page.
 struct PlayerBar: View {
     let player: AudioPlayer
+    var videoToggle = false
+    @AppStorage("showCallVideo") private var showVideo = true
 
     var body: some View {
         HStack(spacing: 10) {
@@ -103,8 +106,34 @@ struct PlayerBar: View {
             Text("\(formatDuration(player.currentTime)) / \(formatDuration(player.duration))")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
+            if videoToggle && player.hasVideo {
+                Button { showVideo.toggle() } label: {
+                    Image(systemName: showVideo ? "video.fill" : "video.slash").frame(width: 18)
+                }
+                .buttonStyle(.borderless)
+                .help(showVideo ? "Hide the call's video" : "Show the call's video")
+            }
         }
         .disabled(!player.isLoaded)
+    }
+}
+
+/// The call's video at the current moment, when it was recorded. `compact` is the strip above a
+/// transcript or report (hidden with the player bar's button); otherwise it's the Recording tab's.
+struct CallVideo: View {
+    let player: AudioPlayer
+    var compact = false
+    @AppStorage("showCallVideo") private var showVideo = true
+
+    var body: some View {
+        if player.hasVideo, let avPlayer = player.player, !compact || showVideo {
+            CallVideoView(player: avPlayer)
+                .aspectRatio(16 / 9, contentMode: .fit)
+                .frame(maxHeight: compact ? 200 : 420)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .frame(maxWidth: .infinity)
+        }
     }
 }
 
@@ -149,6 +178,7 @@ struct RecordingStageView: View {
             if stage?.hasResult == true {
                 VStack(alignment: .leading, spacing: 16) {
                     if detail.audio.listenPath != nil {
+                        CallVideo(player: model.player)
                         PlayerBar(player: model.player)
                     } else {
                         Text("There's no listening copy yet — re-process the audio to make one.")
@@ -167,6 +197,13 @@ struct RecordingStageView: View {
                             GridRow {
                                 Text(track.label).foregroundStyle(.secondary)
                                 Text(track.path).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+                        if let video = detail.audio.videoPath {
+                            GridRow {
+                                Text("Call video").foregroundStyle(.secondary)
+                                Text(video).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
                                     .truncationMode(.middle)
                             }
                         }
@@ -212,7 +249,8 @@ struct TranscriptStageView: View {
                 EmptyStage(stage: stage, step: .transcript)
             } else {
                 if detail.audio.listenPath != nil {
-                    PlayerBar(player: model.player).padding(.horizontal, 16).padding(.bottom, 8)
+                    CallVideo(player: model.player, compact: true).padding(.horizontal, 16).padding(.bottom, 8)
+                    PlayerBar(player: model.player, videoToggle: true).padding(.horizontal, 16).padding(.bottom, 8)
                 }
                 List(detail.turns) { turn in
                     let playing = model.player.isPlaying && (turn.start...turn.end).contains(model.player.currentTime)
@@ -276,7 +314,8 @@ struct ReportStageView: View {
             }
             if let shown {
                 if detail.audio.listenPath != nil {
-                    PlayerBar(player: model.player).padding(.horizontal, 16).padding(.bottom, 8)
+                    CallVideo(player: model.player, compact: true).padding(.horizontal, 16).padding(.bottom, 8)
+                    PlayerBar(player: model.player, videoToggle: true).padding(.horizontal, 16).padding(.bottom, 8)
                 }
                 ReportView(path: shown.htmlPath, onSeek: { model.player.play(from: $0) }, onOpenReport: { chosen = $0 })
             } else {

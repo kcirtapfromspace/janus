@@ -134,7 +134,9 @@ struct RecordWindow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Record an interview")
                         .font(CoachTheme.editorial(25)).foregroundStyle(CoachTheme.ink)
-                    Text("Microphone and call audio, saved together.").font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                    Text(model.recordVideo ? "Microphone, call audio and the call’s video, saved together."
+                                           : "Microphone and call audio, saved together.")
+                        .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
                 }
             }
             VStack(alignment: .leading, spacing: 14) {
@@ -144,16 +146,34 @@ struct RecordWindow: View {
             HStack(spacing: 14) {
                 Label("Your microphone", systemImage: "mic")
                 Label("Call audio", systemImage: "waveform")
+                if model.recordVideo { Label("Call video", systemImage: "video") }
                 Spacer()
                 Button("Check audio") { openWindow(id: "setup") }.buttonStyle(.link)
             }
             .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Also record the call’s video", isOn: $model.recordVideo)
+                    .toggleStyle(.checkbox).font(.system(size: 12))
+                Text(model.recordVideo && !model.screenPermission
+                     ? "Needs Screen Recording permission. Without it, only audio is recorded."
+                     : "Only the call’s window (Zoom, Teams, Meet, …), never the rest of your screen.")
+                    .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                if model.recordVideo && !model.screenPermission {
+                    HStack(spacing: 10) {
+                        Button("Allow Screen Recording…") { model.requestScreenAccess() }
+                        Text("Then reopen Janus.").font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                    }
+                }
+            }
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("Everyone on this call agreed to be recorded", isOn: $consent)
+                Toggle(model.recordVideo ? "Everyone on this call agreed to be recorded, including video"
+                                         : "Everyone on this call agreed to be recorded", isOn: $consent)
                     .toggleStyle(.checkbox).font(.system(size: 12, weight: .medium))
                 Text("Ask before you start. Some places require every participant’s consent.")
                     .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
-                Text("Audio stays on your Mac. Transcript text goes to your chosen coaching provider, and excerpts go to TypeSafe for evaluation.")
+                Text(model.recordVideo
+                     ? "Audio and video stay on your Mac; faces in the video are read on this Mac and never sent. Transcript text goes to your chosen coaching provider, and excerpts go to TypeSafe for evaluation."
+                     : "Audio stays on your Mac. Transcript text goes to your chosen coaching provider, and excerpts go to TypeSafe for evaluation.")
                     .font(.system(size: 10)).foregroundStyle(CoachTheme.muted).lineSpacing(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -174,7 +194,11 @@ struct RecordWindow: View {
         }
         .padding(28).frame(width: 490)
         .background(CoachTheme.canvas).tint(CoachTheme.accent)
-        .onAppear { consent = false }
+        .onAppear {
+            consent = false
+            model.refreshScreenPermission()
+        }
+        .onChange(of: model.recordVideo) { consent = false }  // they agreed to something else
     }
 
     private func field(_ title: String, text: Binding<String>, prompt: String) -> some View {

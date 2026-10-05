@@ -29,6 +29,8 @@ public struct SessionDetail: Decodable, Equatable {
     public struct Audio: Decodable, Equatable {
         /// Both tracks mixed into one file to listen to.
         public let listenPath: String?
+        /// The call's window, when it was recorded (silent; it starts when the audio does).
+        public let videoPath: String?
         public let tracks: [Track]
         public let warnings: [String]
     }

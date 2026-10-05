@@ -7,11 +7,18 @@ public struct RecorderOptions {
     public var sessionDir: URL
     public var duration: Double?
     public var aec: Bool
+    /// Also record the call's window to video.mov (needs Screen Recording permission).
+    public var video: Bool
+    /// Show the Screen Recording prompt when starting without permission. Off in the app, which
+    /// asks before recording rather than as the interview begins.
+    public var askForScreenPermission: Bool
 
-    public init(sessionDir: URL, duration: Double?, aec: Bool) {
+    public init(sessionDir: URL, duration: Double?, aec: Bool, video: Bool = false, askForScreenPermission: Bool = true) {
         self.sessionDir = sessionDir
         self.duration = duration
         self.aec = aec
+        self.video = video
+        self.askForScreenPermission = askForScreenPermission
     }
 }
 
@@ -25,7 +32,7 @@ public struct Issue: Codable, Equatable {
 public struct RecorderReport: Codable {
     public var version = 1
     public var alignment = "t0_padded"
-    public var alignmentNote = "Both WAVs start at t0 (the session start host time). Leading silence and delivery gaps are filled with zeros, so sample N of each file is the same instant; no offsets need to be applied."
+    public var alignmentNote = "Both WAVs start at t0 (the session start host time). Leading silence and delivery gaps are filled with zeros, so sample N of each file is the same instant; no offsets need to be applied. video.mov, when present, also starts at t0 (a black frame until the call window appears)."
     public var sessionDir: String
     public var startedAt: String?
     public var stoppedAt: String
@@ -33,6 +40,8 @@ public struct RecorderReport: Codable {
     public var requestedDurationSeconds: Double?
     public var t0HostTime: UInt64?
     public var tracks: [String: TrackWriter.Stats]
+    /// The call's video, when it was requested and something was recorded. It starts at t0 too.
+    public var video: ScreenCapture.Stats?
     public var warnings: [Issue]
     public var errors: [Issue]
 }
@@ -76,6 +85,7 @@ public final class RecordingSession {
     private let onExit: (Int32) -> Void
     private let tap: SystemAudioTap
     private let mic: MicCapture
+    private var screen: ScreenCapture?
     private var systemWriter: TrackWriter?
     private var micWriter: TrackWriter?
     private var t0HostTime: UInt64?
@@ -92,6 +102,7 @@ public final class RecordingSession {
     private var reportURL: URL { options.sessionDir.appendingPathComponent("recorder.json") }
     private var systemURL: URL { options.sessionDir.appendingPathComponent("system.wav") }
     private var micURL: URL { options.sessionDir.appendingPathComponent("mic.wav") }
+    private var videoURL: URL { options.sessionDir.appendingPathComponent("video.mov") }
 
     public convenience init(options: RecorderOptions, log: Logger, onExit: @escaping (Int32) -> Void) {
         self.init(options: options, log: log, onExit: onExit, requestMicrophoneAccess: MicCapture.requestAccess)
@@ -114,7 +125,7 @@ public final class RecordingSession {
     public func start() {
         guard !startRequested, !finished else { return }
         startRequested = true
-        log.info("ICRecorder \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev") pid \(getpid()): session \(options.sessionDir.path), duration \(options.duration.map { "\($0)s" } ?? "until stopped"), aec \(options.aec)")
+        log.info("ICRecorder \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev") pid \(getpid()): session \(options.sessionDir.path), duration \(options.duration.map { "\($0)s" } ?? "until stopped"), aec \(options.aec), video \(options.video)")
         do {
             try claimDirectory()
         } catch {
@@ -168,7 +179,7 @@ public final class RecordingSession {
            kill(pid, 0) == 0 {
             throw CaptureError.message("another recorder (pid \(pid)) is already recording into \(options.sessionDir.path)")
         }
-        for url in [systemURL, micURL] where fm.fileExists(atPath: url.path) {
+        for url in [systemURL, micURL, videoURL] where fm.fileExists(atPath: url.path) {
             throw CaptureError.message("\(url.path) already exists; refusing to overwrite an earlier recording")
         }
         try "\(getpid())\n".write(to: pidURL, atomically: true, encoding: .utf8)
@@ -196,6 +207,12 @@ public final class RecordingSession {
             return
         }
         log.info("recording started")
+        if options.video {
+            // After the audio has started: video is extra, and its problems become warnings.
+            let screen = ScreenCapture(log: log, url: videoURL, t0HostTime: t0HostTime ?? AudioGetCurrentHostTime())
+            self.screen = screen
+            screen.start(askForPermission: options.askForScreenPermission)
+        }
 
         if let duration = options.duration {
             DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
@@ -226,6 +243,8 @@ public final class RecordingSession {
         log.info("stopping (\(reason))")
         tap.stop()
         mic.stop()
+        let video = screen?.stop()
+        warnings += screen?.warnings ?? []
 
         var tracks: [String: TrackWriter.Stats] = [:]
         if var stats = systemWriter?.finish() {
@@ -255,6 +274,7 @@ public final class RecordingSession {
             requestedDurationSeconds: options.duration,
             t0HostTime: t0HostTime,
             tracks: tracks,
+            video: video,
             warnings: warnings,
             errors: errors
         )

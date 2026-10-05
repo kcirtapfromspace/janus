@@ -561,6 +561,54 @@ fn the_report_reads_the_room_and_renders_it_the_same_every_time() {
     assert!(html.contains("add a TypeSafe key in Setup"));
 }
 
+/// With the call's video read (faces.json), each of your answers gets what the video showed of
+/// the others, stored with the timeline and shown, hedged, on the page. The app finds the video.
+#[test]
+fn the_videos_faces_add_cues_to_your_answers() {
+    use interview_coach::pipeline::{ReportExtras, analyze_session_with, refresh_timeline};
+    use interview_coach::temperature::Kind;
+    let (tmp, mut db, id) = transcribed(Mode::Dual);
+    let llm = FakeLlm::new(vec![Ok(sample(false, GOOD_QUOTE))]);
+    let extras = ReportExtras { checker: None, timeline: Some(&RoomScorer), ..Default::default() };
+    let stored = analyze_session_with(&mut db, &llm, &claude(), id, extras, &mut Quiet).unwrap();
+    assert!(stored.turn_signals.iter().all(|s| s.video.is_none()), "no video yet");
+
+    // One interviewer on camera for the whole call, nodding at 10, 15 and 25 s of your answer.
+    let samples: Vec<serde_json::Value> = (0..216)
+        .map(|i| {
+            let t = i as f64 / 6.0;
+            let nod = [10.0, 15.0, 25.0].iter().any(|n: &f64| (t - n).abs() < 0.1);
+            json!({"t": t, "faces": [{"x": 0.4, "y": if nod { 0.225 } else { 0.2 }, "w": 0.15, "h": 0.25,
+                                      "yaw": 2.0, "pitch": -4.0, "roll": 0.0, "mouth": 0.03, "conf": 0.99}]})
+        })
+        .collect();
+    let faces = json!({"version": 1, "tool": "vision-faces-v1", "video": "video.mov", "fps": 6, "width": 1280,
+                       "height": 720, "duration_s": 36, "samples": samples});
+    std::fs::write(tmp.path().join("faces.json"), faces.to_string()).unwrap();
+    std::fs::write(tmp.path().join("video.mov"), b"not really a movie").unwrap();
+
+    let (seen, _) = refresh_timeline(&mut db, id, Some(&RoomScorer), &mut Quiet).unwrap();
+    let answer = seen.turn_signals.iter().find(|s| s.kind == Kind::Answer).unwrap();
+    let cues = answer.video.expect("the answer has video cues");
+    assert_eq!(cues.nods, 3);
+    assert!((cues.on_camera - 1.0).abs() < 1e-9, "{cues:?}");
+    assert_eq!(cues.looking_away, Some(0.0));
+    let reloaded = db.analysis_by_id(seen.id).unwrap().unwrap();
+    assert_eq!(reloaded.turn_signals.iter().find(|s| s.kind == Kind::Answer).unwrap().video, Some(cues), "stored");
+
+    let session = db.get_session(id).unwrap();
+    let html = interview_coach::report::render_html(&session, &reloaded, None, None);
+    assert!(html.contains("What the video showed <span class='tag'>experimental</span>"), "hedged");
+    assert!(html.contains("Usually 1 person on camera besides you. They nodded 3 times, during 1 of your 1 answers."));
+    assert!(html.contains("While you answered on “Tell me about a tough prioritization call.”: they nodded 3 times"));
+    assert!(html.contains("never expressions or emotions"));
+    assert!(html.contains("<title>Your answer, 00:00:05 (they nodded 3 times)</title>"), "the chart's band says so too");
+
+    let view = serde_json::to_value(session_view::build(&db, id).unwrap()).unwrap();
+    assert_eq!(view["audio"]["video_path"], tmp.path().join("video.mov").display().to_string());
+    assert!(view["stages"][0]["summary"].as_str().unwrap().contains("+ video"));
+}
+
 /// The same inputs give the same report back: a rerun with nothing changed makes no model call
 /// and no new version. Another model makes a new version whose parent is the one it was rerun
 /// from, and going back to the first model brings the first version back, still without a call.

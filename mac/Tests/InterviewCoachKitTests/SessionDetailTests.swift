@@ -30,6 +30,13 @@ final class SessionDetailTests: XCTestCase {
         XCTAssertFalse(next.plan.practicePlan.isEmpty)
         XCTAssertEqual(detail.audio.tracks.map(\.name), ["mic", "system"])
         XCTAssertNotNil(detail.audio.listenPath)
+        XCTAssertNil(detail.audio.videoPath, "a session from before video recording has none")
+    }
+
+    func testDecodesTheCallsVideo() throws {
+        let json = #"{"listen_path": "/s/listen.m4a", "video_path": "/s/video.mov", "tracks": [], "warnings": []}"#
+        let audio = try ICClient.decode(SessionDetail.Audio.self, from: Data(json.utf8))
+        XCTAssertEqual(audio.videoPath, "/s/video.mov")
     }
 
     func testTimestampsParse() {

@@ -17,6 +17,10 @@ time-aligned mono WAVs:
 Because the two sides are on separate tracks, "you vs. interviewer" labels need no speaker
 detection. Requires macOS 14.4+ on Apple silicon.
 
+With `--video` it also records `video.mov`: the call's window (never the whole screen), via
+ScreenCaptureKit, on the same clock as the audio. That needs Screen Recording permission; every
+video problem is a warning, and the audio records regardless.
+
 ## Build
 
 ```sh
@@ -56,6 +60,7 @@ System Settings > Privacy & Security > Screen & System Audio Recording > "System
 | `--session-dir <dir>` | Required, absolute path (apps launched via `open` start in `/`). Created if missing. |
 | `--duration <sec>` | Optional; stop automatically after this many seconds. |
 | `--aec` | Enable Apple voice processing (echo cancellation) on the mic, so speaker bleed of the interviewer is suppressed. Other-app ducking is set to minimum. Falls back to the raw mic, with a warning, if voice processing won't start. |
+| `--video` | Also record the call's window to `video.mov`. The window is chosen from call apps (Zoom, Teams, Webex, FaceTime, Slack, …) and browser windows whose title is a call service's (Meet, Zoom Meeting, a Teams or Webex meeting or call, Whereby, Jitsi), largest first, and re-checked every 5 s, so pressing Record before joining works. A tab that merely mentions an interview or a call is never chosen. A browser window whose tab changes keeps being recorded. |
 
 Files in `<dir>`:
 
@@ -63,6 +68,7 @@ Files in `<dir>`:
 |---|---|
 | `recorder.pid` | Written at start; removed on exit. Its presence means "recording". |
 | `system.wav`, `mic.wav` | 16-bit PCM mono at each device's native rate (usually 48 kHz). Header refreshed every second, so a crash still leaves a playable file. |
+| `video.mov` | With `--video`: H.264, 1280×720 (the window scaled to fit), up to 10 fps, written only when the picture changes. Starts with a black frame at t0, so second N is second N of the WAVs. Written in 5 s fragments, so a crash still leaves a playable file. |
 | `recorder.log` | Human-readable log (stdout isn't visible under `open`). |
 | `recorder.json` | Written on exit: see below. |
 
@@ -122,8 +128,20 @@ recorder only reports it (`max_ahead_seconds`) and never drops audio to correct 
 
 Warning codes: `system_silent` / `mic_silent` (every sample is exactly zero; for `system` this
 is the missing-permission signature), `*_near_silent` (RMS below 1e-4), `*_no_audio` (no buffers
-at all), and `mic_warning` (e.g. AEC fallback). Error codes: `mic_permission_denied`,
+at all), `mic_warning` (e.g. AEC fallback), and with `--video`: `video_permission_denied`
+(Screen Recording is off; macOS applies a new grant after the app reopens), `video_no_call_window`
+(no call window was ever open), `video_capture_failed` (a call window was found but couldn't be
+captured), `video_write_error`. `ICRecorder --video` shows the Screen Recording prompt when the
+permission is missing; Janus.app asks from its Record window instead, never as recording starts. Error codes: `mic_permission_denied`,
 `start_failed`, `mic_error`, `*_write_error`.
+
+With `--video`, recorder.json has a `video` object: `file`, `width`, `height`,
+`frames_per_second`, `frames`, `dropped_frames`, `duration_seconds`, `first_frame_seconds`
+(when the call window first appeared, relative to t0), `windows` (each window recorded, in
+order), `write_error`.
+
+On macOS 15 and later, macOS periodically asks whether to keep allowing an app that records the
+screen without the system's window picker. Picking automatically is what lets Record stay one click.
 
 ## Layout
 
@@ -134,8 +152,10 @@ Sources/ICRecorderCore/RecordingSession.swift  lifecycle, pid file, recorder.jso
 Sources/ICRecorderCore/SystemAudioTap.swift    process tap + private aggregate device
 Sources/ICRecorderCore/MicCapture.swift        AVAudioEngine mic, optional voice processing
 Sources/ICRecorderCore/TrackWriter.swift       t0-aligned mono WAV writer
+Sources/ICRecorderCore/ScreenCapture.swift     the call's window: choosing it, t0-aligned video writer
+Sources/ICVision/main.swift                    `ic-vision faces`: Vision face positions/angles → faces.json
 Resources/Info.plist, Resources/ICRecorder.entitlements
-Tests/ICRecorderCoreTests/                      TrackWriter tests
+Tests/ICRecorderCoreTests/                      TrackWriter, continuity, lifecycle and window-choice tests
 ```
 
 Written from scratch. The tap setup follows the aggregate-device pattern from Apple's

@@ -60,6 +60,10 @@ enum Cmd {
         /// Echo cancellation on your mic (if you're not using headphones).
         #[arg(long)]
         aec: bool,
+        /// Also record the call's window (Zoom, Teams, Meet, …) to video. Needs Screen Recording
+        /// permission for ICRecorder; the audio is recorded either way.
+        #[arg(long)]
+        video: bool,
         /// Stop automatically after this many seconds.
         #[arg(long)]
         duration: Option<u32>,
@@ -823,16 +827,27 @@ fn confirm(question: &str) -> Result<bool> {
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
+/// How `ic record` asks ICRecorder to capture.
+struct Capture {
+    aec: bool,
+    video: bool,
+    duration: Option<u32>,
+}
+
 fn record(
     settings: &Settings,
     title: Option<String>,
     company: Option<String>,
-    aec: bool,
-    duration: Option<u32>,
+    how: Capture,
     yes: bool,
     analyze: bool,
 ) -> Result<()> {
-    if !yes && !confirm("Has everyone on the call agreed to be recorded?")? {
+    let question = if how.video {
+        "Has everyone on the call agreed to be recorded, including video?"
+    } else {
+        "Has everyone on the call agreed to be recorded?"
+    };
+    if !yes && !confirm(question)? {
         bail!("Not recording. Some places require everyone's consent to record a call.");
     }
     let mut db = open_db(settings)?;
@@ -844,7 +859,7 @@ fn record(
     let session = pipeline::create_recording_session(&db, settings, &title, company)?;
     let dir = PathBuf::from(&session.dir);
 
-    let started = capture::launch(&dir, duration, aec).and_then(|_| {
+    let started = capture::launch(&dir, how.duration, how.aec, how.video).and_then(|_| {
         let spinner = Ui::new();
         spinner
             .bar
@@ -1831,7 +1846,7 @@ fn setup_status(settings: &Settings, json: bool) -> Result<()> {
             outln!("  {}", style(&check.detail).dim());
         }
     }
-    for tool in [Tool::Ffmpeg, Tool::Ant, Tool::Docker] {
+    for tool in [Tool::Ffmpeg, Tool::Ant, Tool::Vision, Tool::Docker] {
         if let Some(found) = tool.find() {
             let origin = match found.origin {
                 Origin::Bundled => "bundled with the app",
@@ -1906,10 +1921,11 @@ fn run() -> Result<()> {
             title,
             company,
             aec,
+            video,
             duration,
             yes,
             no_analyze,
-        } => record(&settings, title, company, aec, duration, yes, !no_analyze),
+        } => record(&settings, title, company, Capture { aec, video, duration }, yes, !no_analyze),
         Cmd::Stop { no_analyze } => {
             let mut db = open_db(&settings)?;
             let active: Vec<_> = db

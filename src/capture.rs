@@ -36,7 +36,7 @@ pub fn is_running(dir: &Path) -> bool {
     pid(dir).is_some_and(alive)
 }
 
-pub fn launch(dir: &Path, duration: Option<u32>, aec: bool) -> Result<()> {
+pub fn launch(dir: &Path, duration: Option<u32>, aec: bool, video: bool) -> Result<()> {
     let app = app_path();
     if !app.exists() {
         bail!("Recorder app not found at {}. Build it with: mac/build.sh", app.display());
@@ -49,6 +49,9 @@ pub fn launch(dir: &Path, duration: Option<u32>, aec: bool) -> Result<()> {
     }
     if aec {
         cmd.arg("--aec");
+    }
+    if video {
+        cmd.arg("--video");
     }
     let status = cmd.status().context("running `open`")?;
     if !status.success() {

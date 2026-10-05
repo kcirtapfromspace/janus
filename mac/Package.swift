@@ -14,6 +14,8 @@ let package = Package(
         .target(name: "ICRecorderCore"),
         // Headless recorder that `ic record` launches (CLI flow); shipped inside the app's Helpers.
         .executableTarget(name: "ICRecorder", dependencies: ["ICRecorderCore"]),
+        // Finds the faces in a recorded call's video with Vision; `ic` runs it (Contents/MacOS/ic-vision).
+        .executableTarget(name: "ICVision"),
         // The app's model of `ic`: running it, and the JSON it returns. Kept free of Sparkle so it's testable.
         .target(name: "InterviewCoachKit"),
         // Menu-bar + window app; records in-process and hands sessions to the bundled `ic`.

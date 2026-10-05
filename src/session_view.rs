@@ -14,6 +14,7 @@ use crate::models::{Mode, Session, Step, fmt_ts, speaker_label};
 use crate::pipeline;
 use crate::report;
 use crate::steps::{self, StageState, StageStatus};
+use crate::video;
 
 #[derive(Serialize)]
 pub struct SessionView {
@@ -63,6 +64,8 @@ pub struct StageView {
 pub struct AudioView {
     /// Both tracks mixed into one file to listen to.
     pub listen_path: Option<String>,
+    /// The call's window, recorded alongside (silent; it starts when the audio does).
+    pub video_path: Option<String>,
     pub tracks: Vec<TrackView>,
     /// Problems the recorder noticed (e.g. a silent track).
     pub warnings: Vec<String>,
@@ -144,12 +147,17 @@ pub fn build(db: &Db, id: i64) -> Result<SessionView> {
     }
 
     let coverage_notes = coverage::recording_notes(dir, session.mode).for_you;
+    let video_file = dir.join(video::VIDEO_FILE);
     let mut recorder_warnings = coverage_notes.clone();
     recorder_warnings.extend(capture::read_report(dir).map(|r| capture::report_warnings(&r)).unwrap_or_default());
     // A track that stopped early shows on the transcript too: that's where its missing lines are noticed.
     let stage_warnings = |state: &StageState| -> Vec<String> {
         match state.step {
-            Step::Recording => recorder_warnings.clone(),
+            Step::Recording => {
+                let mut w = recorder_warnings.clone();
+                w.extend(state.current.iter().flat_map(|r| r.warnings.clone()));
+                w
+            }
             Step::Transcript => {
                 let mut w = coverage_notes.clone();
                 w.extend(state.current.iter().flat_map(|r| r.warnings.clone()));
@@ -163,11 +171,12 @@ pub fn build(db: &Db, id: i64) -> Result<SessionView> {
         Some(match state.step {
             Step::Recording => {
                 let tracks = if session.mode == Mode::Dual { "2 tracks" } else { "1 track" };
-                let warn = match recorder_warnings.len() {
+                let video = if video_file.exists() { " + video" } else { "" };
+                let warn = match stage_warnings(state).len() {
                     0 => String::new(),
                     n => format!(" · {n} warning{}", if n == 1 { "" } else { "s" }),
                 };
-                format!("{} · {tracks}{warn}", fmt_ts(session.duration_s.unwrap_or(0.0)))
+                format!("{} · {tracks}{video}{warn}", fmt_ts(session.duration_s.unwrap_or(0.0)))
             }
             Step::Transcript => {
                 let swapped = state.current.as_ref().is_some_and(|r| r.params["kind"] == "swap");
@@ -234,6 +243,7 @@ pub fn build(db: &Db, id: i64) -> Result<SessionView> {
         stages,
         audio: AudioView {
             listen_path: listen.exists().then(|| listen.display().to_string()),
+            video_path: video_file.exists().then(|| video_file.display().to_string()),
             tracks,
             warnings: recorder_warnings,
         },

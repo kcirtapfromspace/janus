@@ -30,6 +30,8 @@ struct SetupView: View {
                     }
                     MicrophoneRow()
                     Divider()
+                    ScreenRecordingRow()
+                    Divider()
                     RecordingTestRow()
                 }
             }
@@ -297,6 +299,35 @@ private struct MicrophoneRow: View {
         case .notDetermined: "Needed to record your side of the interview."
         default: "Turn on Janus under Privacy & Security › Microphone, then come back."
         }
+    }
+}
+
+/// Screen Recording, for the call's video. Optional: without it, interviews record audio only.
+private struct ScreenRecordingRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            SetupStatusIcon(status: model.screenPermission ? .ok : model.recordVideo ? .action : .optional, running: false)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.screenPermission ? "Screen Recording allowed" : "Allow Screen Recording for video")
+                    .font(.body.weight(.medium))
+                Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if !model.screenPermission {
+                Button("Allow") { model.requestScreenAccess() }
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    private var detail: String {
+        model.screenPermission
+            ? "Janus records only the call's window, and reads the faces in it on this Mac."
+            : "Optional: records the call's window so you can see how people reacted. After allowing it, reopen Janus."
     }
 }
 

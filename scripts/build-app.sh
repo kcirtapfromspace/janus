@@ -1,7 +1,8 @@
 #!/bin/bash
 # Builds Janus.app for Apple silicon: the SwiftUI app, the bundled `ic` CLI
-# (Contents/MacOS/ic) with the tools it runs (a minimal LGPL ffmpeg and Anthropic's `ant`, next to
-# it, so users install nothing from Homebrew), ICRecorder.app for `ic record` (Contents/Helpers),
+# (Contents/MacOS/ic) with the tools it runs (a minimal LGPL ffmpeg, Anthropic's `ant`, and
+# `ic-vision`, which finds the faces in a recorded call's video, next to it, so users install
+# nothing from Homebrew), ICRecorder.app for `ic record` (Contents/Helpers),
 # and Sparkle for in-place updates (Contents/Frameworks). Signs it inside out with the hardened
 # runtime. Adapted from MacLink's build-app.sh.
 #
@@ -74,6 +75,7 @@ cp "$bin/InterviewCoach" "$bundle/Contents/MacOS/InterviewCoach"
 cp target/release/ic "$bundle/Contents/MacOS/ic"
 cp "$ffmpeg_dir/bin/ffmpeg" "$bundle/Contents/MacOS/ffmpeg"
 cp "$ant_dir/ant" "$bundle/Contents/MacOS/ant"
+cp "$bin/ICVision" "$bundle/Contents/MacOS/ic-vision"
 cp "$ffmpeg_dir/LICENSE.txt" "$bundle/Contents/Resources/ffmpeg-LICENSE.txt"
 cp "$ffmpeg_dir/BUILD.txt" "$bundle/Contents/Resources/ffmpeg-BUILD.txt"
 cp "$ant_dir/LICENSE.txt" "$bundle/Contents/Resources/ant-LICENSE.txt"
@@ -118,11 +120,12 @@ codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ic"
 # The bundled tools are signed as ours too (their pinned checksums prove where they came from).
 codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ffmpeg"
 codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ant"
+codesign "${sign_options[@]}" "$bundle/Contents/MacOS/ic-vision"
 codesign "${sign_options[@]}" --entitlements "$entitlements" "$bundle"
 codesign --verify --deep --strict "$bundle"
 
 for executable in "$bundle/Contents/MacOS/InterviewCoach" "$bundle/Contents/MacOS/ic" \
-    "$bundle/Contents/MacOS/ffmpeg" "$bundle/Contents/MacOS/ant" \
+    "$bundle/Contents/MacOS/ffmpeg" "$bundle/Contents/MacOS/ant" "$bundle/Contents/MacOS/ic-vision" \
     "$recorder/Contents/MacOS/ICRecorder" "$sparkle/Versions/B/Sparkle" "$sparkle/Versions/B/Autoupdate" \
     "$sparkle/Versions/B/Updater.app/Contents/MacOS/Updater"; do
     if [[ "$(lipo -archs "$executable")" != arm64 ]]; then

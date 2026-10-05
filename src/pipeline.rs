@@ -2,8 +2,9 @@
 //! next — each a recorded run that can be repeated on its own (see `steps`).
 //!
 //! Session folders hold normalized audio (`audio.flac` for single-track uploads, `mic.flac` +
-//! `system.flac` for dual-track), a mixed `listen.m4a`, and human-readable exports. The database
-//! is the source of truth.
+//! `system.flac` for dual-track), a mixed `listen.m4a`, the call's `video.mov` and the faces found
+//! in it (`faces.json`) when the app recorded video, and human-readable exports. The database is
+//! the source of truth.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +34,7 @@ use crate::steps::{self, RunProgress};
 use crate::temperature;
 use crate::transcribe::Transcriber;
 use crate::versions::{self, CachedScorer, Manifest};
+use crate::video;
 
 /// Dual-track layout: which file belongs to which speaker.
 pub const TRACKS: [(&str, &str); 2] = [("mic", YOU), ("system", INTERVIEWER)];
@@ -254,7 +256,7 @@ fn record_stage(
         Step::Recording,
         params,
         progress,
-        |db, _, progress| {
+        |db, run, progress| {
             let mut session = db.get_session(session_id)?;
             let dir = PathBuf::from(&session.dir);
             let names: &[&str] = match session.mode {
@@ -278,6 +280,14 @@ fn record_stage(
             set_duration(db, &mut session, &outs)?;
             progress.stage("Making a copy to listen to");
             audio::make_listen_copy(&outs, &dir.join("listen.m4a"))?;
+            // The call's video is extra: reading it can fail without failing the recording.
+            let video_file = dir.join(video::VIDEO_FILE);
+            if video_file.exists() {
+                progress.stage("Finding the faces in the video");
+                if let Err(e) = video::extract(&video_file, &dir.join(video::FACES_FILE), progress) {
+                    db.set_run_warnings(run, &[format!("The video's faces couldn't be read, so the report leaves out what the video showed: {e:#}")])?;
+                }
+            }
             db.set_status(session_id, Status::New, None)?;
             Ok((db.get_session(session_id)?, None))
         },
@@ -629,7 +639,15 @@ fn add_timeline(
             None
         }
     };
-    let signals = temperature::build(&convo, &assessments, audio.as_ref());
+    let mut signals = temperature::build(&convo, &assessments, audio.as_ref());
+    match video::load(Path::new(&session.dir)) {
+        Ok(Some(faces)) => {
+            progress.stage("Reading the video: who nodded, who looked away…");
+            video::annotate(&mut signals, &faces, &db.get_segments(session.id)?);
+        }
+        Ok(None) => {}
+        Err(e) => warnings.push(format!("The room's timeline couldn't read the video's faces, so it leaves them out: {e:#}")),
+    }
     let scorer_name = assessments.values().next().map(|a| a.scorer.clone());
     db.set_turn_signals(session.id, analysis_id, &signals, scorer_name.as_deref())?;
     Ok(warnings)

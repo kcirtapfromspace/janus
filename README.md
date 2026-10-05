@@ -3,8 +3,8 @@
 When an interview ends without useful feedback, Janus gives you another perspective. Record or
 import the conversation, review the transcript and evidence behind your feedback, and prepare
 for the next round.
-Audio is processed locally on your Mac. Transcript text goes to your chosen coaching provider
-(Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe.
+Audio and video are processed locally on your Mac. Transcript text goes to your chosen coaching
+provider (Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe.
 
 [Website](https://kcirtapfromspace.github.io/janus/) · [Download for Mac](https://github.com/kcirtapfromspace/janus/releases/latest)
 
@@ -36,8 +36,17 @@ or `IC_FFMPEG` / `IC_ANT`.)
 **Janus.app** lives in the menu bar (Roman profiles formed by opposing quotation marks):
 
 - **Record interview** asks you to confirm everyone agreed to be recorded, then records your mic
-  and the call's audio from any app. The icon turns into a red record dot; **Stop** ends it, and
-  the app transcribes and analyses the interview (about 1–2 minutes).
+  and the call's audio from any app, and (unless you turn it off) the call's window as video. The
+  icon turns into a red record dot; **Stop** ends it, and the app transcribes and analyses the
+  interview (about 1–2 minutes, plus a minute or two to read a long call's video).
+- **Video** records only the call's window (Zoom, Teams, Webex, FaceTime, Slack, or a Meet, Teams
+  or Zoom browser tab), never the rest of your screen. It needs Screen Recording permission
+  (Setup asks; reopen Janus after allowing it); without it, interviews record audio only. The
+  video plays with the audio on the Recording, Transcript and Review tabs, so a quote's timestamp
+  shows how people looked when it was said. The review's **What the video showed** section
+  (experimental) counts, for each of your answers, how many others were on camera, their nods,
+  and how often they looked away. Faces are read on this Mac with Apple's Vision framework:
+  positions and head angles only, never expressions, emotions or identities, and nothing is sent.
 - The menu lists recent interviews with their verdicts; click one to open its review.
 - **Open Janus** opens your interview notebook: the latest conversation, earlier
   interviews, and their reviews. Activity, conversation time, active roles, and recorded outcomes
@@ -149,6 +158,7 @@ keys and malformed values are errors that name the offending key.
 
 ```sh
 ic record --company Acme                # or record from the terminal; Ctrl+C to stop
+ic record --video                       # also record the call's window (Screen Recording permission)
 ic import zoom_recording.mp4            # or import an existing recording (audio or video)
 ic import --mic me.wav --system them.wav   # separate tracks, if you have them
 
@@ -162,21 +172,24 @@ ic swap 3                               # if a single-track import got You/Inter
 Recording and importing both transcribe and analyse automatically. `ic transcribe N` and
 `ic analyze N` re-run each step on its own. Earlier analyses are kept.
 
-**Consent:** tell the people on the call that you're recording; some places require every party's
-consent. `ic record` asks you to confirm this before it starts.
+**Consent:** tell the people on the call that you're recording, and that it includes video when
+it does; some places require every party's consent. `ic record` asks you to confirm this before
+it starts.
 
 ## How it works
 
 | Step | What happens |
 |---|---|
-| Capture | `ICRecorder.app` (Swift) records your mic and the system audio (Zoom, Teams, Meet, …) as two time-aligned tracks, so "you vs. interviewer" labels come free. |
+| Capture | `ICRecorder.app` (Swift) records your mic and the system audio (Zoom, Teams, Meet, …) as two time-aligned tracks, so "you vs. interviewer" labels come free. With video on, ScreenCaptureKit records the call's window (720p, up to 10 fps, at most about 400 MB an hour) on the same clock. |
 | Transcribe | ffmpeg → 16 kHz FLAC → whisper.cpp (large-v3-turbo, on the GPU) with voice-activity detection, so silence isn't transcribed. Single-track files go through speaker diarization. |
 | Measure | Talk share, answer lengths, pace, filler words, questions asked, interruptions: computed in code, so they're comparable over time. |
 | Analyse | The model (Claude or OpenAI) reads the transcript and metrics and returns a structured review: verdict + interviewer signals, 7-dimension rubric, question-by-question feedback, and the top 3 things to work on. Every quote is checked against the transcript. |
+| Read the room | The interviewer's turns are timed and placed warm or cool from their words (Jev) and voice. With video, `ic-vision` (Apple Vision, on this Mac) finds faces a few times a second; `src/video.rs` follows them, tells your face apart by whose speech its mouth moves with, and counts the others' nods and looking away during each answer. Experimental: thresholds aren't yet validated on real calls. |
 | Calibrate | `ic outcome` records the real result, so predicted verdicts can be compared with what actually happened. |
 
 Data lives in `~/InterviewCoach/` (`coach.db` plus one folder per session with audio,
-`transcript.md`, `analysis.json`, and `report.html`).
+`video.mov` and `faces.json` when video was recorded, `transcript.md`, `analysis.json`, and
+`report.html`).
 
 ## Tests
 

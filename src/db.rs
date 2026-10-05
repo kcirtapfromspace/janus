@@ -142,7 +142,8 @@ CREATE INDEX IF NOT EXISTS answer_checks_by_analysis ON answer_checks(analysis_i
 
 -- The room's temperature timeline (temperature.rs): one row per conversation turn in an analysed
 -- interview: substantive interviewer turns, their backchannels, and your answers. Jev's verdicts go in
--- checks_json; voice features, z-scores, listening cues and the smoothed line in features_json.
+-- checks_json; voice features, z-scores, listening cues, video cues (answers, when the call's video
+-- was recorded) and the smoothed line in features_json.
 CREATE TABLE IF NOT EXISTS turn_signals (
     id INTEGER PRIMARY KEY,
     analysis_id INTEGER NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
@@ -943,10 +944,14 @@ impl Db {
             [analysis_id],
         )?;
         for s in signals {
-            let features = serde_json::json!({
+            let mut features = serde_json::json!({
                 "voice": s.voice, "z": s.z, "backchannel_rate": s.backchannel_rate, "latency_s": s.latency_s,
                 "smoothed": s.smoothed,
             });
+            if let Some(video) = &s.video {
+                features["video"] = serde_json::to_value(video)?;
+                features["video_method"] = crate::video::METHOD.into();
+            }
             let excerpt: String = s.text.chars().take(600).collect();
             tx.execute(
                 "INSERT INTO turn_signals (analysis_id, session_id, turn_idx, speaker, kind, start_s, end_s, excerpt,
@@ -1005,6 +1010,7 @@ impl Db {
                 z: serde_json::from_value(f["z"].clone()).unwrap_or_default(),
                 backchannel_rate: f["backchannel_rate"].as_f64(),
                 latency_s: f["latency_s"].as_f64(),
+                video: serde_json::from_value(f["video"].clone()).unwrap_or(None),
                 temperature,
                 smoothed: f["smoothed"].as_f64(),
             });

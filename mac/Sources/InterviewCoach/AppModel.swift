@@ -53,6 +53,12 @@ final class AppModel {
     var modelOffersError: String?
     private var modelOffersAsked: Date?
     var micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+    /// Screen Recording, for the call's video. macOS applies a new grant when the app reopens.
+    var screenPermission = ScreenCapture.hasPermission()
+    /// Record the call's window along with the audio (the Record window's choice, remembered).
+    var recordVideo = UserDefaults.standard.object(forKey: "recordVideo") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(recordVideo, forKey: "recordVideo") }
+    }
     /// Setup opens by itself at most once per launch.
     @ObservationIgnored var setupPromptShown = false
     var selection: SessionSummary.ID? {
@@ -133,7 +139,7 @@ final class AppModel {
                     : loaded.stages.last { $0.hasResult }?.step ?? .recording
             }
             detail = loaded
-            player.load(loaded.audio.listenPath)
+            player.load(loaded.audio.listenPath, video: loaded.audio.videoPath)
         } catch {
             guard selection == id else { return }
             detailError = error.localizedDescription
@@ -199,6 +205,7 @@ final class AppModel {
             forgetVanished()
             setup = try await ic.decode(SetupStatus.self, ["setup", "status", "--json"])
             micPermission = AVCaptureDevice.authorizationStatus(for: .audio)
+            screenPermission = ScreenCapture.hasPermission()
         } catch {
             lastError = error.localizedDescription
         }
@@ -232,7 +239,8 @@ final class AppModel {
             let new = try await ic.decode(NewRecording.self, args)
             let dir = URL(fileURLWithPath: new.dir, isDirectory: true)
             let session = RecordingSession(
-                options: RecorderOptions(sessionDir: dir, duration: nil, aec: false),
+                options: RecorderOptions(sessionDir: dir, duration: nil, aec: false, video: recordVideo,
+                                         askForScreenPermission: false),
                 log: Logger(fileURL: dir.appendingPathComponent("recorder.log")),
                 onExit: { [weak self] code in
                     Task { @MainActor in self?.recordingEnded(exitCode: code) }
@@ -368,6 +376,19 @@ final class AppModel {
         MicCapture.requestAccess { [weak self] _ in
             Task { @MainActor in self?.micPermission = AVCaptureDevice.authorizationStatus(for: .audio) }
         }
+    }
+
+    func refreshScreenPermission() {
+        screenPermission = ScreenCapture.hasPermission()
+    }
+
+    /// Asks once with the system prompt; after that, opens the setting. Either way macOS applies
+    /// the permission when Janus reopens.
+    func requestScreenAccess() {
+        if !ScreenCapture.requestPermission() {
+            openPrivacySettings("Privacy_ScreenCapture")
+        }
+        screenPermission = ScreenCapture.hasPermission()
     }
 
     /// Record 5 s from both tracks to prove the permissions work. Only ever started by a click.

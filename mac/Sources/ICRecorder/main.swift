@@ -2,10 +2,12 @@ import AppKit
 import ICRecorderCore
 
 let usage = """
-usage: ICRecorder --session-dir <absolute dir> [--duration <seconds>] [--aec]
+usage: ICRecorder --session-dir <absolute dir> [--duration <seconds>] [--aec] [--video]
 
 Records system audio (every app except this one) to <dir>/system.wav and the
 microphone to <dir>/mic.wav until SIGINT/SIGTERM, a quit Apple event, or --duration.
+With --video, also records the call's window (Zoom, Teams, Meet, …) to <dir>/video.mov;
+that needs Screen Recording permission, and audio is recorded without it.
 Writes <dir>/recorder.pid while running and <dir>/recorder.json when done.
 
 Launch it as an app so macOS attributes the permissions to ICRecorder:
@@ -21,6 +23,7 @@ func parseOptions(_ arguments: [String]) -> RecorderOptions {
     var sessionDir: String?
     var duration: Double?
     var aec = false
+    var video = false
     var index = 1
     func value(for flag: String) -> String {
         index += 1
@@ -37,6 +40,8 @@ func parseOptions(_ arguments: [String]) -> RecorderOptions {
             duration = seconds
         case "--aec":
             aec = true
+        case "--video":
+            video = true
         case "-h", "--help":
             print(usage)
             exit(0)
@@ -48,7 +53,7 @@ func parseOptions(_ arguments: [String]) -> RecorderOptions {
     }
     guard let sessionDir else { die("--session-dir is required") }
     guard sessionDir.hasPrefix("/") else { die("--session-dir must be absolute (apps launched with `open` start in /)") }
-    return RecorderOptions(sessionDir: URL(fileURLWithPath: sessionDir, isDirectory: true), duration: duration, aec: aec)
+    return RecorderOptions(sessionDir: URL(fileURLWithPath: sessionDir, isDirectory: true), duration: duration, aec: aec, video: video)
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {

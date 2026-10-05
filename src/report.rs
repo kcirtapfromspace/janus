@@ -11,6 +11,7 @@ use crate::history::History;
 use crate::metrics::TalkMetrics;
 use crate::models::{Direction, Evidence, Mode, Priority, Session, Verdict, fmt_ts, parse_ts};
 use crate::temperature::{self, Kind, Signal};
+use crate::video;
 
 fn dots(score: Option<u8>) -> String {
     match score {
@@ -308,6 +309,33 @@ pub fn print_room(stored: &StoredAnalysis, full: bool) {
             }
         }
     }
+    if let Some(summary) = video::summary(signals) {
+        outln!(" {} {}", style("video").cyan(), video_sentence(&summary));
+        if full {
+            for (answer, question) in answers_with_questions(signals) {
+                let notes = answer.video.as_ref().map(video::notes).unwrap_or_default();
+                if !notes.is_empty() {
+                    let on = question.map_or(String::new(), |q| format!(" on \"{}\"", excerpt(&q.text, 10)));
+                    outln!(" {} while you answered{on}: {}", style(fmt_ts(answer.start)).dim(), notes.join(", "));
+                }
+            }
+        }
+    }
+}
+
+/// "Usually 2 people on camera besides you. They nodded 14 times, during 6 of your 9 answers."
+fn video_sentence(s: &video::Summary) -> String {
+    let people = match s.usually_on_camera {
+        0 => "Usually nobody else was on camera.".to_string(),
+        1 => "Usually 1 person on camera besides you.".to_string(),
+        n => format!("Usually {n} people on camera besides you."),
+    };
+    let nods = match s.nods {
+        0 => "No nods were seen while you answered.".to_string(),
+        1 => "They nodded once while you answered.".to_string(),
+        n => format!("They nodded {n} times, during {} of your {} answers.", s.answers_with_nods, s.answers),
+    };
+    format!("{people} {nods}")
 }
 
 // --- HTML -------------------------------------------------------------------------------------
@@ -374,9 +402,10 @@ fn room_svg(signals: &[Signal], duration: f64) -> String {
     let mut h = format!("<svg class='room' viewBox='0 0 {SVG_W} {SVG_H}' role='img' \
                          aria-label='How warm or cool each interviewer turn was, over the interview'>");
     for a in signals.iter().filter(|s| s.kind == Kind::Answer) {
-        let _ = write!(h, "<a href='#t={:.1}'><title>Your answer, {}</title><rect class='band' x='{:.1}' y='{PLOT_TOP}' \
+        let seen = a.video.as_ref().map(video::notes).filter(|n| !n.is_empty()).map_or(String::new(), |n| format!(" ({})", n.join(", ")));
+        let _ = write!(h, "<a href='#t={:.1}'><title>Your answer, {}{}</title><rect class='band' x='{:.1}' y='{PLOT_TOP}' \
                            width='{:.1}' height='{:.1}'/></a>",
-                       a.start, fmt_ts(a.start), x(a.start), (x(a.end) - x(a.start)).max(1.0), PLOT_BOTTOM - PLOT_TOP);
+                       a.start, fmt_ts(a.start), esc(&seen), x(a.start), (x(a.end) - x(a.start)).max(1.0), PLOT_BOTTOM - PLOT_TOP);
     }
     let _ = write!(h, "<line class='grid' x1='{PLOT_LEFT}' x2='{PLOT_RIGHT}' y1='{PLOT_TOP}' y2='{PLOT_TOP}'/>\
                        <line class='grid' x1='{PLOT_LEFT}' x2='{PLOT_RIGHT}' y1='{PLOT_BOTTOM}' y2='{PLOT_BOTTOM}'/>\
@@ -462,6 +491,7 @@ fn room_html(h: &mut String, session: &Session, stored: &StoredAnalysis) {
     if !voice.is_empty() {
         let _ = write!(h, "<h3>Your voice</h3><ul class='plain moments'>{}</ul>", voice.join(""));
     }
+    video_html(h, signals);
     let placed = match &stored.timeline_scorer {
         Some(scorer) => format!("by its words (checked turn by turn by {}) and by how they sounded compared with the rest of \
                                  this call", esc(scorer)),
@@ -477,6 +507,31 @@ fn room_html(h: &mut String, session: &Session, stored: &StoredAnalysis) {
     };
     let _ = write!(h, "<p class='muted'>Each dot is one thing the interviewer said, placed {placed}. It's behaviour, not \
                        mind-reading: every point is something you can replay.{single} Method {}.</p>", temperature::METHOD);
+}
+
+/// What the call's video showed of the other people while you answered. Experimental: the counts
+/// come from untuned thresholds (video.rs), so the section says so.
+fn video_html(h: &mut String, signals: &[Signal]) {
+    let Some(summary) = video::summary(signals) else { return };
+    let _ = write!(h, "<h3>What the video showed <span class='tag'>experimental</span></h3><p>{}</p>", esc(&video_sentence(&summary)));
+    let notable: Vec<String> = answers_with_questions(signals)
+        .into_iter()
+        .filter_map(|(answer, question)| {
+            let notes = video::notes(answer.video.as_ref()?);
+            (!notes.is_empty()).then(|| {
+                let on = question.map_or(String::new(), |q| format!(" on “{}”", esc(&excerpt(&q.text, 12))));
+                format!("<li>{}While you answered{on}: {}</li>", seek_html(answer.start, &fmt_ts(answer.start)), esc(&notes.join(", ")))
+            })
+        })
+        .collect();
+    if !notable.is_empty() {
+        let _ = write!(h, "<ul class='plain moments'>{}</ul>", notable.join(""));
+    }
+    let _ = write!(h, "<p class='muted'>From the call's window, read on this Mac: where faces were and which way they \
+                       pointed, never expressions or emotions, and nothing that identifies anyone. Your own face is told \
+                       apart by whose speech its mouth moves with. Not yet checked against real calls: small video tiles \
+                       hide small nods, a layout change (speaker view) can mix people up, and looking down may be note-taking. \
+                       Method {}.</p>", video::METHOD);
 }
 
 fn when(created_at: &str) -> String {

@@ -1,7 +1,7 @@
 //! The external programs ic runs, found the same way everywhere.
 //!
-//! Janus.app carries its own ffmpeg and `ant` next to `ic` (Contents/MacOS), so a new Mac
-//! needs nothing from Homebrew. Lookup order: an `IC_*` override, the copy bundled next to `ic`,
+//! Janus.app carries its own ffmpeg, `ant` and `ic-vision` (the video's face finder) next to `ic`
+//! (Contents/MacOS), so a new Mac needs nothing from Homebrew. Lookup order: an `IC_*` override, the copy bundled next to `ic`,
 //! PATH, then the places each tool's installer uses. The app launches `ic` with a minimal PATH, so
 //! those last locations are what make a Docker Desktop or OrbStack install visible.
 
@@ -14,6 +14,8 @@ use anyhow::{Result, anyhow};
 pub enum Tool {
     Ffmpeg,
     Ant,
+    /// mac/Sources/ICVision: finds the faces in a recorded call's video.
+    Vision,
     Docker,
 }
 
@@ -22,6 +24,7 @@ impl Tool {
         match self {
             Tool::Ffmpeg => "ffmpeg",
             Tool::Ant => "ant",
+            Tool::Vision => "ic-vision",
             Tool::Docker => "docker",
         }
     }
@@ -30,12 +33,13 @@ impl Tool {
         match self {
             Tool::Ffmpeg => "IC_FFMPEG",
             Tool::Ant => "IC_ANT",
+            Tool::Vision => "IC_VISION",
             Tool::Docker => "IC_DOCKER",
         }
     }
 
     fn bundled(self) -> bool {
-        matches!(self, Tool::Ffmpeg | Tool::Ant)
+        matches!(self, Tool::Ffmpeg | Tool::Ant | Tool::Vision)
     }
 
     /// Where installers put the tool when it isn't on the (minimal) PATH the app provides.
@@ -62,6 +66,14 @@ impl Tool {
         {
             return Some(Found { path, origin: Origin::Bundled });
         }
+        if self == Tool::Vision {
+            // A source checkout's Swift build (it's never on PATH).
+            let mac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("mac/.build");
+            if let Some(path) = ["release", "debug"].iter().map(|c| mac.join(c).join("ICVision")).find(|p| p.is_file()) {
+                return Some(Found { path, origin: Origin::System });
+            }
+            return None;
+        }
         let on_path = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default();
         on_path
             .into_iter()
@@ -75,7 +87,7 @@ impl Tool {
     pub fn require(self) -> Result<PathBuf> {
         self.find().map(|f| f.path).ok_or_else(|| {
             anyhow!(match self {
-                Tool::Ffmpeg | Tool::Ant => format!(
+                Tool::Ffmpeg | Tool::Ant | Tool::Vision => format!(
                     "Janus.app should include {0}, but it's missing — reinstall the app. (Running ic \
                      on its own? Set {1} to a {0} binary.)",
                     self.name(),

@@ -292,6 +292,8 @@ pub struct Signal {
     pub backchannel_rate: Option<f64>,
     /// Seconds from the end of your answer to this turn; negative = they started while you talked.
     pub latency_s: Option<f64>,
+    /// What the call's video showed of the other people while you answered (answers only).
+    pub video: Option<crate::video::VideoCues>,
     pub temperature: Option<f64>,
     /// The smoothed line at this turn.
     pub smoothed: Option<f64>,
@@ -401,6 +403,7 @@ pub fn build(convo: &[ConvTurn], assessments: &BTreeMap<usize, Assessment>, audi
             z: BTreeMap::new(),
             backchannel_rate: None,
             latency_s: None,
+            video: None,
             temperature: None,
             smoothed: None,
         })
@@ -678,8 +681,8 @@ mod tests {
 
     fn signal(start: f64, checks: BTreeMap<String, Verdict>) -> Signal {
         Signal { turn_idx: 0, kind: Kind::Substantive, speaker: INTERVIEWER.into(), start, end: start + 5.0, text: String::new(),
-                 checks, voice: None, z: BTreeMap::new(), backchannel_rate: None, latency_s: None, temperature: None,
-                 smoothed: None }
+                 checks, voice: None, z: BTreeMap::new(), backchannel_rate: None, latency_s: None, video: None,
+                 temperature: None, smoothed: None }
     }
 
     #[test]
