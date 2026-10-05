@@ -4,7 +4,7 @@ Releases are built, signed, notarized, and published from this Mac, following Ma
 
 **`kcirtapfromspace/janus` is the public home for source, releases, and the website.** `main` is the default branch. Each release tags its source commit and includes the notarized archive, signed `appcast.xml`, checksums, `BUILD-MANIFEST.json`, and validation transcripts. Installed copies read `https://github.com/kcirtapfromspace/janus/releases/latest/download/appcast.xml`. Feed releases are never marked pre-release: GitHub's `releases/latest` endpoint skips them.
 
-The former `interview-coach-releases` repository was renamed to `janus`, so update URLs embedded in existing apps redirect to the same releases. The application and release repository histories are both preserved on `main`; existing public release tags remain unchanged.
+The former `interview-coach-releases` repository was renamed to `janus`, so update URLs embedded in existing apps redirect to the same releases. The application and release repository histories are both preserved on `main`. Release tags point to the original source commits recorded in each manifest; the notarized archives and signed appcasts retain their original bytes.
 
 The hero website lives in `docs/index.html`, `docs/site.css`, and `docs/assets/`. GitHub Pages publishes `main` → `/docs` at [kcirtapfromspace.github.io/janus](https://kcirtapfromspace.github.io/janus/). `.nojekyll` keeps the site static. The page follows system appearance and needs no build dependencies.
 
