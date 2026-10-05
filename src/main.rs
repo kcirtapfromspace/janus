@@ -17,6 +17,7 @@ use interview_coach::capture;
 use interview_coach::config::{FileConfig, ModelRef, Provider, ScorerRef, Settings};
 use interview_coach::db::Db;
 use interview_coach::events::JsonEvents;
+use interview_coach::label;
 use interview_coach::library;
 use interview_coach::llm;
 use interview_coach::merge::to_turns;
@@ -30,6 +31,7 @@ use interview_coach::session_view;
 use interview_coach::setup;
 use interview_coach::steps::{self, StageStatus};
 use interview_coach::tools::{Origin, Tool};
+use interview_coach::video;
 use interview_coach::{errln, out, outln};
 
 #[derive(Parser)]
@@ -378,6 +380,46 @@ enum EvalCmd {
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
     },
+    /// Cut interviews recorded with video into the clips docs/eval/video-decision.md scores, ready
+    /// to label. Adding an interview again keeps its labels.
+    Clips {
+        /// The interviews (ids from `ic list`).
+        #[arg(required = true)]
+        ids: Vec<i64>,
+        /// designed: staged calls (for tuning); realistic: the test set.
+        #[arg(long, value_enum, default_value_t = ClipOrigin::Realistic)]
+        origin: ClipOrigin,
+        /// Where the labels live (default: ~/InterviewCoach/eval/video, outside the repository).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Label the clips in the browser, on a page served to this Mac only.
+    Label {
+        /// Where the labels live (default: ~/InterviewCoach/eval/video).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Port to serve on (default: any free one).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Print the page's link without opening it.
+        #[arg(long)]
+        no_open: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ClipOrigin {
+    Designed,
+    Realistic,
+}
+
+impl ClipOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            ClipOrigin::Designed => "designed",
+            ClipOrigin::Realistic => "realistic",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1716,6 +1758,45 @@ fn jev_ping(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
+/// Add each interview's clips to the label files. Every interview is checked before anything is
+/// written, so a typo in one id adds nothing.
+fn eval_clips(settings: &Settings, ids: &[i64], origin: ClipOrigin, dir: Option<PathBuf>) -> Result<()> {
+    let db = open_db(settings)?;
+    let mut per_interview = vec![];
+    for &id in ids {
+        let session = db.get_session(id)?;
+        let session_dir = PathBuf::from(&session.dir);
+        if !session_dir.join(video::VIDEO_FILE).is_file() {
+            bail!("Interview {id} has no video. Record with video on (Janus 0.1.0-preview.14 or later).");
+        }
+        let segments = db.get_segments(id)?;
+        if segments.is_empty() {
+            bail!("Interview {id} has no transcript yet, and clips are cut from your answers. Run: ic run transcript {id}");
+        }
+        let faces = video::load(&session_dir)?;
+        per_interview.push((id, session.title.clone(), label::session_clips(&session, &segments, faces.as_ref(), origin.as_str())));
+    }
+    let custom = dir.is_some();
+    let dir = dir.unwrap_or_else(|| label::default_dir(&settings.data_dir));
+    let store = label::Store::new(&dir);
+    for (id, title, clips) in per_interview {
+        let total = clips.len();
+        let added = store.add_clips(clips)?;
+        let clips = if total == 1 { "1 clip".to_string() } else { format!("{total} clips") };
+        outln!("Interview {id} ({title}): {clips}, {} new", added.new);
+        if !added.moved.is_empty() {
+            warn(&format!(
+                "{} already listed with a different window, since the transcript was re-run: {}. Their labels describe the old \
+                 window; delete those lines from clips.jsonl to cut and label them again.",
+                added.moved.len(), added.moved.join(", ")
+            ));
+        }
+    }
+    let flag = if custom { format!(" --dir {}", dir.display()) } else { String::new() };
+    outln!("{}", style(format!("Label them: ic eval label{flag}")).dim());
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn eval_scorers(
     settings: &Settings,
@@ -2277,6 +2358,12 @@ fn run() -> Result<()> {
                     concurrency,
                 },
         } => eval_scorers(&settings, set, items, &arms, runs, out, limit, concurrency),
+        Cmd::Eval {
+            action: EvalCmd::Clips { ids, origin, dir },
+        } => eval_clips(&settings, &ids, origin, dir),
+        Cmd::Eval {
+            action: EvalCmd::Label { dir, port, no_open },
+        } => label::serve(&dir.unwrap_or_else(|| label::default_dir(&settings.data_dir)), port, !no_open),
         Cmd::Jev {
             action: JevCmd::Ping,
         } => jev_ping(&settings),

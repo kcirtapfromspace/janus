@@ -42,6 +42,7 @@ pub mod eval;
 pub mod events;
 pub mod history;
 pub mod jev_auth;
+pub mod label;
 pub mod library;
 pub mod llm;
 pub mod merge;

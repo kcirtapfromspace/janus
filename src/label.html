@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Label video clips</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f3ee; --panel: #fffdf9; --ink: #1e1b17; --muted: #6d675e; --line: #e2dcd1;
+  --accent: #8b3a2b; --accent-ink: #fff; --ok: #2e6b48; --warn: #94570a; --bad: #b3261e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141311; --panel: #1d1b18; --ink: #f0ebe3; --muted: #a49d92; --line: #33302b;
+    --accent: #e3907a; --accent-ink: #1a0f0b; --ok: #7cc29b; --warn: #e2b15f; --bad: #f2867c;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+header { display: flex; align-items: baseline; gap: 14px; padding: 14px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { margin: 0; font-size: 16px; }
+.muted { color: var(--muted); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 22px; padding: 20px; max-width: 1500px; margin: 0 auto; }
+@media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+.stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; }
+video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.stage.marking { cursor: crosshair; outline: 3px solid var(--warn); outline-offset: -3px; }
+.marker { position: absolute; width: 22px; height: 22px; margin: -11px 0 0 -11px; border: 2px solid #fff; border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--accent); pointer-events: none; display: none; }
+.bar { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.bar input[type=range] { flex: 1; min-width: 160px; accent-color: var(--accent); }
+.time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 120px; text-align: right; }
+button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+button.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.note { margin-top: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); }
+.note.todo { border-color: var(--warn); }
+.note p { margin: 0 0 8px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; align-self: start; }
+.clipname { font-weight: 600; margin: 0 0 2px; }
+fieldset { border: 0; padding: 0; margin: 0 0 14px; }
+legend { font-weight: 600; padding: 0; }
+.hint { color: var(--muted); font-size: 12px; margin: 2px 0 6px; }
+.opts { display: flex; flex-wrap: wrap; gap: 6px; }
+.opts label { position: relative; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; cursor: pointer; user-select: none; }
+.opts input { position: absolute; opacity: 0; pointer-events: none; }
+.opts label:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.opts label.unsure { color: var(--muted); }
+.actions { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.error { color: var(--bad); min-height: 1.4em; margin-top: 8px; }
+.saved { color: var(--ok); }
+.keys { font-size: 12px; color: var(--muted); margin-top: 14px; }
+kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; }
+.list { grid-column: 1 / -1; }
+.list h2 { font-size: 13px; margin: 0 0 8px; }
+.set { margin-bottom: 10px; }
+.set .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.chip { font-size: 12px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); cursor: pointer; background: var(--panel); color: var(--ink); }
+.chip.done { border-color: var(--ok); color: var(--ok); }
+.chip.current { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.empty { padding: 40px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Label video clips</h1>
+  <span class="muted" id="progress"></span>
+  <span class="muted">Label what you see, before looking at the review. docs/eval/video-decision.md has the rules.</span>
+</header>
+<main id="app">
+  <section>
+    <div class="stage" id="stage">
+      <video id="video" muted playsinline preload="auto"></video>
+      <div class="marker" id="marker"></div>
+    </div>
+    <div class="bar">
+      <button id="play" title="Play or pause (Space)">Play</button>
+      <button id="restart" title="Back to the clip's start (R)">Restart</button>
+      <button id="slow" title="Half speed (S)">½×</button>
+      <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Position in the clip">
+      <span class="time" id="time"></span>
+    </div>
+    <div class="note" id="you"></div>
+  </section>
+  <section class="panel">
+    <p class="clipname" id="clipname"></p>
+    <p class="muted" id="clipwhen" style="margin:0 0 14px"></p>
+    <form id="form" autocomplete="off"></form>
+    <div class="actions">
+      <button class="primary" id="save" title="Save and go to the next unlabelled clip (Enter)">Save &amp; next</button>
+      <button id="prev" title="Previous clip (←)">←</button>
+      <button id="next" title="Next clip (→)">→</button>
+    </div>
+    <div class="error" id="error" role="alert"></div>
+    <div class="keys"><kbd>Space</kbd> play · <kbd>S</kbd> half speed · <kbd>R</kbd> restart · <kbd>Enter</kbd> save &amp; next · <kbd>←</kbd> <kbd>→</kbd> clips</div>
+  </section>
+  <section class="panel list" id="list"></section>
+</main>
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("t");
+const $ = (id) => document.getElementById(id);
+const video = $("video");
+
+// What each clip is labelled with: the same checks, options and wording as label.rs and the doc.
+const CHECKS = [
+  { id: "layout", top: true, title: "Layout", hint: "How the call shows people in this clip.",
+    options: [["gallery", "Gallery"], ["speaker", "Speaker view"], ["other", "Other"]] },
+  { id: "on_camera", title: "Others on camera", hint: "People besides you whose face is visible for most of the clip. A camera that's off, or only a name or avatar, doesn't count.",
+    options: [["0", "0"], ["1", "1"], ["2", "2"], ["3+", "3+"]] },
+  { id: "nodded", title: "Did anyone else nod?", hint: "A deliberate down-and-up of the head. Moving along with speech, a laugh, or shifting in the seat isn't a nod.",
+    options: [[true, "Yes"], [false, "No"]] },
+  { id: "nod_count", title: "How many nods?", hint: "Across everyone else. Each dip counts once.",
+    options: [["none", "None"], ["1-2", "1–2"], ["3-5", "3–5"], ["6+", "6+"]] },
+  { id: "looked_away", title: "How much did they look away?", hint: "Face clearly turned off the screen (aside, down at notes or a phone) for at least a second, as a share of their time on camera. Glancing at notes counts.",
+    options: [["rarely", "Rarely (<10%)"], ["sometimes", "Sometimes (10–40%)"], ["mostly", "Mostly (>40%)"]] },
+  { id: "smiled", title: "Did anyone else smile?", hint: "Lip corners visibly raised, with or without teeth. A polite half-smile counts; a neutral resting mouth doesn't.",
+    options: [[true, "Yes"], [false, "No"]] },
+];
+const UNSURE = "?";
+
+let clips = [], you = {}, idx = -1, slow = false, marking = false;
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "X-Janus-Token": token, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || res.statusText);
+  return JSON.parse(text);
+}
+
+function clock(t) {
+  const s = Math.max(0, Math.round(t));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(sec).padStart(2, "0");
+}
+
+// --- the form -------------------------------------------------------------------------------------
+
+function buildForm() {
+  const form = $("form");
+  for (const check of CHECKS) {
+    const set = document.createElement("fieldset");
+    set.innerHTML = `<legend>${check.title}</legend><p class="hint">${check.hint}</p><div class="opts"></div>`;
+    const opts = set.querySelector(".opts");
+    const choices = check.top ? check.options : [...check.options, [UNSURE, "Can't tell"]];
+    for (const [value, text] of choices) {
+      const label = document.createElement("label");
+      if (value === UNSURE) label.className = "unsure";
+      label.innerHTML = `<input type="radio" name="${check.id}" value="${String(value)}"> ${text}`;
+      opts.appendChild(label);
+    }
+    form.appendChild(set);
+  }
+  form.addEventListener("change", (e) => agree(e.target.name, e.target.value));
+}
+
+function setPick(id, value) {
+  const input = document.querySelector(`input[name="${id}"][value="${CSS.escape(String(value))}"]`);
+  if (input) input.checked = true;
+}
+function pick(id) {
+  const input = document.querySelector(`input[name="${id}"]:checked`);
+  return input ? input.value : null;
+}
+
+// Keep the answers consistent as they're given, as label.rs requires.
+function agree(changed, value) {
+  if (changed === "nodded" && value === "false") setPick("nod_count", "none");
+  if (changed === "nod_count" && value === "none") setPick("nodded", "false");
+  if (changed === "nod_count" && value !== "none" && value !== UNSURE) setPick("nodded", "true");
+  if (changed === "nodded" && value === "true" && pick("nod_count") === "none") {
+    document.querySelectorAll('input[name="nod_count"]').forEach((i) => (i.checked = false));
+  }
+  if (changed === "on_camera" && value === "0") {
+    setPick("nodded", "false"); setPick("nod_count", "none"); setPick("smiled", "false"); setPick("looked_away", UNSURE);
+  }
+}
+
+function fillForm(clip) {
+  document.querySelectorAll("#form input").forEach((i) => (i.checked = false));
+  if (clip.layout) setPick("layout", clip.layout);
+  if (!clip.labelled) return;
+  for (const check of CHECKS) {
+    if (check.top) continue;
+    setPick(check.id, check.id in (clip.labels || {}) ? clip.labels[check.id] : UNSURE);
+  }
+}
+
+function readForm() {
+  const labels = {};
+  let layout = null;
+  for (const check of CHECKS) {
+    const value = pick(check.id);
+    if (value === null) return { error: check.top ? `Choose a ${check.title.toLowerCase()}.` : `Answer “${check.title}”, or choose Can't tell.` };
+    if (check.top) layout = value;
+    else if (value !== UNSURE) labels[check.id] = value === "true" ? true : value === "false" ? false : value;
+  }
+  return { layout, labels };
+}
+
+// --- the clip -------------------------------------------------------------------------------------
+
+function show(i) {
+  if (!clips.length) return;
+  idx = (i + clips.length) % clips.length;
+  const clip = clips[idx];
+  $("error").textContent = "";
+  $("clipname").textContent = `${clip.title || clip.set} · answer ${parseInt(clip.variant.slice(1, 3), 10)}, clip ${clip.variant.slice(-1)}`;
+  $("clipwhen").textContent = `${clock(clip.start)}–${clock(clip.end)} of the interview` + (clip.labelled ? " · labelled" : "");
+  fillForm(clip);
+  const src = `/video/${encodeURIComponent(clip.set)}?t=${token}`;
+  if (video.dataset.src !== src) {
+    video.dataset.src = src;
+    video.src = src;
+    video.addEventListener("loadedmetadata", () => restart(), { once: true });
+  } else {
+    restart();
+  }
+  marking = !you[clip.set];
+  renderYou();
+  renderList();
+  renderProgress();
+}
+
+function restart() {
+  const clip = clips[idx];
+  if (!clip) return;
+  video.currentTime = clip.start;
+  video.playbackRate = slow ? 0.5 : 1;
+  if (!marking) video.play().catch(() => {});
+}
+
+video.addEventListener("timeupdate", () => {
+  const clip = clips[idx];
+  if (!clip) return;
+  if (video.currentTime >= clip.end - 0.05 || video.currentTime < clip.start - 0.5) {
+    video.currentTime = clip.start; // loop the clip
+  }
+  const into = Math.max(0, video.currentTime - clip.start);
+  $("time").textContent = `${clock(into)} / ${clock(clip.end - clip.start)}`;
+  $("scrub").value = String(Math.round((into / (clip.end - clip.start)) * 1000));
+  placeMarker();
+});
+video.addEventListener("play", () => ($("play").textContent = "Pause"));
+video.addEventListener("pause", () => ($("play").textContent = "Play"));
+video.addEventListener("error", () => {
+  $("error").textContent = "This browser can't play the interview's video. Try Safari: copy this page's address into it.";
+});
+
+$("scrub").addEventListener("input", (e) => {
+  const clip = clips[idx];
+  video.currentTime = clip.start + (Number(e.target.value) / 1000) * (clip.end - clip.start);
+});
+$("play").addEventListener("click", togglePlay);
+$("restart").addEventListener("click", restart);
+$("slow").addEventListener("click", toggleSlow);
+$("prev").addEventListener("click", () => show(idx - 1));
+$("next").addEventListener("click", () => show(idx + 1));
+$("save").addEventListener("click", save);
+
+function togglePlay() { video.paused ? video.play() : video.pause(); }
+function toggleSlow() {
+  slow = !slow;
+  video.playbackRate = slow ? 0.5 : 1;
+  $("slow").classList.toggle("on", slow);
+}
+
+async function save() {
+  const clip = clips[idx];
+  const form = readForm();
+  if (form.error) { $("error").textContent = form.error; return; }
+  try {
+    const saved = await api("/api/label", { id: clip.id, layout: form.layout, labels: form.labels });
+    Object.assign(clip, { labels: saved.labels, layout: saved.layout, labelled: true });
+  } catch (e) {
+    $("error").textContent = e.message;
+    return;
+  }
+  const next = clips.findIndex((c, j) => j > idx && !c.labelled);
+  const first = clips.findIndex((c) => !c.labelled);
+  if (next >= 0) show(next);
+  else if (first >= 0) show(first);
+  else { renderList(); renderProgress(); $("error").innerHTML = '<span class="saved">Every clip is labelled.</span>'; }
+}
+
+// --- your face, once per interview ------------------------------------------------------------------
+
+function renderYou() {
+  const clip = clips[idx];
+  const mark = you[clip.set];
+  const box = $("you");
+  $("stage").classList.toggle("marking", marking);
+  if (marking) {
+    box.className = "note todo";
+    box.innerHTML = `<p><b>Which face is yours?</b> Pause on a frame where your face shows, then click it.
+      This is asked once per interview, and only tests whether Janus tells you apart.</p>
+      <button id="noface">My face isn't in this video</button>${mark ? ' <button id="cancelmark">Cancel</button>' : ""}`;
+    $("noface").onclick = () => markYou(null);
+    if (mark) $("cancelmark").onclick = () => { marking = false; renderYou(); };
+    video.pause();
+  } else {
+    box.className = "note";
+    box.innerHTML = mark.visible
+      ? `Your face: marked at ${clock(mark.at)} of this interview. <button id="remark">Mark again</button>`
+      : `Your face: not in this video. <button id="remark">Mark it</button>`;
+    $("remark").onclick = () => { marking = true; renderYou(); };
+  }
+}
+
+function videoPoint(event) {
+  const r = video.getBoundingClientRect();
+  if (!video.videoWidth) return null;
+  const scale = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
+  const w = video.videoWidth * scale, h = video.videoHeight * scale;
+  const x = (event.clientX - r.left - (r.width - w) / 2) / w;
+  const y = (event.clientY - r.top - (r.height - h) / 2) / h;
+  return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
+}
+
+$("stage").addEventListener("click", (event) => {
+  if (!marking) { togglePlay(); return; }
+  const point = videoPoint(event);
+  if (point) markYou({ at: video.currentTime, ...point });
+});
+
+async function markYou(point) {
+  const clip = clips[idx];
+  try {
+    const saved = await api("/api/you", point ? { set: clip.set, visible: true, ...point } : { set: clip.set, visible: false });
+    you[clip.set] = { visible: saved.labels.you_visible, at: saved.at, x: saved.x, y: saved.y };
+    marking = false;
+    renderYou();
+    placeMarker(true);
+    video.play().catch(() => {});
+  } catch (e) {
+    $("error").textContent = e.message;
+  }
+}
+
+// The mark shows for a moment after it's placed, so you can see it landed on your face.
+let markerUntil = 0;
+function placeMarker(fresh) {
+  const clip = clips[idx], mark = clip && you[clip.set];
+  if (fresh) markerUntil = Date.now() + 2500;
+  const marker = $("marker");
+  if (!mark || !mark.visible || Date.now() > markerUntil || !video.videoWidth) { marker.style.display = "none"; return; }
+  const r = video.getBoundingClientRect();
+  const scale = Math.min(r.width / video.videoWidth, r.height / video.videoHeight);
+  const w = video.videoWidth * scale, h = video.videoHeight * scale;
+  marker.style.left = (r.width - w) / 2 + mark.x * w + "px";
+  marker.style.top = (r.height - h) / 2 + mark.y * h + "px";
+  marker.style.display = "block";
+  setTimeout(() => placeMarker(), 300);
+}
+
+// --- progress and the list --------------------------------------------------------------------------
+
+function renderProgress() {
+  const done = clips.filter((c) => c.labelled).length;
+  $("progress").textContent = `${done} of ${clips.length} clips labelled`;
+}
+
+function renderList() {
+  const list = $("list");
+  const sets = [...new Set(clips.map((c) => c.set))];
+  list.innerHTML = "<h2>Clips</h2>";
+  for (const set of sets) {
+    const mine = clips.map((c, j) => [c, j]).filter(([c]) => c.set === set);
+    const div = document.createElement("div");
+    div.className = "set";
+    const youDone = you[set] ? "" : " · your face not marked yet";
+    const name = document.createElement("span");
+    name.textContent = mine[0][0].title || set;
+    const note = document.createElement("span");
+    note.className = "muted";
+    note.textContent = ` ${set}${youDone}`;
+    const chips = document.createElement("div");
+    chips.className = "chips";
+    div.append(name, note, chips);
+    for (const [c, j] of mine) {
+      const chip = document.createElement("button");
+      chip.className = "chip" + (c.labelled ? " done" : "") + (j === idx ? " current" : "");
+      chip.textContent = `${c.variant} ${clock(c.start)}`;
+      chip.onclick = () => show(j);
+      chips.appendChild(chip);
+    }
+    list.appendChild(div);
+  }
+}
+
+// --- keys ---------------------------------------------------------------------------------------------
+
+document.addEventListener("keydown", (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const key = e.key;
+  if (key === " ") { e.preventDefault(); togglePlay(); }
+  else if (key === "s" || key === "S") toggleSlow();
+  else if (key === "r" || key === "R") restart();
+  else if (key === "Enter") { e.preventDefault(); save(); }
+  else if (key === "ArrowLeft") show(idx - 1);
+  else if (key === "ArrowRight") show(idx + 1);
+  else return;
+  if (document.activeElement && document.activeElement.tagName === "BUTTON") document.activeElement.blur();
+});
+
+(async () => {
+  buildForm();
+  try {
+    const state = await api("/api/state");
+    clips = state.clips;
+    you = state.you;
+  } catch (e) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = e.message;
+    $("app").replaceChildren(p);
+    return;
+  }
+  if (!clips.length) { $("app").innerHTML = '<p class="empty">No clips yet. Add some with <code>ic eval clips &lt;interview id&gt;</code>.</p>'; return; }
+  const first = clips.findIndex((c) => !c.labelled);
+  show(first >= 0 ? first : 0);
+})();
+</script>
+</body>
+</html>
