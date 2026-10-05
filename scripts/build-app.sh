@@ -46,7 +46,7 @@ release_build=false
 [[ "$identity" == "Developer ID Application:"* ]] && release_build=true
 feed="${IC_UPDATE_FEED:-}"
 if [[ -z "$feed" && "$release_build" = true ]]; then
-    feed="https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest/download/appcast.xml"
+    feed="https://github.com/kcirtapfromspace/janus/releases/latest/download/appcast.xml"
 fi
 
 app="${IC_APP_OUTPUT:-$project_root/mac/build/Janus.app}"

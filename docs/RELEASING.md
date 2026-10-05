@@ -1,9 +1,12 @@
 # Releasing
 
-Releases are built, signed, notarized, and published from this Mac, following MacLink's process. Nothing runs in GitHub Actions.
+Releases are built, signed, notarized, and published from this Mac, following MacLink's process. Application builds stay local; GitHub Pages deploys the static website automatically from `main`.
 
-- **Source:** `kcirtapfromspace/interview-coach` (private). Each version gets a release tagged at its commit, carrying the archive, `SHA256SUMS.txt`, `BUILD-MANIFEST.json`, and the validation transcripts.
-- **Downloads and update feed:** `kcirtapfromspace/interview-coach-releases` (public). It holds the notarized archive, the signed `appcast.xml`, and checksums. Installed copies read `releases/latest/download/appcast.xml`. GitHub's "latest" only ever points to a full release, so **feed releases are never marked pre-release**: a pre-release there would silently stop updates for everyone.
+**`kcirtapfromspace/janus` is the public home for source, releases, and the website.** `main` is the default branch. Each release tags its source commit and includes the notarized archive, signed `appcast.xml`, checksums, `BUILD-MANIFEST.json`, and validation transcripts. Installed copies read `https://github.com/kcirtapfromspace/janus/releases/latest/download/appcast.xml`. Feed releases are never marked pre-release: GitHub's `releases/latest` endpoint skips them.
+
+The former `interview-coach-releases` repository was renamed to `janus`, so update URLs embedded in existing apps redirect to the same releases. The application and release repository histories are both preserved on `main`; existing public release tags remain unchanged.
+
+The hero website lives in `docs/index.html`, `docs/site.css`, and `docs/assets/`. GitHub Pages publishes `main` → `/docs` at [kcirtapfromspace.github.io/janus](https://kcirtapfromspace.github.io/janus/). `.nojekyll` keeps the site static. The page follows system appearance and needs no build dependencies.
 
 ## One-time setup (already done on the build Mac)
 
@@ -35,7 +38,7 @@ To use it on another build Mac, import it there with `generate_keys --account de
 
    If Apple is still processing when the wait ends, run `scripts/notarize-release.sh --resume VERSION`.
 4. Review `dist/notarization/vVERSION/notary-log.json`.
-5. Publish both releases and confirm the public feed serves the new build. It refuses an archive that isn't stapled, isn't from team `67C7724279`, follows a different feed, or is older than what the feed serves:
+5. Publish one release and confirm the public feed serves the new build. It refuses an archive that isn't stapled, isn't from team `67C7724279`, follows a different feed, or is older than what the feed serves:
 
    ```sh
    scripts/publish-release.sh 0.1.0-preview.2

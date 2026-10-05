@@ -6,12 +6,14 @@ for the next round.
 Audio is processed locally on your Mac. Transcript text goes to your chosen coaching provider
 (Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe.
 
+[Website](https://kcirtapfromspace.github.io/janus/) · [Download for Mac](https://github.com/kcirtapfromspace/janus/releases/latest)
+
 Janus continues the existing Interview Coach update feed. Interviews, settings, and sign-ins
 carry forward from earlier previews.
 
 ## Install on a Mac
 
-Download the notarized app from **[interview-coach-releases](https://github.com/kcirtapfromspace/interview-coach-releases/releases/latest)**,
+Download the notarized app from **[Janus releases](https://github.com/kcirtapfromspace/janus/releases/latest)**,
 move it to Applications, and open it. Its **Setup** window walks through browser sign-in with
 Claude or ChatGPT, choosing a coaching model, downloading the local speech models, and a 5-second
 recording test. Core coaching does not need Docker. ffmpeg and Anthropic's `ant` come inside the app. It updates
@@ -186,3 +188,7 @@ cargo test --release --test pipeline -- --ignored     # end-to-end on synthetic 
 The synthetic fixtures (`tests/common/mod.rs`, scripts in `tests/fixtures/*.txt`) prove the
 pipeline is wired correctly. TTS voices are far easier to tell apart than real people, so they
 don't prove speaker detection works on real calls.
+
+## License
+
+Janus is open source under the [MIT license](LICENSE). Bundled dependencies retain their own licenses.

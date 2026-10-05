@@ -2,11 +2,9 @@
 # Publishes a notarized release (run after scripts/notarize-release.sh):
 #   scripts/publish-release.sh VERSION
 #
-# 1. A release on the private source repo, tagged at this commit, with the archive and its
-#    validation evidence (pre-release for preview versions).
-# 2. A release on the public feed repo — the download page and the Sparkle feed installed copies
-#    follow. Marked --latest and never pre-release: Sparkle reads releases/latest, which GitHub
-#    resolves only to full releases, so a pre-release here would silently stop all updates.
+# One release in Janus contains the notarized archive, signed appcast, checksums, and validation
+# evidence. It is marked --latest and never pre-release: installed copies follow releases/latest,
+# which GitHub resolves only to full releases.
 #
 # Only a stapled, Gatekeeper-accepted archive signed by team 67C7724279, whose own feed URL is the
 # public feed, is published, and the feed never moves back to an older build.
@@ -18,19 +16,18 @@ if [[ $# != 1 || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-preview\.[1-9][0-9]*)?
     printf '%s\n' 'Usage: scripts/publish-release.sh VERSION' >&2
     exit 1
 fi
-source_repo="${IC_SOURCE_REPO:-kcirtapfromspace/interview-coach}"
-feed_repo="${IC_UPDATE_REPO:-kcirtapfromspace/interview-coach-releases}"
+release_repo="${IC_RELEASE_REPO:-kcirtapfromspace/janus}"
 team=67C7724279
 name="InterviewCoach-v$version-macos-arm64.zip"
 archive="$project_root/dist/$name"
 notes="$project_root/docs/release-notes-v$version.md"
 evidence="$project_root/dist/release/v$version"
-feed="https://github.com/$feed_repo/releases/latest/download/appcast.xml"
+feed="https://github.com/$release_repo/releases/latest/download/appcast.xml"
 for f in "$archive" "$notes" "$evidence/local-validation.txt" "$evidence/notarization-validation.txt"; do
     [[ -f "$f" ]] || { printf 'Missing %s\n' "$f" >&2; exit 1; }
 done
 
-# The source release tags this commit, so it must be committed and pushed.
+# The release tags this commit, so it must be committed and pushed.
 git diff --quiet HEAD -- || { printf '%s\n' 'Commit your changes first: the release tags this commit.' >&2; exit 1; }
 commit="$(git rev-parse HEAD)"
 git fetch -q origin
@@ -56,7 +53,7 @@ if [[ -n "$current" ]] && (( current >= build )); then
     exit 1
 fi
 
-"$project_root/scripts/make-appcast.sh" "$archive" "https://github.com/$feed_repo/releases/download/v$version/$name" "$evidence"
+"$project_root/scripts/make-appcast.sh" "$archive" "https://github.com/$release_repo/releases/download/v$version/$name" "$evidence"
 cp "$archive" "$evidence/$name"
 (cd "$evidence" && shasum -a 256 "$name" > SHA256SUMS.txt)
 cat > "$evidence/BUILD-MANIFEST.json" <<JSON
@@ -75,15 +72,10 @@ cat > "$evidence/BUILD-MANIFEST.json" <<JSON
 }
 JSON
 
-prerelease=()
-[[ "$version" != *-preview.* ]] || prerelease=(--prerelease)
-gh release create "v$version" --repo "$source_repo" --target "$commit" "${prerelease[@]}" \
+gh release create "v$version" --repo "$release_repo" --target "$commit" --latest \
     --title "Janus $version" --notes-file "$notes" \
-    "$evidence/$name" "$evidence/SHA256SUMS.txt" "$evidence/BUILD-MANIFEST.json" \
-    "$evidence/local-validation.txt" "$evidence/notarization-validation.txt"
-gh release create "v$version" --repo "$feed_repo" --latest \
-    --title "Janus $version" --notes-file "$notes" \
-    "$evidence/$name" "$evidence/appcast.xml" "$evidence/SHA256SUMS.txt"
+    "$evidence/$name" "$evidence/appcast.xml" "$evidence/SHA256SUMS.txt" \
+    "$evidence/BUILD-MANIFEST.json" "$evidence/local-validation.txt" "$evidence/notarization-validation.txt"
 
 # Confirm what installed copies will read. GitHub's releases/latest redirect is cached briefly, so
 # allow it up to two minutes to move to the new release.
@@ -96,4 +88,4 @@ done
 grep -q "<sparkle:version>$build</sparkle:version>" <<<"$served" \
     || { printf '%s\n' 'The public feed still does not serve this build after two minutes.' >&2; exit 1; }
 printf 'Published Janus %s.\n  Download: https://github.com/%s/releases/tag/v%s\n  Feed: %s\n' \
-    "$version" "$feed_repo" "$version" "$feed"
+    "$version" "$release_repo" "$version" "$feed"
