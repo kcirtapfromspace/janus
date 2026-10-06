@@ -26,8 +26,8 @@ use crate::models::Session;
 use crate::pipeline;
 use crate::questions::{self, Question};
 
-/// Where the registry runs (cloud/registry; set once it's deployed). `registry_url` overrides it.
-pub const DEFAULT_URL: &str = "https://janus-registry.invalid";
+/// Where the registry runs (cloud/registry). `registry_url` overrides it.
+pub const DEFAULT_URL: &str = "https://janus-registry.patrickdeutsch.workers.dev";
 pub const SCRUB_PROMPT: &str = include_str!("../prompts/registry_scrub_v1.md");
 /// Approved questions are re-read at most this often.
 const SHARED_MAX_AGE_S: i64 = 24 * 3600;

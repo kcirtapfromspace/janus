@@ -6,8 +6,8 @@ compatibility_date = "2026-04-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "janus-registry"
-# Filled in by `wrangler d1 create janus-registry` (not a secret).
-database_id = "00000000-0000-0000-0000-000000000000"
+# From `wrangler d1 create janus-registry` (not a secret).
+database_id = "7d5af658-95f1-4702-bb02-9722d093cc0f"
 
 [vars]
 # Contributions accepted per day, across every install, and per install: they protect the free

@@ -61,9 +61,30 @@ pub fn event(settings: &Settings, name: &str, properties: Value) -> Option<Value
     Some(json!({"event": name, "distinct_id": install(settings)?, "properties": props}))
 }
 
+/// A repeated failure is reported once an hour per command: the app runs `ic` in the background,
+/// and one stuck problem shouldn't become thousands of events.
+const REPEAT_S: i64 = 3600;
+
+fn repeated(settings: &Settings, key: &str) -> bool {
+    let path = settings.data_dir.join("diagnostics-recent.json");
+    let mut recent: std::collections::BTreeMap<String, i64> =
+        std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let now = chrono::Utc::now().timestamp();
+    if recent.get(key).is_some_and(|t| now - t < REPEAT_S) {
+        return true;
+    }
+    recent.retain(|_, t| now - *t < REPEAT_S);
+    recent.insert(key.to_string(), now);
+    let _ = std::fs::write(&path, serde_json::to_string(&recent).unwrap_or_default());
+    false
+}
+
 /// Send one event, when diagnostics are on and a key is built in. Never fails the caller, and gives
 /// up quickly: diagnostics must not slow anything down.
 pub fn capture(settings: &Settings, name: &str, properties: Value) {
+    if name == "command_failed" && repeated(settings, &format!("{name}:{}", properties["command"])) {
+        return;
+    }
     let Some(mut body) = event(settings, name, properties) else { return };
     let key = std::env::var("IC_POSTHOG_KEY").unwrap_or_else(|_| PROJECT_KEY.into());
     if !key.starts_with("phc_") {
@@ -126,6 +147,14 @@ mod tests {
         assert_eq!(props["$process_person_profile"], false);
         assert_eq!(e["distinct_id"].as_str().unwrap().len(), 32);
         assert_eq!(event(&s, "x", json!({})).unwrap()["distinct_id"], e["distinct_id"], "one id per install");
+    }
+
+    #[test]
+    fn a_failing_command_is_reported_once_an_hour() {
+        let (_tmp, s) = settings(true);
+        assert!(!repeated(&s, "command_failed:\"session\""));
+        assert!(repeated(&s, "command_failed:\"session\""), "the same again within the hour");
+        assert!(!repeated(&s, "command_failed:\"report\""), "another command is its own");
     }
 
     #[test]
