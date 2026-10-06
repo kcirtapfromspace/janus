@@ -211,13 +211,13 @@ pub struct FileConfig {
     /// Who checks each answer: "typesafe/jev-latest", "anthropic/<model>", or "off".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scorer: Option<ScorerRef>,
-    /// Share your interviews' questions (names removed) with the shared registry. Off by default.
+    /// Share your interviews' questions (names removed) with the shared registry. On by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_questions: Option<bool>,
     /// Include the company with shared questions (for moderation only; never published). Off by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub share_company: Option<bool>,
-    /// Send anonymous, content-free diagnostics. Off by default.
+    /// Send anonymous, content-free diagnostics. On by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<bool>,
     /// The shared registry's address (cloud/registry).
@@ -320,9 +320,10 @@ impl Settings {
             scorer: env_parse::<ScorerRef>("IC_SCORER")?
                 .or(file.scorer)
                 .unwrap_or_else(default_scorer),
-            share_questions: file.share_questions.unwrap_or(false),
+            // On by default, and silent until the notice has been shown (privacy.rs).
+            share_questions: file.share_questions.unwrap_or(true),
             share_company: file.share_company.unwrap_or(false),
-            diagnostics: file.diagnostics.unwrap_or(false),
+            diagnostics: file.diagnostics.unwrap_or(true),
             registry_url: env::var("IC_REGISTRY_URL")
                 .ok()
                 .or(file.registry_url)

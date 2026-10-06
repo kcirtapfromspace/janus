@@ -38,6 +38,14 @@ struct InterviewCoachApp: App {
         .windowResizability(.contentSize)
         .defaultPosition(.center)
 
+        Window("What Janus Shares", id: "privacy") {
+            PrivacyNoticeWindow()
+                .environment(model)
+                .tint(CoachTheme.accent)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+
         Window("Janus Settings", id: "setup") {
             SetupView()
                 .environment(model)
@@ -74,7 +82,13 @@ struct MenuBarLabel: View {
             .accessibilityLabel("Janus")
             .help("Janus")
             .onChange(of: model.setup) { _, setup in
-                guard !model.setupPromptShown, let setup else { return }
+                guard let setup else { return }
+                if !model.privacyNoticeShown, setup.privacy?.noticeSeen == false {
+                    model.privacyNoticeShown = true
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "privacy")
+                }
+                guard !model.setupPromptShown else { return }
                 model.setupPromptShown = true
                 if !setup.ready {
                     NSApp.activate(ignoringOtherApps: true)

@@ -68,10 +68,16 @@ fn questions_are_shared_generic_once_and_only_when_opted_in() {
     analyze_session(&mut db, &llm, &claude(), id, &mut Quiet).unwrap();
     let base = Settings { data_dir: tmp.path().to_path_buf(), ..Settings::load().unwrap() };
 
-    assert_eq!(contribute_session(&base, &db, &llm, "m", id).unwrap(), 0, "sharing is off by default: nothing is sent");
+    let off = Settings { share_questions: false, ..base.clone() };
+    interview_coach::privacy::mark_seen(&base).unwrap();
+    assert_eq!(contribute_session(&off, &db, &llm, "m", id).unwrap(), 0, "turned off: nothing is sent");
+    std::fs::remove_file(tmp.path().join("privacy-notice-seen")).unwrap();
+    assert!(base.share_questions, "on by default…");
+    assert_eq!(contribute_session(&base, &db, &llm, "m", id).unwrap(), 0, "…but nothing is sent before the notice is shown");
+    interview_coach::privacy::mark_seen(&base).unwrap();
 
     let (url, sent) = registry();
-    let settings = Settings { share_questions: true, registry_url: url, ..base };
+    let settings = Settings { registry_url: url, ..base };
     assert_eq!(contribute_session(&settings, &db, &llm, "m", id).unwrap(), 1);
     let body = sent.recv().unwrap();
     assert_eq!(body["install"].as_str().unwrap().len(), 32);

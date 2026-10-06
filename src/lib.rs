@@ -53,6 +53,7 @@ pub mod models;
 pub mod next_steps;
 pub mod openai_auth;
 pub mod pipeline;
+pub mod privacy;
 pub mod progress;
 pub mod prosody;
 pub mod questions;

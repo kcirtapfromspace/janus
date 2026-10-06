@@ -5,7 +5,8 @@ import the conversation, review the transcript and evidence behind your feedback
 for the next round.
 Audio and video are processed locally on your Mac. Transcript text goes to your chosen coaching
 provider (Claude or OpenAI); core Jev evaluation sends transcript excerpts to TypeSafe. Two more
-things leave your Mac, and only if you turn them on in Settings:
+things leave your Mac. Both are on by default, but nothing is sent until a one-time notice ("What
+Janus shares") has been shown, and each is a switch in Settings:
 - **Sharing your interviews' questions:** rewritten first so they name no person, company or
   product, and visible to other Janus users once approved (cloud/registry).
 - **Anonymous diagnostics:** counts and outcomes, never content.

@@ -18,6 +18,8 @@ public struct Privacy: Decodable, Equatable {
     public let shareQuestions: Bool
     public let shareCompany: Bool
     public let diagnostics: Bool
+    /// The "What Janus shares" notice has been shown; nothing is sent before then.
+    public let noticeSeen: Bool?
 }
 
 /// Basic account information only; credentials never cross the CLI/app status boundary.

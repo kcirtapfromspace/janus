@@ -317,7 +317,7 @@ private struct SharingRow: View {
             SetupStatusIcon(status: .optional, running: false).frame(width: 20)
             VStack(alignment: .leading, spacing: 6) {
                 Toggle("Share my interview questions", isOn: Binding(
-                    get: { privacy?.shareQuestions ?? false },
+                    get: { privacy?.shareQuestions ?? true },
                     set: { model.setPrivacy("share-questions", $0) }
                 ))
                 .toggleStyle(.switch).font(.body.weight(.medium))
@@ -356,7 +356,7 @@ private struct DiagnosticsRow: View {
             SetupStatusIcon(status: .optional, running: false).frame(width: 20)
             VStack(alignment: .leading, spacing: 6) {
                 Toggle("Send anonymous diagnostics", isOn: Binding(
-                    get: { model.setup?.privacy?.diagnostics ?? false },
+                    get: { model.setup?.privacy?.diagnostics ?? true },
                     set: { model.setPrivacy("diagnostics", $0) }
                 ))
                 .toggleStyle(.switch).font(.body.weight(.medium))

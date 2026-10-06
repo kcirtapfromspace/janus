@@ -1,6 +1,7 @@
-//! The shared question registry (cloud/registry): contributing your interviews' questions when
-//! you opt in, reading the approved questions everyone shares (for practice interviews), and the
-//! maintainer's moderation, through wrangler on their own Mac.
+//! The shared question registry (cloud/registry): contributing your interviews' questions (on by
+//! default, once the privacy notice has been shown), reading the approved questions everyone
+//! shares (for practice interviews), and the maintainer's moderation, through wrangler on their
+//! own Mac.
 //!
 //! Before a question leaves this Mac, your coaching model rewrites it so it names no person,
 //! company or product (`SCRUB_PROMPT`). A second check (`still_identifying`) then drops anything
@@ -32,6 +33,12 @@ pub const SCRUB_PROMPT: &str = include_str!("../prompts/registry_scrub_v1.md");
 const SHARED_MAX_AGE_S: i64 = 24 * 3600;
 /// The Worker's per-request limit.
 const PER_REQUEST: usize = 20;
+
+/// Whether there's a registry to talk to: until it's deployed, the placeholder address is skipped
+/// quietly instead of every review warning that it can't be reached.
+pub fn deployed(settings: &Settings) -> bool {
+    !settings.registry_url.ends_with(".invalid")
+}
 
 fn registry_dir(settings: &Settings) -> PathBuf {
     settings.data_dir.join("registry")
@@ -138,7 +145,7 @@ fn post(url: &str, body: &Value) -> Result<Value> {
 /// and sent once each. Practice interviews aren't shared (their questions came from the registry).
 /// Returns how many were accepted.
 pub fn contribute_session(settings: &Settings, db: &Db, llm: &dyn Llm, model: &str, id: i64) -> Result<usize> {
-    if !settings.share_questions {
+    if !settings.share_questions || !crate::privacy::seen(settings) || !deployed(settings) {
         return Ok(0);
     }
     let session = db.get_session(id)?;
@@ -271,6 +278,9 @@ pub fn shared(settings: &Settings) -> Vec<Question> {
         && chrono::Utc::now().timestamp() - cache.fetched_at < SHARED_MAX_AGE_S
     {
         return cache.questions.clone();
+    }
+    if !deployed(settings) {
+        return cached.map(|c| c.questions).unwrap_or_default();
     }
     pull(settings, Duration::from_secs(4)).unwrap_or_else(|_| cached.map(|c| c.questions).unwrap_or_default())
 }

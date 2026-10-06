@@ -61,6 +61,8 @@ final class AppModel {
     }
     /// Setup opens by itself at most once per launch.
     @ObservationIgnored var setupPromptShown = false
+    /// So does the privacy notice, until it's acknowledged.
+    @ObservationIgnored var privacyNoticeShown = false
     var selection: SessionSummary.ID? {
         didSet {
             if let id = selection, listSelection != [id] {
@@ -409,6 +411,13 @@ final class AppModel {
             }
             await refresh()
         }
+    }
+
+    /// The notice was shown and acknowledged: sharing and diagnostics may start.
+    func acknowledgePrivacyNotice() async {
+        guard let ic else { return }
+        _ = try? await ic.run(["privacy-notice", "--seen"])
+        await refresh()
     }
 
     /// Withdraw everything this Mac shared with the registry.

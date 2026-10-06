@@ -250,6 +250,12 @@ enum Cmd {
     /// Rebuild how the room felt for an analysed interview (no new Claude analysis; uses Jev when
     /// its key is set).
     Timeline { id: i64 },
+    /// What Janus shares (questions, anonymous diagnostics) and how to turn it off. `--seen` records
+    /// that it was shown (the app's notice window); nothing is shared before then.
+    PrivacyNotice {
+        #[arg(long)]
+        seen: bool,
+    },
     /// Every interviewer question from your reviews, merged across interviews, with how your answers
     /// went: the registry mock interviews draw from.
     Questions {
@@ -799,8 +805,12 @@ fn run_analysis(
     if open {
         Command::new("open").arg(path).status()?;
     }
-    // Sharing is extra: a failure is reported, never fails the review.
-    if settings.share_questions {
+    // Sharing is extra: a failure is reported, never fails the review. The first time, the notice is
+    // shown instead, and sharing starts with the next review.
+    if settings.share_questions && !interview_coach::privacy::seen(settings) {
+        outln!("\n{}\n", style(interview_coach::privacy::NOTICE).dim());
+        interview_coach::privacy::mark_seen(settings)?;
+    } else if settings.share_questions {
         match interview_coach::registry::contribute_session(settings, db, client.as_ref(), &model.name, id) {
             Ok(0) => {}
             Ok(n) => {
@@ -2374,6 +2384,7 @@ fn setup_status(settings: &Settings, json: bool) -> Result<()> {
             "share_questions": settings.share_questions,
             "share_company": settings.share_company,
             "diagnostics": settings.diagnostics,
+            "notice_seen": interview_coach::privacy::seen(settings),
         });
         outln!("{}", serde_json::to_string(&value)?);
         return Ok(());
@@ -2740,6 +2751,14 @@ fn run() -> Result<()> {
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
         Cmd::Timeline { id } => refresh_timeline(&settings, id),
         Cmd::Questions { company, json } => list_questions(&settings, company, json),
+        Cmd::PrivacyNotice { seen } => {
+            if seen {
+                interview_coach::privacy::mark_seen(&settings)?;
+            } else {
+                outln!("{}", interview_coach::privacy::NOTICE);
+            }
+            Ok(())
+        }
         Cmd::Registry { action } => registry_cmd(&settings, action),
         Cmd::Mock { action: MockCmd::Begin { company, role, round, count } } => mock_begin(&settings, company, role, round, count),
         Cmd::Mock { action: MockCmd::Run { id, events } } => mock_run(&settings, id, events),

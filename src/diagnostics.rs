@@ -1,4 +1,5 @@
-//! Anonymous diagnostics, only when you turn them on (`diagnostics = on`). They are counts and
+//! Anonymous diagnostics: on by default, sent only after the notice has been shown (privacy.rs), and
+//! off with `diagnostics = off`. They are counts and
 //! outcomes, never content:
 //! - no transcripts, questions, names, companies, file paths or error messages;
 //! - no audio, video or faces.
@@ -7,8 +8,8 @@
 //! show up without anyone sending their interviews. Each event carries this install's own random id
 //! (not the registry's) and makes no person profile.
 //!
-//! The PostHog project key is a public client key, built in at release time (`IC_POSTHOG_KEY`);
-//! without one, nothing is sent.
+//! The PostHog project key is a public client key (PostHog's US cloud): it can only send events,
+//! never read them, so it lives here in the source. `IC_POSTHOG_KEY` overrides it for testing.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,10 +18,9 @@ use serde_json::{Map, Value, json};
 
 use crate::config::Settings;
 
-/// Set at build time for release builds; `IC_POSTHOG_KEY` at run time overrides it (testing).
-const BUILT_IN_KEY: Option<&str> = option_env!("IC_POSTHOG_KEY");
-const BUILT_IN_HOST: Option<&str> = option_env!("IC_POSTHOG_HOST");
-const DEFAULT_HOST: &str = "https://us.i.posthog.com";
+/// Janus's PostHog project: send-only.
+const PROJECT_KEY: &str = "phc_qDvAmDDEL5zf3EKtZBrpVGdVwbyvUM4qAC87WbqdKWcd";
+const HOST: &str = "https://us.i.posthog.com";
 
 /// Properties allowed on events: anything else is dropped before sending, so content can't slip
 /// in through a careless call.
@@ -50,7 +50,7 @@ fn install(settings: &Settings) -> Option<String> {
 /// The event as it would be sent: only allowed properties, plus the app's version and no person
 /// profile. None when diagnostics are off.
 pub fn event(settings: &Settings, name: &str, properties: Value) -> Option<Value> {
-    if !settings.diagnostics {
+    if !settings.diagnostics || !crate::privacy::seen(settings) {
         return None;
     }
     let mut props: Map<String, Value> =
@@ -65,10 +65,12 @@ pub fn event(settings: &Settings, name: &str, properties: Value) -> Option<Value
 /// up quickly: diagnostics must not slow anything down.
 pub fn capture(settings: &Settings, name: &str, properties: Value) {
     let Some(mut body) = event(settings, name, properties) else { return };
-    let key = std::env::var("IC_POSTHOG_KEY").ok().or(BUILT_IN_KEY.map(String::from)).filter(|k| k.starts_with("phc_"));
-    let Some(key) = key else { return };
+    let key = std::env::var("IC_POSTHOG_KEY").unwrap_or_else(|_| PROJECT_KEY.into());
+    if !key.starts_with("phc_") {
+        return;
+    }
     body["api_key"] = json!(key);
-    let host = std::env::var("IC_POSTHOG_HOST").ok().or(BUILT_IN_HOST.map(String::from)).unwrap_or_else(|| DEFAULT_HOST.into());
+    let host = std::env::var("IC_POSTHOG_HOST").unwrap_or_else(|_| HOST.into());
     if let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(3)).build() {
         let _ = client.post(format!("{}/i/v0/e/", host.trim_end_matches('/'))).json(&body).send();
     }
@@ -92,7 +94,18 @@ mod tests {
     fn settings(on: bool) -> (tempfile::TempDir, Settings) {
         let tmp = tempfile::tempdir().unwrap();
         let s = Settings { data_dir: tmp.path().to_path_buf(), diagnostics: on, ..Settings::load().unwrap() };
+        crate::privacy::mark_seen(&s).unwrap();
         (tmp, s)
+    }
+
+    #[test]
+    fn on_by_default_but_silent_until_the_notice_is_shown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Settings { data_dir: tmp.path().to_path_buf(), ..Settings::load().unwrap() };
+        assert!(s.diagnostics, "on by default");
+        assert_eq!(event(&s, "report_finished", json!({"ok": true})), None, "nothing before the notice");
+        crate::privacy::mark_seen(&s).unwrap();
+        assert!(event(&s, "report_finished", json!({"ok": true})).is_some());
     }
 
     #[test]

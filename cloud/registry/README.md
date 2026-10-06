@@ -1,7 +1,8 @@
 # The shared question registry
 
-A Cloudflare Worker in front of a D1 database, both on the free tier. Janus installs whose owners
-opt in (Settings › Share my interview questions) send interview questions there. Janus rewrites
+A Cloudflare Worker in front of a D1 database, both on the free tier. Janus installs send
+interview questions there. Sharing is on by default, starts only after the one-time "What Janus
+shares" notice, and can be turned off in Settings (Share my interview questions). Janus rewrites
 each question on the Mac first, so it names no person, company or product. Company names are
 only included if the contributor also turns that on, and they are never published.
 

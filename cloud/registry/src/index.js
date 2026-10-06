@@ -1,4 +1,5 @@
-// The shared question registry. Janus installs whose owners opted in send interview questions,
+// The shared question registry. Janus installs (sharing is on by default, after a one-time notice,
+// and can be turned off) send interview questions,
 // already rewritten on their Mac to name no person, company or product. They wait as "pending"
 // until the maintainer approves them from their own Mac with wrangler (there is no admin route
 // here). Every Janus reads the approved set for practice interviews.
