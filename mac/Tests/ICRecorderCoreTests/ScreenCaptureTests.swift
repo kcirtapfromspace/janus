@@ -11,7 +11,7 @@ final class ScreenCaptureTests: XCTestCase {
         let home = window(1, "us.zoom.xos", "Zoom Workplace", 1600, 1000)
         let meeting = window(2, "us.zoom.xos", "Zoom Meeting", 1280, 800)
         XCTAssertEqual(CallWindows.choose([home, meeting])?.windowID, 2)
-        XCTAssertEqual(CallWindows.choose([home])?.windowID, 1, "a call app's only window is still worth recording")
+        XCTAssertNil(CallWindows.choose([home]), "opening Zoom is not evidence of a meeting")
     }
 
     func testBrowsersOnlyCountWhenTheTabIsACall() {
@@ -33,7 +33,7 @@ final class ScreenCaptureTests: XCTestCase {
     }
 
     func testCallWordsAreWholeWords() {
-        XCTAssertEqual(CallWindows.tier(window(9, "com.tinyspeck.slackmacgap", "#oncall - Acme")), 1, "not a huddle")
+        XCTAssertEqual(CallWindows.tier(window(9, "com.tinyspeck.slackmacgap", "#oncall - Acme")), 0, "not a huddle")
         XCTAssertEqual(CallWindows.tier(window(9, "com.tinyspeck.slackmacgap", "Huddle in #design")), 2)
     }
 
@@ -60,6 +60,63 @@ final class ScreenCaptureTests: XCTestCase {
         retitled.title = "Inbox - Gmail"
         let zoom = window(1, "us.zoom.xos", "Zoom Workplace")
         XCTAssertFalse(CallWindows.shouldSwitch(from: meet, to: zoom, available: [retitled, zoom]))
+    }
+
+    func testSlackWorkspacesNeverWinOverBrowserMeetings() {
+        let meeting = window(3, "com.google.Chrome", "Meet - xyz", 900, 600)
+        for title in ["Slack", "#general - Acme", "#interview - Acme", "#call - Acme", "#huddle - Acme",
+                      "interview (Channel) - Acme - Slack", "Meeting notes - Acme", "Huddle planning - Acme"] {
+            let slack = window(9, "com.tinyspeck.slackmacgap", title, 2000, 1400)
+            XCTAssertNil(CallWindows.choose([slack]), title)
+            XCTAssertEqual(CallWindows.choose([slack, meeting]), meeting, title)
+        }
+    }
+
+    func testHeliumZoomMeetingWinsOverLargerSlackWorkspace() {
+        let slack = window(9, "com.tinyspeck.slackmacgap", "#interview - Acme", 2000, 1400)
+        for title in ["Zoom Meeting", "Zoom Meeting - Helium", "Zoom Webinar"] {
+            let zoom = window(3, "net.imput.helium", title, 900, 600)
+            XCTAssertEqual(CallWindows.choose([slack, zoom]), zoom, title)
+            XCTAssertEqual(AutomaticVideoSelection.choose(windows: [slack, zoom], current: .window(slack),
+                displays: [10], mainDisplay: 10, allowScreenFallback: true), .window(zoom), title)
+        }
+        XCTAssertNil(CallWindows.choose([window(3, "net.imput.helium", "Inbox - Gmail")]))
+    }
+
+    func testOpenChatAppsDoNotHideMissedBrowserMeetingOrScreenFallback() {
+        let browser = window(3, "com.google.Chrome", "Microsoft Teams")
+        let apps = [
+            window(9, "com.tinyspeck.slackmacgap", "#interview - Acme"),
+            window(10, "com.microsoft.teams2", "Chat | Microsoft Teams"),
+            window(11, "com.hnc.Discord", "Discord"),
+            window(12, "us.zoom.xos", "Zoom Workplace"),
+        ]
+        XCTAssertNil(AutomaticVideoSelection.choose(windows: apps + [browser], current: nil,
+            displays: [10], mainDisplay: 10, allowScreenFallback: false))
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: apps + [browser], current: nil,
+            displays: [10], mainDisplay: 10, allowScreenFallback: true), .display(10))
+    }
+
+    func testSlackHuddleCanBeRecordedButWorkspaceAfterItEndsCannot() {
+        let huddle = window(9, "com.tinyspeck.slackmacgap", "Huddle in #design")
+        XCTAssertEqual(CallWindows.choose([huddle]), huddle)
+        var workspace = huddle
+        workspace.title = "#design - Acme"
+        let meeting = window(3, "com.google.Chrome", "Meet - xyz")
+        XCTAssertTrue(CallWindows.shouldSwitch(from: huddle, to: meeting, available: [workspace, meeting]))
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [workspace, meeting], current: .window(huddle),
+            displays: [10], mainDisplay: 10, allowScreenFallback: false), .window(meeting))
+        XCTAssertNil(AutomaticVideoSelection.choose(windows: [workspace], current: .window(huddle),
+            displays: [10], mainDisplay: 10, allowScreenFallback: false))
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [workspace], current: .window(huddle),
+            displays: [10], mainDisplay: 10, allowScreenFallback: true), .display(10))
+    }
+
+    func testPreviouslySelectedSlackWorkspaceIsReplacedByBrowserCall() {
+        let slack = window(9, "com.tinyspeck.slackmacgap", "#interview - Acme", 2000, 1400)
+        let meeting = window(3, "com.google.Chrome", "Meeting with Sam | Microsoft Teams", 900, 600)
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [slack, meeting], current: .window(slack),
+            displays: [10], mainDisplay: 10, allowScreenFallback: false), .window(meeting))
     }
 
     func testVideoTimesStartAtT0AndOnlyMoveForward() {

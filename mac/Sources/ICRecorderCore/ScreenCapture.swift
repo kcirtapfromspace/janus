@@ -27,7 +27,7 @@ public struct CallWindowCandidate: Equatable {
 
 /// Heuristics for automatic mode. Explicitly picked sources bypass these rules.
 public enum CallWindows {
-    /// Apps that are only ever used for calls (any of their windows may be the call).
+    /// Known call apps. Their home, chat and workspace windows are not evidence of a call.
     static let callApps: Set<String> = [
         "us.zoom.xos", "com.microsoft.teams2", "com.microsoft.teams", "Cisco-Systems.Spark",
         "com.cisco.webexmeetingsapp", "com.webex.meetingmanager", "com.apple.FaceTime",
@@ -37,6 +37,7 @@ public enum CallWindows {
         "com.google.Chrome", "com.google.Chrome.canary", "com.apple.Safari", "company.thebrowser.Browser",
         "com.microsoft.edgemac", "org.mozilla.firefox", "com.brave.Browser", "com.vivaldi.Vivaldi",
         "com.operasoftware.Opera",
+        "net.imput.helium",
     ]
     /// Whole words that mean a call app's window is the call ("Zoom Meeting", "Call with Sam | Microsoft Teams").
     static let callTitleWords: Set<String> = ["meeting", "webinar", "huddle", "call", "interview"]
@@ -45,6 +46,8 @@ public enum CallWindows {
     static let browserCallTitles = ["meet -", "meet –", "meet.google.com", "zoom meeting", "zoom webinar", "whereby", "jitsi meet"]
     /// Services whose tabs are a call only when the title also says so ("Meeting with Sam | Microsoft Teams").
     static let browserCallServices = ["microsoft teams", "webex"]
+    /// A Slack channel named #interview, #call or #huddle is still a workspace, not a huddle.
+    static let slackHuddleTitles = ["huddle in ", "huddle with ", "huddle - ", "huddle – ", "huddle | "]
 
     static func words(_ title: String) -> Set<String> {
         Set(title.lowercased().split { !$0.isLetter }.map(String.init))
@@ -52,12 +55,16 @@ public enum CallWindows {
     /// Smaller windows are a call app's floating mini-player or a toolbar, not the call.
     static let minWidth = 400.0, minHeight = 300.0
 
-    /// 2: a window whose title says it's a call; 1: another window of a call app; 0: not a call.
+    /// 2: a window whose title identifies a call; 0: no call evidence. Merely opening a call app
+    /// must not divert capture from a missed browser meeting or an explicitly enabled fallback.
     static func tier(_ w: CallWindowCandidate) -> Int {
         guard w.width >= minWidth, w.height >= minHeight else { return 0 }
-        let title = w.title.lowercased()
+        let title = w.title.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let saysCall = !words(title).isDisjoint(with: callTitleWords)
-        if callApps.contains(w.bundleID) { return saysCall ? 2 : 1 }
+        if w.bundleID == "com.tinyspeck.slackmacgap" {
+            return title == "huddle" || slackHuddleTitles.contains(where: { title.hasPrefix($0) }) ? 2 : 0
+        }
+        if callApps.contains(w.bundleID) { return saysCall ? 2 : 0 }
         if browsers.contains(w.bundleID) {
             let call = browserCallTitles.contains { title.contains($0) }
                 || (saysCall && browserCallServices.contains { title.contains($0) })
@@ -73,15 +80,23 @@ public enum CallWindows {
             .max { (tier($0), $0.width * $0.height) < (tier($1), $1.width * $1.height) }
     }
 
+    /// Browsers may change title when the user switches tabs. Native call windows must still
+    /// identify a call; a huddle returning to the Slack workspace is no longer a capture source.
+    static func canKeep(_ current: CallWindowCandidate, available: [CallWindowCandidate]) -> Bool {
+        guard let live = available.first(where: { $0.windowID == current.windowID }) else { return false }
+        if browsers.contains(current.bundleID) { return max(tier(current), tier(live)) > 0 }
+        return tier(live) > 0
+    }
+
     /// Whether to move from the window being recorded to `best`: only when the current one is gone,
     /// or a clearer call appears (the meeting window opening after its app's home window). Never
-    /// between two equally good windows, so the video doesn't flick between them. `current` is the
-    /// window as it was chosen: a Meet window whose title changes when you look at another tab
-    /// keeps its place.
+    /// between two equally good calls, so the video doesn't flick between them. A browser's
+    /// original title is retained when tabs change; native windows are revalidated.
     public static func shouldSwitch(from current: CallWindowCandidate?, to best: CallWindowCandidate?, available: [CallWindowCandidate]) -> Bool {
         guard let best else { return false }
         guard let current, let live = available.first(where: { $0.windowID == current.windowID }) else { return true }
-        return best.windowID != live.windowID && tier(best) > max(tier(live), tier(current))
+        let currentTier = browsers.contains(current.bundleID) ? max(tier(live), tier(current)) : tier(live)
+        return best.windowID != live.windowID && tier(best) > currentTier
     }
 }
 

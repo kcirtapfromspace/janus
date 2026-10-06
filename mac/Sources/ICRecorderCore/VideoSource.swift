@@ -26,7 +26,7 @@ enum AutomaticVideoSelection {
                        displays: [UInt32], mainDisplay: UInt32, allowScreenFallback: Bool) -> AutomaticVideoTarget? {
         let best = CallWindows.choose(windows)
         if case .window(let window) = current,
-           windows.contains(where: { $0.windowID == window.windowID }) {
+           CallWindows.canKeep(window, available: windows) {
             if CallWindows.shouldSwitch(from: window, to: best, available: windows), let best {
                 return .window(best)
             }

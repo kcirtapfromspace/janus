@@ -26,6 +26,13 @@ tab can be moved into its own window and that window selected; switching tabs ch
 recorded. The app's optional **If no meeting is detected, record my main screen** fallback is off
 by default and reset for each recording. It captures the main display until a call window is
 detected, including other apps and notifications, and shows that state during recording.
+Automatic mode requires call evidence in a window's title; merely opening Slack, Teams, Discord
+or Zoom does not count. Slack's ordinary workspace and channel windows are excluded, even when
+their titles contain "call", "interview" or "huddle". A native huddle window is rechecked as its
+title changes, so ending the huddle releases that source. If a call's title isn't recognized,
+use the picker or explicitly enable the screen fallback.
+Helium (`net.imput.helium`) is supported alongside the other recognized browsers for meeting
+titles such as "Zoom Meeting"; ordinary browser tabs are excluded from automatic selection.
 
 ## Build
 
