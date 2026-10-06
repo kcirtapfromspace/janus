@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::Serialize;
 
 use crate::metrics::TalkMetrics;
@@ -418,8 +418,8 @@ impl Db {
         }
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         // WAL + a busy timeout: the app reads (polling progress) while ic writes.
-        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         conn.execute_batch(SCHEMA)?;
         let db = Db {
             conn,
@@ -443,6 +443,17 @@ impl Db {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        // Launch can open the library from several CLI requests at once. Reserve the writer
+        // before inspecting columns, then recheck the version after waiting for another upgrader.
+        // Keep schema changes, backfills and the version update together so a failure rolls back.
+        let migration = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version >= SCHEMA_VERSION {
+            migration.commit()?;
             return Ok(());
         }
         // A v2 database's step_runs predates the column; a new or pre-v2 one just got it from SCHEMA.
@@ -515,6 +526,7 @@ impl Db {
         }
         self.conn
             .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        migration.commit()?;
         Ok(())
     }
 
@@ -571,7 +583,8 @@ impl Db {
 
     /// Mark a session as a mock interview.
     pub fn set_practice(&self, id: i64) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET practice = 1 WHERE id = ?1", [id])?;
+        self.conn
+            .execute("UPDATE sessions SET practice = 1 WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -1444,6 +1457,51 @@ mod tests {
             db.list_sessions()?.iter().map(|s| s.id).collect::<Vec<_>>(),
             [1]
         );
+        Ok(())
+    }
+
+    /// Concurrent startup requests all get a usable upgraded library without losing interviews.
+    #[test]
+    fn simultaneous_startup_requests_upgrade_an_older_library() -> Result<()> {
+        for _ in 0..4 {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("coach.db");
+            {
+                let db = Db::open(&path)?;
+                db.create_session(new_session(Mode::Dual))?;
+                db.conn.execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN practice; PRAGMA user_version = 7;",
+                )?;
+            }
+            let ready = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let requests: Vec<_> = (0..8)
+                .map(|_| {
+                    let path = path.clone();
+                    let ready = ready.clone();
+                    std::thread::spawn(move || -> Result<()> {
+                        ready.wait();
+                        let db = Db::open(&path)?;
+                        let session = db.get_session(1)?;
+                        assert_eq!(session.title, "Acme screen");
+                        assert!(!session.practice);
+                        assert_eq!(db.list_sessions()?.len(), 1);
+                        assert_eq!(
+                            db.conn
+                                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+                            SCHEMA_VERSION
+                        );
+                        Ok(())
+                    })
+                })
+                .collect();
+            let results: Vec<_> = requests
+                .into_iter()
+                .map(|request| request.join().expect("startup request panicked"))
+                .collect();
+            for result in results {
+                result?;
+            }
+        }
         Ok(())
     }
 
