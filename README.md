@@ -38,7 +38,8 @@ or `IC_FFMPEG` / `IC_ANT`.)
 
 ### The Mac app
 
-**Janus.app** lives in the menu bar (Roman profiles formed by opposing quotation marks):
+**Janus.app** appears in the Dock and Command-Tab, opens its notebook at launch, and keeps recording
+controls in the menu bar (Roman profiles formed by opposing quotation marks):
 
 - **Record interview** asks you to confirm everyone agreed to be recorded, then records your mic
   and the call's audio from any app, and (unless you turn it off) the call's window as video. The

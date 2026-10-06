@@ -5,6 +5,9 @@ This Swift package builds two apps with `mac/build.sh` (which also rebuilds the 
 - **Janus.app** (`Sources/InterviewCoach`): SwiftUI menu-bar + window app. It records in-process with `ICRecorderCore`, and runs the bundled `ic` (`Contents/MacOS/ic`) for everything else: `ic recording begin|finish`, `ic list --json`, `ic doctor --json`, `ic analyze`, `ic outcome`, `ic import`.
 - **ICRecorder.app** (`Sources/ICRecorder`): the headless recorder `ic record` launches from the terminal. Described below.
 
+Janus is a regular Mac app: it appears in the Dock and Command-Tab and opens its notebook at
+launch. Its menu-bar recording controls remain available when the notebook is closed.
+
 # ICRecorder
 
 A small macOS agent app (no Dock icon or windows) that records an interview as two
