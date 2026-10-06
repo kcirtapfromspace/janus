@@ -25,8 +25,7 @@ public struct CallWindowCandidate: Equatable {
     public var label: String { title.isEmpty ? appName : "\(appName): \(title)" }
 }
 
-/// Which window holds the call. Only call apps, and browser windows whose title names a call, are
-/// ever recorded — never the whole screen, so your email or notes can't end up in the video.
+/// Heuristics for automatic mode. Explicitly picked sources bypass these rules.
 public enum CallWindows {
     /// Apps that are only ever used for calls (any of their windows may be the call).
     static let callApps: Set<String> = [
@@ -134,19 +133,24 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     static let rescanSeconds = 5.0
 
     public private(set) var warnings: [Issue] = []
+    /// Shown while recording, so a missing video source is discovered before the interview ends.
+    public private(set) var problem: String?
 
     private let log: Logger
     private let url: URL
     private let t0Seconds: Double
+    private let source: VideoSource
     private let queue = DispatchQueue(label: "com.thinkstudio.interviewcoach.recorder.video", qos: .userInitiated)
     private var stream: SCStream?
-    private var current: CallWindowCandidate?
+    private var current: AutomaticVideoTarget?
     private var windows: [String] = []
     private var rescanTimer: Timer?
     private var stopped = false
     private var permissionChecked = false
     /// Why capturing the chosen window last failed, if it did.
     private var captureError: String?
+    private var enumerationError: String?
+    private var captureRevoked = false
     // Written on `queue` only.
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
@@ -158,13 +162,14 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var writeError: String?
     private var queueStopped = false
 
-    public init(log: Logger, url: URL, t0HostTime: UInt64) {
+    public init(log: Logger, url: URL, t0HostTime: UInt64, source: VideoSource = .automatic) {
         self.log = log
         self.url = url
         t0Seconds = AVAudioTime.seconds(forHostTime: t0HostTime)
+        self.source = source
     }
 
-    /// Whether this app may record the screen. Asking prompts once; macOS applies a new grant
+    /// Whether this app may automatically capture screen content. Asking prompts once; macOS applies a new grant
     /// only after the app is reopened.
     public static func hasPermission() -> Bool { CGPreflightScreenCaptureAccess() }
     @discardableResult public static func requestPermission() -> Bool { CGRequestScreenCaptureAccess() }
@@ -173,9 +178,12 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Record window beforehand, so a prompt never appears as an interview starts; `ic record
     /// --video` has no other moment to ask.
     public func start(askForPermission: Bool) {
-        guard Self.hasPermission() else {
+        // A system-picker filter grants access to that selection, even without a blanket grant.
+        let picked: Bool = if case .selected = source { true } else { false }
+        guard picked || Self.hasPermission() else {
             if askForPermission { Self.requestPermission() }
             warn("video_permission_denied", "Screen Recording permission is off for \(appName), so the call's video wasn't recorded (the audio was). Turn on \(appName) in System Settings > Privacy & Security > Screen & System Audio Recording, then reopen \(appName).")
+            problem = "Video isn't recording: Screen Recording permission is off. Audio is recording."
             return
         }
         permissionChecked = true
@@ -200,9 +208,13 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         guard let writer, let input else {
             if windows.isEmpty {
-                warn("video_no_call_window", "No call window was open (Zoom, Teams, Webex, FaceTime, Slack, or a Meet, Teams or Zoom tab in a browser), so no video was recorded. The audio was.")
+                if let enumerationError {
+                    warn("video_enumeration_failed", "Janus couldn't list capture sources: \(enumerationError). No video was recorded. The audio was.")
+                } else {
+                    warn("video_no_call_window", "Janus didn't detect a meeting window, so no video was recorded. A meeting may have been open. Next time, choose a window, app or screen in the Record window, or enable the screen fallback. The audio was recorded.")
+                }
             } else {
-                warn("video_capture_failed", "The call's window (\(windows.joined(separator: ", "))) couldn't be recorded\(captureError.map { ": \($0)" } ?? ""). The audio was.")
+                warn("video_capture_failed", "The selected video source (\(windows.joined(separator: ", "))) couldn't be recorded\(captureError.map { ": \($0)" } ?? ""). The audio was.")
             }
             return nil
         }
@@ -244,20 +256,30 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Choosing the window
 
     private func rescan() {
-        guard !stopped else { return }
+        guard !stopped, !captureRevoked else { return }
+        if case .selected(let filter, let label) = source {
+            if stream == nil {
+                if windows.isEmpty { windows.append(label) }
+                startStream(filter)
+            }
+            return
+        }
         SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) { [weak self] content, error in
             DispatchQueue.main.async {
                 guard let self, !self.stopped else { return }
                 if let error {
+                    self.enumerationError = error.localizedDescription
+                    self.problem = "Video sources couldn't be checked: \(error.localizedDescription)."
                     self.log.warn("video: couldn't list windows: \(error.localizedDescription)")
                     return
                 }
-                self.consider(content?.windows ?? [])
+                self.enumerationError = nil
+                self.consider(content?.windows ?? [], displays: content?.displays ?? [])
             }
         }
     }
 
-    private func consider(_ scWindows: [SCWindow]) {
+    private func consider(_ scWindows: [SCWindow], displays: [SCDisplay]) {
         let own = Bundle.main.bundleIdentifier
         let pairs: [(CallWindowCandidate, SCWindow)] = scWindows.compactMap { w in
             guard w.windowLayer == 0, let app = w.owningApplication, app.bundleIdentifier != own else { return nil }
@@ -265,16 +287,50 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                                         title: w.title ?? "", width: w.frame.width, height: w.frame.height), w)
         }
         let candidates = pairs.map(\.0)
-        let best = CallWindows.choose(candidates)
-        let switching = CallWindows.shouldSwitch(from: stream == nil ? nil : current, to: best, available: candidates)
-        guard switching, let best, let window = pairs.first(where: { $0.0.windowID == best.windowID })?.1 else { return }
-        current = best
-        if windows.last != best.label { windows.append(best.label) }  // retries after a failed start add nothing
-        log.info("video: recording \(best.label)")
-        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let fallback: Bool = if case .automaticWithScreenFallback = source { true } else { false }
+        let target = AutomaticVideoSelection.choose(windows: candidates, current: current,
+            displays: displays.map(\.displayID), mainDisplay: CGMainDisplayID(), allowScreenFallback: fallback)
+        guard let target else {
+            problem = "No meeting window detected; video isn't recording. Audio is recording. Stop and choose a window, app or screen."
+            stream?.stopCapture { _ in }
+            stream = nil
+            current = nil
+            return
+        }
+        if case .display = target {
+            problem = "Recording your whole screen because no meeting window was detected."
+        } else if captureError == nil {
+            problem = nil
+        }
+        guard target != current || stream == nil else { return }
+        let filter: SCContentFilter
+        switch target {
+        case .window(let chosen):
+            guard let window = pairs.first(where: { $0.0.windowID == chosen.windowID })?.1 else { return }
+            filter = SCContentFilter(desktopIndependentWindow: window)
+        case .display(let id):
+            guard let display = displays.first(where: { $0.displayID == id }) else { return }
+            filter = SCContentFilter(display: display, excludingWindows: [])
+            if !warnings.contains(where: { $0.code == "video_screen_fallback" }) {
+                warn("video_screen_fallback", "The enabled screen fallback selected the whole screen while no meeting window was detected. See the video's source history for the sources captured.")
+            }
+        }
+        current = target
+        if windows.last != target.label { windows.append(target.label) }
+        log.info("video: recording \(target.label)")
         if let stream {
             stream.updateContentFilter(filter) { [weak self] error in
-                if let error { self?.log.warn("video: couldn't switch windows: \(error.localizedDescription)") }
+                if let error {
+                    DispatchQueue.main.async {
+                        guard let self, !self.stopped, self.stream === stream, self.current == target else { return }
+                        self.captureError = error.localizedDescription
+                        self.captureRevoked = !VideoCaptureRecovery.shouldRetry(error)
+                        self.problem = "Video couldn't switch sources: \(error.localizedDescription)."
+                        self.stream?.stopCapture { _ in }
+                        self.stream = nil  // retry the selected target on the next scan
+                        self.log.warn("video: couldn't switch sources: \(error.localizedDescription)")
+                    }
+                }
             }
         } else {
             startStream(filter)
@@ -294,19 +350,33 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 6
         config.backgroundColor = .black
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        if case .selected = source {
+            var pickerConfig = SCContentSharingPickerConfiguration()
+            pickerConfig.allowsChangingSelectedContent = false
+            SCContentSharingPicker.shared.setConfiguration(pickerConfig, for: stream)
+        }
         do {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         } catch {
             captureError = "\(error)"
+            problem = "Video couldn't start: \(error.localizedDescription). Audio is recording."
             log.warn("video: couldn't add the stream output: \(error)")
             return
         }
         self.stream = stream
         stream.startCapture { [weak self] error in
-            guard let error else { return }
             DispatchQueue.main.async {
-                guard let self, self.stream === stream else { return }
+                guard let self, !self.stopped, self.stream === stream else { return }
+                guard let error else {
+                    self.captureError = nil
+                    if case .display = self.current {
+                        self.problem = "Recording your whole screen because no meeting window was detected."
+                    } else { self.problem = nil }
+                    return
+                }
                 self.captureError = error.localizedDescription
+                self.problem = "Video couldn't start: \(error.localizedDescription). Audio is recording."
+                self.captureRevoked = !VideoCaptureRecovery.shouldRetry(error)
                 self.log.warn("video: couldn't start capture: \(error.localizedDescription)")
                 self.stream = nil  // the next rescan tries again
             }
@@ -317,6 +387,11 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.stream === stream, !self.stopped else { return }
             self.log.warn("video: capture stopped (\(error.localizedDescription)); looking for the call window again")
+            self.captureError = error.localizedDescription
+            self.captureRevoked = !VideoCaptureRecovery.shouldRetry(error)
+            self.problem = self.captureRevoked
+                ? "Video recording was stopped in macOS. Audio is still recording."
+                : "Video capture stopped: \(error.localizedDescription). Trying to reconnect; audio is recording."
             self.stream = nil
         }
     }
@@ -339,6 +414,9 @@ public final class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             do { try makeWriter() } catch {
                 writeError = "\(error)"
                 log.error("video: couldn't create \(url.lastPathComponent): \(error)")
+                DispatchQueue.main.async { [weak self] in
+                    self?.problem = "The video file couldn't be written: \(error.localizedDescription). Audio is recording."
+                }
                 return
             }
         }

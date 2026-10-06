@@ -3,6 +3,7 @@ import AppKit
 import AVFoundation
 import ICRecorderCore
 import Observation
+import ScreenCaptureKit
 
 /// App state shared by the menu-bar panel and the main window.
 @MainActor @Observable
@@ -57,8 +58,22 @@ final class AppModel {
     var screenPermission = ScreenCapture.hasPermission()
     /// Record the call's window along with the audio (the Record window's choice, remembered).
     var recordVideo = UserDefaults.standard.object(forKey: "recordVideo") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(recordVideo, forKey: "recordVideo") }
+        didSet {
+            if ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil {
+                UserDefaults.standard.set(recordVideo, forKey: "recordVideo")
+            }
+        }
     }
+    /// Screen fallback expands capture, so it is explicitly enabled for each recording.
+    var fallbackToScreen = false
+    var selectedVideoLabel: String?
+    var selectedVideoIsScreen = false
+    var videoSelectionRevision = 0
+    var isPickingVideoSource = false
+    var videoSourceError: String?
+    @ObservationIgnored private var selectedVideoFilter: SCContentFilter?
+    @ObservationIgnored private let videoSourcePicker = VideoSourcePicker()
+    var videoSourceReady: Bool { selectedVideoFilter != nil || screenPermission }
     /// Setup opens by itself at most once per launch.
     @ObservationIgnored var setupPromptShown = false
     /// So does the privacy notice, until it's acknowledged.
@@ -82,7 +97,7 @@ final class AppModel {
     var detailError: String?
     var selectedStage: StageStep = .report
     let player = AudioPlayer()
-    /// While recording: a track that has stopped receiving audio (e.g. a call app took the mic).
+    /// While recording: missing audio or video, or an active whole-screen fallback.
     var captureProblem: String?
 
     let ic = ICClient.locate()
@@ -248,7 +263,15 @@ final class AppModel {
 
 
     func startRecording() async {
-        guard let ic, !phase.isBusy else { return }
+        guard let ic, !phase.isBusy, !isPickingVideoSource else { return }
+        guard !recordVideo || videoSourceReady else {
+            videoSourceError = "Choose a video source or allow Screen Recording before starting."
+            return
+        }
+        let source: VideoSource = if let selectedVideoFilter {
+            .selected(filter: selectedVideoFilter, label: selectedVideoLabel ?? "Selected video source")
+        } else if fallbackToScreen { .automaticWithScreenFallback } else { .automatic }
+        let videoRequested = recordVideo
         // Reserve the recording action before the first await so clicks from another window
         // cannot create a second session while the CLI prepares the first.
         phase = .working("Preparing recording…")
@@ -260,8 +283,8 @@ final class AppModel {
             let new = try await ic.decode(NewRecording.self, args)
             let dir = URL(fileURLWithPath: new.dir, isDirectory: true)
             let session = RecordingSession(
-                options: RecorderOptions(sessionDir: dir, duration: nil, aec: false, video: recordVideo,
-                                         askForScreenPermission: false),
+                options: RecorderOptions(sessionDir: dir, duration: nil, aec: false, video: videoRequested,
+                                         askForScreenPermission: false, videoSource: source),
                 log: Logger(fileURL: dir.appendingPathComponent("recorder.log")),
                 onExit: { [weak self] code in
                     Task { @MainActor in self?.recordingEnded(exitCode: code) }
@@ -306,6 +329,7 @@ final class AppModel {
         healthTimer = nil
         captureProblem = nil
         recorder = nil
+        resetVideoSource()
         guard let id = recordingID else { return }
         recordingID = nil
         if exitCode == 2 {
@@ -339,6 +363,42 @@ final class AppModel {
     }
 
     // MARK: Setup
+
+    func chooseVideoSource() {
+        guard !phase.isBusy, !isPickingVideoSource else { return }
+        videoSourceError = nil
+        isPickingVideoSource = true
+        videoSourcePicker.onSelection = { [weak self] filter, label in
+            guard let self, !self.phase.isBusy else { return }
+            self.selectedVideoFilter = filter
+            self.selectedVideoLabel = label
+            self.selectedVideoIsScreen = filter.style == .display
+            self.fallbackToScreen = false
+            self.videoSelectionRevision += 1
+            self.isPickingVideoSource = false
+        }
+        videoSourcePicker.onCancel = { [weak self] in
+            self?.isPickingVideoSource = false
+            if self?.selectedVideoFilter == nil { self?.videoSourcePicker.reset() }
+        }
+        videoSourcePicker.onError = { [weak self] message in
+            self?.videoSourceError = "Couldn't open the source picker: \(message)"
+            self?.isPickingVideoSource = false
+            if self?.selectedVideoFilter == nil { self?.videoSourcePicker.reset() }
+        }
+        videoSourcePicker.present()
+    }
+
+    func resetVideoSource() {
+        videoSourcePicker.reset()
+        selectedVideoFilter = nil
+        selectedVideoLabel = nil
+        selectedVideoIsScreen = false
+        fallbackToScreen = false
+        isPickingVideoSource = false
+        videoSourceError = nil
+        videoSelectionRevision += 1
+    }
 
     /// Run one `ic setup` step, following its progress.
     func runSetupStep(_ step: String, check: String) {

@@ -17,9 +17,15 @@ time-aligned mono WAVs:
 Because the two sides are on separate tracks, "you vs. interviewer" labels need no speaker
 detection. Requires macOS 14.4+ on Apple silicon.
 
-With `--video` it also records `video.mov`: the call's window (never the whole screen), via
+With `--video` it also records `video.mov`: the automatically detected call window, via
 ScreenCaptureKit, on the same clock as the audio. That needs Screen Recording permission; every
-video problem is a warning, and the audio records regardless.
+video problem is a warning, and the audio records regardless. Janus.app also has **Choose source…**,
+the macOS picker for a window, app or display. Its filter bypasses automatic detection and has
+the picker's authorization, so it doesn't require a blanket Screen Recording grant. A browser
+tab can be moved into its own window and that window selected; switching tabs changes what is
+recorded. The app's optional **If no meeting is detected, record my main screen** fallback is off
+by default and reset for each recording. It captures the main display until a call window is
+detected, including other apps and notifications, and shows that state during recording.
 
 ## Build
 
@@ -130,14 +136,16 @@ Warning codes: `system_silent` / `mic_silent` (every sample is exactly zero; for
 is the missing-permission signature), `*_near_silent` (RMS below 1e-4), `*_no_audio` (no buffers
 at all), `mic_warning` (e.g. AEC fallback), and with `--video`: `video_permission_denied`
 (Screen Recording is off; macOS applies a new grant after the app reopens), `video_no_call_window`
-(no call window was ever open), `video_capture_failed` (a call window was found but couldn't be
-captured), `video_write_error`. `ICRecorder --video` shows the Screen Recording prompt when the
+(no meeting window matched automatic detection), `video_enumeration_failed` (capture sources
+couldn't be listed), `video_screen_fallback` (the explicitly enabled whole-screen fallback was
+selected), `video_capture_failed` (a selected source couldn't be captured), `video_write_error`.
+`ICRecorder --video` shows the Screen Recording prompt when the
 permission is missing; Janus.app asks from its Record window instead, never as recording starts. Error codes: `mic_permission_denied`,
 `start_failed`, `mic_error`, `*_write_error`.
 
 With `--video`, recorder.json has a `video` object: `file`, `width`, `height`,
 `frames_per_second`, `frames`, `dropped_frames`, `duration_seconds`, `first_frame_seconds`
-(when the call window first appeared, relative to t0), `windows` (each window recorded, in
+(when the video first appeared, relative to t0), `windows` (each window, app or display selected, in
 order), `write_error`.
 
 On macOS 15 and later, macOS periodically asks whether to keep allowing an app that records the

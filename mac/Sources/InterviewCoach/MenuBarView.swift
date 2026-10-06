@@ -11,6 +11,9 @@ struct MenuBarMenu: View {
 
     var body: some View {
         status
+        if let problem = model.captureProblem {
+            Button("View recording warning…") { show("main") }.help(problem)
+        }
         Divider()
 
         if case .recording = model.phase {
@@ -76,7 +79,7 @@ struct MenuBarMenu: View {
 
     private var statusLine: (NSColor, String) {
         if model.captureProblem != nil {
-            return (.systemOrange, "Your mic isn't being recorded")
+            return (.systemOrange, "Recording needs attention")
         }
         switch model.phase {
         case .recording(let since):
@@ -137,7 +140,7 @@ struct RecordWindow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Record an interview")
                         .font(CoachTheme.editorial(25)).foregroundStyle(CoachTheme.ink)
-                    Text(model.recordVideo ? "Microphone, call audio and the call’s video, saved together."
+                    Text(model.recordVideo ? "Microphone, call audio and your selected video source, saved together."
                                            : "Microphone and call audio, saved together.")
                         .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
                 }
@@ -155,19 +158,51 @@ struct RecordWindow: View {
             }
             .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
             VStack(alignment: .leading, spacing: 6) {
-                Toggle("Also record the call’s video", isOn: $model.recordVideo)
+                Toggle("Also record video", isOn: $model.recordVideo)
                     .toggleStyle(.checkbox).font(.system(size: 12))
-                Text(model.recordVideo && !model.screenPermission
-                     ? "Needs Screen Recording permission. Without it, only audio is recorded."
-                     : "Only the call’s window (Zoom, Teams, Meet, …), never the rest of your screen.")
-                    .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
-                if model.recordVideo && !model.screenPermission {
+                if model.recordVideo {
                     HStack(spacing: 10) {
-                        Button("Allow Screen Recording…") { model.requestScreenAccess() }
-                        Text("Then reopen Janus.").font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                        Text(model.selectedVideoLabel ?? "Automatic meeting window")
+                            .lineLimit(2).font(.system(size: 11)).foregroundStyle(CoachTheme.ink)
+                        Spacer()
+                        Button(model.isPickingVideoSource ? "Choosing…" : "Choose source…") { model.chooseVideoSource() }
+                            .disabled(model.isPickingVideoSource || model.phase.isBusy)
+                    }
+                    Text("Choose a window, app or whole screen. For one browser tab, move it into its own window and select that window.")
+                        .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if model.selectedVideoLabel != nil {
+                        if model.selectedVideoIsScreen {
+                            Text("This records everything visible on the selected screen, including other apps and notifications.")
+                                .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Button("Use automatic meeting detection") { model.resetVideoSource() }
+                            .buttonStyle(.link).font(.system(size: 11))
+                    } else {
+                        Toggle("If no meeting is detected, record my main screen", isOn: $model.fallbackToScreen)
+                            .toggleStyle(.checkbox).font(.system(size: 11))
+                        if model.fallbackToScreen {
+                            Text("The fallback records everything visible on your main screen, including other apps and notifications.")
+                                .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if !model.videoSourceReady {
+                        Text("Choose a source above, or allow Screen Recording for automatic detection.")
+                            .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                        HStack(spacing: 10) {
+                            Button("Allow Screen Recording…") { model.requestScreenAccess() }
+                            Text("Then reopen Janus.").font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+                        }
+                    }
+                    if let error = model.videoSourceError {
+                        Text(error).font(.system(size: 11)).foregroundStyle(CoachTheme.alert)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
+            .disabled(model.phase.isBusy)
             VStack(alignment: .leading, spacing: 10) {
                 Toggle(model.recordVideo ? "Everyone on this call agreed to be recorded, including video"
                                          : "Everyone on this call agreed to be recorded", isOn: $consent)
@@ -187,21 +222,35 @@ struct RecordWindow: View {
                 Text("Stop anytime from the menu bar.").font(.system(size: 10)).foregroundStyle(CoachTheme.muted)
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
+                    .disabled(model.phase.isBusy)
                 Button {
-                    dismiss()
-                    Task { await model.startRecording() }
+                    Task {
+                        await model.startRecording()
+                        if model.phase.isRecording { dismiss() }
+                    }
                 } label: { Label("Start recording", systemImage: "record.circle") }
                 .buttonStyle(CoachPrimaryButtonStyle())
-                .keyboardShortcut(.defaultAction).disabled(!consent || model.phase.isBusy)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!consent || model.phase.isBusy || model.isPickingVideoSource || (model.recordVideo && !model.videoSourceReady))
             }
         }
         .padding(28).frame(width: 490)
         .background(CoachTheme.canvas).tint(CoachTheme.accent)
         .onAppear {
             consent = false
-            model.refreshScreenPermission()
+            if ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil {
+                if !model.phase.isBusy { model.resetVideoSource() }
+                model.refreshScreenPermission()
+            }
+        }
+        .onDisappear {
+            if !model.phase.isBusy, ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil {
+                model.resetVideoSource()
+            }
         }
         .onChange(of: model.recordVideo) { consent = false }  // they agreed to something else
+        .onChange(of: model.videoSelectionRevision) { consent = false }
+        .onChange(of: model.fallbackToScreen) { consent = false }
     }
 
     private func field(_ title: String, text: Binding<String>, prompt: String) -> some View {

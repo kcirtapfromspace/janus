@@ -44,9 +44,13 @@ or `IC_FFMPEG` / `IC_ANT`.)
   and the call's audio from any app, and (unless you turn it off) the call's window as video. The
   icon turns into a red record dot; **Stop** ends it, and the app transcribes and analyses the
   interview (about 1–2 minutes, plus a minute or two to read a long call's video).
-- **Video** records only the call's window (Zoom, Teams, Webex, FaceTime, Slack, or a Meet, Teams
-  or Zoom browser tab), never the rest of your screen. It needs Screen Recording permission
-  (Setup asks; reopen Janus after allowing it); without it, interviews record audio only. The
+- **Video** automatically finds the call's window, or **Choose source…** lets you select a window,
+  app or whole screen with the macOS picker. For one browser tab, move it into its own window and
+  select that window; the recording follows the window's visible tab. You can also explicitly
+  enable **If no meeting is detected, record my main screen** for this recording. That fallback
+  includes everything visible on the main screen and switches to a detected meeting when one
+  appears. Automatic detection needs Screen Recording permission (reopen Janus after allowing
+  it); the picker authorizes the selected source. Missing video is flagged during recording. The
   video plays with the audio on the Recording, Transcript and Review tabs, so a quote's timestamp
   shows how people looked when it was said. The review's **What the video showed** section
   (experimental) counts, for each of your answers, how many others were on camera, their nods,

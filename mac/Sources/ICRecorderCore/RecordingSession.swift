@@ -7,17 +7,20 @@ public struct RecorderOptions {
     public var sessionDir: URL
     public var duration: Double?
     public var aec: Bool
-    /// Also record the call's window to video.mov (needs Screen Recording permission).
+    /// Also record the chosen video source to video.mov.
     public var video: Bool
+    public var videoSource: VideoSource
     /// Show the Screen Recording prompt when starting without permission. Off in the app, which
     /// asks before recording rather than as the interview begins.
     public var askForScreenPermission: Bool
 
-    public init(sessionDir: URL, duration: Double?, aec: Bool, video: Bool = false, askForScreenPermission: Bool = true) {
+    public init(sessionDir: URL, duration: Double?, aec: Bool, video: Bool = false,
+                askForScreenPermission: Bool = true, videoSource: VideoSource = .automatic) {
         self.sessionDir = sessionDir
         self.duration = duration
         self.aec = aec
         self.video = video
+        self.videoSource = videoSource
         self.askForScreenPermission = askForScreenPermission
     }
 }
@@ -52,11 +55,13 @@ public struct CaptureHealth: Equatable {
     /// Seconds since each track last received audio (nil: never has).
     public var micStalledSeconds: Double?
     public var systemStalledSeconds: Double?
+    public var videoProblem: String?
 
-    public init(elapsedSeconds: Double, micStalledSeconds: Double?, systemStalledSeconds: Double?) {
+    public init(elapsedSeconds: Double, micStalledSeconds: Double?, systemStalledSeconds: Double?, videoProblem: String? = nil) {
         self.elapsedSeconds = elapsedSeconds
         self.micStalledSeconds = micStalledSeconds
         self.systemStalledSeconds = systemStalledSeconds
+        self.videoProblem = videoProblem
     }
 
     /// What to tell the person recording, or nil when both tracks are flowing. Both sources
@@ -65,14 +70,14 @@ public struct CaptureHealth: Equatable {
     /// is only flagged once it has flowed and then stopped, in case a tap waits for playback.
     public var problem: String? {
         let threshold = 5.0
-        guard elapsedSeconds > threshold else { return nil }
+        guard elapsedSeconds > threshold else { return videoProblem }
         if (micStalledSeconds ?? elapsedSeconds) > threshold {
             return "Your microphone isn't being recorded (nothing for \(Int(micStalledSeconds ?? elapsedSeconds)) s) — trying to reconnect. Check your input device in System Settings › Sound."
         }
         if let stalled = systemStalledSeconds, stalled > threshold {
             return "The call's audio isn't being recorded (nothing for \(Int(stalled)) s)."
         }
-        return nil
+        return videoProblem
     }
 }
 
@@ -156,7 +161,8 @@ public final class RecordingSession {
         return CaptureHealth(
             elapsedSeconds: Date().timeIntervalSince(startedAt),
             micStalledSeconds: micWriter?.secondsSinceLastAudio,
-            systemStalledSeconds: systemWriter?.secondsSinceLastAudio
+            systemStalledSeconds: systemWriter?.secondsSinceLastAudio,
+            videoProblem: screen?.problem
         )
     }
 
@@ -209,7 +215,8 @@ public final class RecordingSession {
         log.info("recording started")
         if options.video {
             // After the audio has started: video is extra, and its problems become warnings.
-            let screen = ScreenCapture(log: log, url: videoURL, t0HostTime: t0HostTime ?? AudioGetCurrentHostTime())
+            let screen = ScreenCapture(log: log, url: videoURL, t0HostTime: t0HostTime ?? AudioGetCurrentHostTime(),
+                                       source: options.videoSource)
             self.screen = screen
             screen.start(askForPermission: options.askForScreenPermission)
         }

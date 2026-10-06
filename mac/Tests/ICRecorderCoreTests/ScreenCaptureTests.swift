@@ -1,5 +1,6 @@
 @testable import ICRecorderCore
 import XCTest
+import ScreenCaptureKit
 
 final class ScreenCaptureTests: XCTestCase {
     private func window(_ id: UInt32, _ bundle: String, _ title: String, _ w: Double = 1440, _ h: Double = 900) -> CallWindowCandidate {
@@ -69,6 +70,60 @@ final class ScreenCaptureTests: XCTestCase {
         XCTAssertNil(clock.time(forSecondsSinceT0: 0.1), "a repeated time")
         XCTAssertNil(clock.time(forSecondsSinceT0: 0.05), "an earlier time")
         XCTAssertEqual(clock.time(forSecondsSinceT0: 125.4)?.seconds ?? 0, 125.4, accuracy: 1e-9, "a window that appears late keeps its real time")
+    }
+
+    func testMissedTeamsTitleOnlyFallsBackWithExplicitOptIn() {
+        let teams = window(3, "com.google.Chrome", "Microsoft Teams")
+        XCTAssertNil(AutomaticVideoSelection.choose(windows: [teams], current: nil,
+            displays: [10], mainDisplay: 10, allowScreenFallback: false))
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [teams], current: nil,
+            displays: [20, 10], mainDisplay: 10, allowScreenFallback: true), .display(10))
+    }
+
+    func testDetectedCallBeatsWholeScreenAndReplacesFallback() {
+        let meeting = window(3, "com.google.Chrome", "Meeting with Sam | Microsoft Teams")
+        let targets: [AutomaticVideoTarget?] = [nil, .display(10)]
+        for current in targets {
+            XCTAssertEqual(AutomaticVideoSelection.choose(windows: [meeting], current: current,
+                displays: [10], mainDisplay: 10, allowScreenFallback: true), .window(meeting))
+        }
+    }
+
+    func testChangingTabsDoesNotExpandTheRecordingToWholeScreen() {
+        let meeting = window(3, "com.google.Chrome", "Meet - xyz")
+        var retitled = meeting
+        retitled.title = "Inbox - Gmail"
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [retitled], current: .window(meeting),
+            displays: [10], mainDisplay: 10, allowScreenFallback: true), .window(meeting))
+    }
+
+    func testClosedMeetingUsesFallbackOnlyWhenEnabled() {
+        let meeting = window(3, "com.google.Chrome", "Meet - xyz")
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [], current: .window(meeting),
+            displays: [10], mainDisplay: 10, allowScreenFallback: true), .display(10))
+        XCTAssertNil(AutomaticVideoSelection.choose(windows: [], current: .window(meeting),
+            displays: [10], mainDisplay: 10, allowScreenFallback: false))
+    }
+
+    func testFallbackTracksDisplayAvailabilityWithoutFlickering() {
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [], current: .display(20),
+            displays: [10, 20], mainDisplay: 10, allowScreenFallback: true), .display(20))
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [], current: .display(20),
+            displays: [10], mainDisplay: 10, allowScreenFallback: true), .display(10))
+        XCTAssertEqual(AutomaticVideoSelection.choose(windows: [], current: nil,
+            displays: [30, 20], mainDisplay: 10, allowScreenFallback: true), .display(20))
+        XCTAssertNil(AutomaticVideoSelection.choose(windows: [], current: nil,
+            displays: [], mainDisplay: 10, allowScreenFallback: true))
+    }
+
+    func testSystemStopOrDeniedAuthorizationDoesNotRestartVideo() {
+        for code in [SCStreamError.Code.userStopped, .userDeclined] {
+            XCTAssertFalse(VideoCaptureRecovery.shouldRetry(NSError(domain: SCStreamErrorDomain, code: code.rawValue)))
+        }
+        XCTAssertTrue(VideoCaptureRecovery.shouldRetry(NSError(domain: SCStreamErrorDomain, code: -3805)),
+                      "a transient connection failure can be retried")
+        XCTAssertTrue(VideoCaptureRecovery.shouldRetry(NSError(domain: "Other", code: -3817)),
+                      "only ScreenCaptureKit authorization or stop errors disable retries")
     }
 
     /// The reviewer's case: frames under half a 1/600 s tick apart would round to the same time and fail the writer.

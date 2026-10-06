@@ -61,4 +61,14 @@ final class ContinuityTests: XCTestCase {
         XCTAssertEqual(MicCapture.clock(2506.6), "41:46")
         XCTAssertEqual(MicCapture.clock(3723), "1:02:03")
     }
+
+    func testVideoProblemsAreVisibleWhileAudioIsHealthy() {
+        let warning = "No meeting window detected; video isn't recording."
+        XCTAssertEqual(CaptureHealth(elapsedSeconds: 2, micStalledSeconds: 0.1, systemStalledSeconds: 0.1,
+                                     videoProblem: warning).problem, warning)
+        XCTAssertEqual(CaptureHealth(elapsedSeconds: 60, micStalledSeconds: 0.1, systemStalledSeconds: 0.1,
+                                     videoProblem: warning).problem, warning)
+        XCTAssertTrue(CaptureHealth(elapsedSeconds: 60, micStalledSeconds: 12, systemStalledSeconds: 0.1,
+                                    videoProblem: warning).problem?.contains("microphone") == true)
+    }
 }

@@ -20,6 +20,17 @@ enum Snapshots {
                 model.selection = model.detail?.session.id
             }
             await render(RecordWindow().environment(model), size: CGSize(width: 490, height: 0), name: "record", to: out)
+            model.recordVideo = true
+            model.screenPermission = true
+            model.fallbackToScreen = true
+            await render(RecordWindow().environment(model), size: CGSize(width: 490, height: 0), name: "record-screen-fallback", to: out)
+            model.fallbackToScreen = false
+            model.selectedVideoLabel = "Google Chrome: Microsoft Teams"
+            await render(RecordWindow().environment(model), size: CGSize(width: 490, height: 0), name: "record-selected-window", to: out)
+            model.selectedVideoLabel = "Whole screen"
+            model.selectedVideoIsScreen = true
+            await render(RecordWindow().environment(model), size: CGSize(width: 490, height: 0), name: "record-selected-screen", to: out)
+            model.resetVideoSource()
             if let detail = model.detail {
                 for width in [540.0, 760, 1000] {
                     for stage in StageStep.allCases {
