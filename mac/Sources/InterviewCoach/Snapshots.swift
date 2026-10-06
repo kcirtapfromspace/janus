@@ -96,8 +96,21 @@ enum Snapshots {
             await render(SetupView().environment(model), size: CGSize(width: 560, height: 700), name: "setup", to: out)
             model.appearance = .dark
             await render(SetupView().environment(model), size: CGSize(width: 560, height: 700), name: "setup-dark", to: out)
+            model.appearance = .light
+            await renderAbout(to: out)
             exit(0)
         }
+    }
+
+    /// The native About panel, using the same metadata and repository link as the menu action.
+    private static func renderAbout(to folder: URL) async {
+        let existing = Set(NSApp.windows.map(\.windowNumber))
+        AboutJanus.show()
+        try? await Task.sleep(for: .milliseconds(400))
+        guard let window = NSApp.windows.first(where: { !existing.contains($0.windowNumber) }),
+              let view = window.contentView?.superview else { return }
+        save(view, name: "about", to: folder)
+        window.orderOut(nil)
     }
 
     /// A view on its own. Height 0 means "as tall as it wants".

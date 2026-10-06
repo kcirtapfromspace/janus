@@ -58,8 +58,7 @@ struct MenuBarMenu: View {
             .disabled(model.phase.isRecording)
         }
         Button("About Janus") {
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.orderFrontStandardAboutPanel(nil)
+            AboutJanus.show()
         }
 
         Divider()

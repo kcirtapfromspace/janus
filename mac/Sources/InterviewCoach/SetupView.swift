@@ -97,6 +97,8 @@ struct SetupView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Settings").font(CoachTheme.editorial(25)).foregroundStyle(CoachTheme.ink)
                 Text(summary).font(.callout).foregroundStyle(.secondary)
+                Text(AppVersion.current.description)
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
             Spacer()
             Button("Check again") { Task { await model.refresh() } }
@@ -393,8 +395,8 @@ private struct ScreenRecordingRow: View {
 
     private var detail: String {
         model.screenPermission
-            ? "Janus records only the call's window, and reads the faces in it on this Mac."
-            : "Optional: records the call's window so you can see how people reacted. After allowing it, reopen Janus."
+            ? "Choose a meeting window, app or screen when starting a recording. Janus reads the faces in the video on this Mac."
+            : "Optional: enables automatic meeting detection and screen fallback. You can also choose a source when starting a recording. After allowing it, reopen Janus."
     }
 }
 
