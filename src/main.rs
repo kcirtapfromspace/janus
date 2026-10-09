@@ -103,6 +103,9 @@ enum Cmd {
         /// Company you interviewed with.
         #[arg(long)]
         company: Option<String>,
+        /// Add it as a round of this role, by id (see: ic role list); the company defaults to the role's.
+        #[arg(long)]
+        role_id: Option<i64>,
         /// People on the call, including you (single-file imports).
         #[arg(long, default_value_t = 2)]
         speakers: i64,
@@ -175,15 +178,21 @@ enum Cmd {
         #[arg(long)]
         now: bool,
     },
-    /// The roles you're interviewing for: where each stands, rename, archive, merge.
+    /// The roles you're interviewing for: where each stands, rename, archive, merge, delete.
     Role {
         #[command(subcommand)]
         action: RoleCmd,
     },
-    /// Rename or archive a company (its roles and interviews).
+    /// Rename, archive or delete a company (its roles and interviews).
     Company {
         #[command(subcommand)]
         action: CompanyCmd,
+    },
+    /// Arrange the sidebar (the app does this when you drag): companies, the roles at a company, or
+    /// a role's rounds, top first. `ic order reset` goes back to date order.
+    Order {
+        #[command(subcommand)]
+        action: OrderCmd,
     },
     /// Find interviews by title, company, role, or anything said in them.
     Search {
@@ -413,6 +422,10 @@ enum RoleCmd {
         from: i64,
         into: i64,
     },
+    /// Move a role and its interviews to Recently Deleted (restoring one brings the role back).
+    Delete {
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -426,6 +439,31 @@ enum CompanyCmd {
         #[arg(long)]
         undo: bool,
     },
+    /// Move a company's roles and interviews to Recently Deleted.
+    Delete {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum OrderCmd {
+    /// Companies, by name, top first (others keep their places).
+    Companies {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Roles at one company, by id, top first.
+    Roles {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// A role's rounds (or a company's interviews without a role), by id, top first.
+    Interviews {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Forget every arrangement: companies and roles by latest interview, rounds oldest first.
+    Reset,
 }
 
 #[derive(Subcommand)]
@@ -587,6 +625,9 @@ enum RecordingCmd {
         title: Option<String>,
         #[arg(long)]
         company: Option<String>,
+        /// Record it as a round of this role, by id; the company defaults to the role's.
+        #[arg(long)]
+        role_id: Option<i64>,
     },
     /// Process a recording the app has finished: normalize, transcribe, and analyse.
     Finish {
@@ -1488,8 +1529,41 @@ fn role_cmd(db: &Db, action: RoleCmd) -> Result<()> {
                 db.role(into)?.title
             );
         }
+        RoleCmd::Delete { id } => {
+            let title = db.role(id)?.title;
+            let n = library::delete_role(db, id)?;
+            outln!(
+                "{} Moved {title} and {} to Recently Deleted: restore one with ic restore, or they're erased in {} days.",
+                style("✓").green(),
+                plural(n, "interview"),
+                library::DELETED_DAYS
+            );
+        }
     }
     Ok(())
+}
+
+fn order_cmd(db: &Db, action: OrderCmd) -> Result<()> {
+    match action {
+        OrderCmd::Companies { names } => {
+            let keys: Vec<String> = names.iter().map(|n| library::company_key(n)).collect();
+            db.set_company_order(&keys)?;
+        }
+        OrderCmd::Roles { ids } => db.set_role_order(&ids)?,
+        OrderCmd::Interviews { ids } => db.set_session_order(&ids)?,
+        OrderCmd::Reset => db.reset_order()?,
+    }
+    outln!("{} Arranged.", style("✓").green());
+    Ok(())
+}
+
+/// The role a new interview is filed under (`--role-id`), checked before anything is created.
+fn role_for_new(db: &Db, role_id: Option<i64>) -> Result<Option<interview_coach::db::Role>> {
+    let Some(role) = role_id.map(|id| db.role(id)).transpose()? else { return Ok(None) };
+    if role.deleted_at.is_some() {
+        bail!("{} is in Recently Deleted. Restore one of its interviews first.", role.title);
+    }
+    Ok(Some(role))
 }
 
 fn refresh_timeline(settings: &Settings, id: i64) -> Result<()> {
@@ -2504,11 +2578,14 @@ fn run() -> Result<()> {
             system,
             title,
             company,
+            role_id,
             speakers,
             no_transcribe,
             no_analyze,
         } => {
             let mut db = open_db(&settings)?;
+            let role = role_for_new(&db, role_id)?;
+            let company = company.or_else(|| role.as_ref().and_then(|r| r.company.clone()));
             let session = match (path, mic, system) {
                 (Some(path), None, None) => {
                     let title = title.unwrap_or_else(|| {
@@ -2548,6 +2625,10 @@ fn run() -> Result<()> {
                 }
                 _ => bail!("Pass a recording file, or both --mic and --system tracks."),
             };
+            // Filed before it's analysed, so the report doesn't file it somewhere else.
+            if let Some(role) = &role {
+                db.set_session_role(session.id, Some(role.id))?;
+            }
             outln!(
                 "Imported as session {} ({}) → {}",
                 style(session.id).bold(),
@@ -2642,6 +2723,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Role { action } => role_cmd(&open_db(&settings)?, action),
+        Cmd::Order { action } => order_cmd(&open_db(&settings)?, action),
         Cmd::Company { action } => {
             let db = open_db(&settings)?;
             match action {
@@ -2660,6 +2742,15 @@ fn run() -> Result<()> {
                         if undo { "Brought back" } else { "Archived" }
                     );
                 }
+                CompanyCmd::Delete { name } => {
+                    let n = library::delete_company(&db, &name)?;
+                    outln!(
+                        "{} Moved {name} ({}) to Recently Deleted: restore with ic restore, or it's erased in {} days.",
+                        style("✓").green(),
+                        plural(n, "interview"),
+                        library::DELETED_DAYS
+                    );
+                }
             }
             Ok(())
         }
@@ -2676,14 +2767,23 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Recording { action } => match action {
-            RecordingCmd::Begin { title, company } => {
+            RecordingCmd::Begin {
+                title,
+                company,
+                role_id,
+            } => {
                 let db = open_db(&settings)?;
                 let title = title.unwrap_or_else(|| {
                     chrono::Local::now()
                         .format("Interview %Y-%m-%d %H:%M")
                         .to_string()
                 });
+                let role = role_for_new(&db, role_id)?;
+                let company = company.or_else(|| role.as_ref().and_then(|r| r.company.clone()));
                 let session = pipeline::create_recording_session(&db, &settings, &title, company)?;
+                if let Some(role) = &role {
+                    db.set_session_role(session.id, Some(role.id))?;
+                }
                 outln!(
                     "{}",
                     serde_json::json!({"id": session.id, "dir": session.dir})

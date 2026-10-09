@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS roles (
     profile_json TEXT,
     -- Version 7: where the application stands, and whether it's archived.
     status TEXT NOT NULL DEFAULT 'interviewing',
-    archived_at TEXT
+    archived_at TEXT,
+    -- Version 9: its place among its company's roles (NULL: by date), and Recently Deleted.
+    position INTEGER,
+    deleted_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -48,7 +51,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     deleted_at TEXT,
     role_set INTEGER NOT NULL DEFAULT 0,
     -- Version 8: a mock interview, for practice (not a real one).
-    practice INTEGER NOT NULL DEFAULT 0
+    practice INTEGER NOT NULL DEFAULT 0,
+    -- Version 9: its place among its role's rounds, or its company's other interviews (NULL: by date).
+    position INTEGER
+);
+
+-- Version 9: the order you arranged companies in, by company key (others go by date).
+CREATE TABLE IF NOT EXISTS company_order (
+    company_key TEXT PRIMARY KEY,
+    position INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS segments (
@@ -302,7 +313,7 @@ pub struct Db {
 }
 
 /// Schema version; `migrate` brings older databases up to it.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 fn parse<T: std::str::FromStr<Err = String>>(s: String) -> rusqlite::Result<T> {
     s.parse().map_err(|e: String| {
@@ -319,6 +330,10 @@ pub struct Role {
     pub company: Option<String>,
     pub status: RoleStatus,
     pub archived_at: Option<String>,
+    /// Its place among its company's roles, once you've arranged them.
+    pub position: Option<i64>,
+    /// In Recently Deleted along with its interviews; restoring one brings it back.
+    pub deleted_at: Option<String>,
 }
 
 fn role_from_row(r: &Row) -> rusqlite::Result<Role> {
@@ -329,6 +344,8 @@ fn role_from_row(r: &Row) -> rusqlite::Result<Role> {
         company: r.get("company")?,
         status: parse(r.get("status")?)?,
         archived_at: r.get("archived_at")?,
+        position: r.get("position")?,
+        deleted_at: r.get("deleted_at")?,
     })
 }
 
@@ -356,6 +373,7 @@ fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
         deleted_at: r.get("deleted_at")?,
         role_set: r.get("role_set")?,
         practice: r.get("practice")?,
+        position: r.get("position")?,
     })
 }
 
@@ -480,6 +498,10 @@ impl Db {
             ("sessions", "practice INTEGER NOT NULL DEFAULT 0"),
             ("roles", "status TEXT NOT NULL DEFAULT 'interviewing'"),
             ("roles", "archived_at TEXT"),
+            // Version 9: the order you arrange the sidebar in, and deleting a role.
+            ("sessions", "position INTEGER"),
+            ("roles", "position INTEGER"),
+            ("roles", "deleted_at TEXT"),
         ] {
             let name = column.split(' ').next().expect("named");
             let has: bool = self.conn.query_row(
@@ -691,6 +713,11 @@ impl Db {
         if let Some(found) = self.roles()?.into_iter().find(|r| {
             key(&r.title) == key(title) && r.company.as_deref().map(key) == company.map(key)
         }) {
+            // A role you deleted comes back when something is filed under it again.
+            if found.deleted_at.is_some() {
+                self.set_role_deleted(found.id, false)?;
+                return self.role(found.id);
+            }
             return Ok(found);
         }
         self.conn.execute(
@@ -722,6 +749,23 @@ impl Db {
         Ok(())
     }
 
+    /// Into Recently Deleted (its interviews go there separately), or back out of it.
+    pub fn set_role_deleted(&self, id: i64, deleted: bool) -> Result<()> {
+        self.conn.execute("UPDATE roles SET deleted_at = CASE WHEN ?2 THEN coalesce(deleted_at, ?3) END WHERE id = ?1",
+                          params![id, deleted, now_iso()])?;
+        Ok(())
+    }
+
+    /// Remove a deleted role once none of its interviews are left to restore. Returns whether it went.
+    pub fn remove_role_if_unused(&self, id: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "DELETE FROM roles WHERE id = ?1 AND deleted_at IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM sessions WHERE role_id = ?1)",
+            [id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Move every interview of one role to another, then remove the empty role.
     pub fn merge_role(&self, from: i64, into: i64) -> Result<()> {
         if from == into {
@@ -749,8 +793,77 @@ impl Db {
             &format!("UPDATE sessions SET company = ?2 WHERE {same}"),
             params![old, new.trim()],
         )?;
+        // Its place in the sidebar goes with it, unless the new name already has one.
+        let (old_key, new_key) = (crate::library::company_key(old), crate::library::company_key(new));
+        if old_key != new_key {
+            tx.execute(
+                "UPDATE OR IGNORE company_order SET company_key = ?2 WHERE company_key = ?1",
+                params![old_key, new_key],
+            )?;
+            tx.execute("DELETE FROM company_order WHERE company_key = ?1", [old_key])?;
+        }
         tx.commit()?;
         Ok(n)
+    }
+
+    // --- the sidebar's order ------------------------------------------------------------------
+
+    /// Put these roles in this order, top first (they're arranged within their company).
+    pub fn set_role_order(&self, ids: &[i64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            if tx.execute("UPDATE roles SET position = ?2 WHERE id = ?1", params![id, i as i64])? == 0 {
+                return Err(anyhow!("No role with id {id}. See: ic role list"));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Put these interviews in this order, top first (they're arranged within their role, or among
+    /// their company's interviews without one).
+    pub fn set_session_order(&self, ids: &[i64]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            if tx.execute("UPDATE sessions SET position = ?2 WHERE id = ?1", params![id, i as i64])? == 0 {
+                return Err(anyhow!("No session with id {id}. See: ic list"));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Put these companies (by company key) in this order, top first. Others keep their places.
+    pub fn set_company_order(&self, keys: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (i, key) in keys.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO company_order (company_key, position) VALUES (?1, ?2)
+                 ON CONFLICT(company_key) DO UPDATE SET position = excluded.position",
+                params![key, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// (company key, position) of each company you've arranged, top first.
+    pub fn company_order(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT company_key, position FROM company_order ORDER BY position, company_key")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Forget every arrangement, so the sidebar goes by date again.
+    pub fn reset_order(&self) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "UPDATE roles SET position = NULL; UPDATE sessions SET position = NULL; DELETE FROM company_order;",
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn set_status(&self, id: i64, status: Status, error: Option<String>) -> Result<()> {
@@ -1602,6 +1715,35 @@ mod tests {
             None,
             "the new columns are queryable"
         );
+        Ok(())
+    }
+
+    /// A version-8 database gains the sidebar's order and deleted roles; nothing is arranged yet.
+    #[test]
+    fn version_8_databases_gain_the_sidebar_order() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("coach.db");
+        {
+            let db = Db::open(&path)?;
+            db.create_session(new_session(Mode::Dual))?;
+            db.find_or_create_role(Some("Acme"), "Engineer")?;
+            db.conn.execute_batch(
+                "DROP TABLE company_order; ALTER TABLE sessions DROP COLUMN position;
+                 ALTER TABLE roles DROP COLUMN position; ALTER TABLE roles DROP COLUMN deleted_at;
+                 PRAGMA user_version = 8;",
+            )?;
+        }
+        let db = Db::open(&path)?;
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
+            SCHEMA_VERSION
+        );
+        assert_eq!(db.get_session(1)?.position, None);
+        assert_eq!((db.role(1)?.position, db.role(1)?.deleted_at), (None, None));
+        assert!(db.company_order()?.is_empty());
+        db.set_role_order(&[1])?;
+        assert_eq!(db.role(1)?.position, Some(0));
         Ok(())
     }
 

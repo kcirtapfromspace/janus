@@ -124,6 +124,8 @@ public struct SessionSummary: Decodable, Identifiable, Hashable {
     public var isPractice: Bool { practice ?? false }
     /// In Recently Deleted: days until it's erased.
     public var deletedDaysLeft: Int? = nil
+    /// Its place among its role's rounds (or its company's interviews without one), once you've arranged them.
+    public var position: Int? = nil
 
     public var date: String { String(createdAt.prefix(10)) }
     public var isDeleted: Bool { deletedDaysLeft != nil }

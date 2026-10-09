@@ -146,7 +146,23 @@ struct RecordWindow: View {
             }
             VStack(alignment: .leading, spacing: 14) {
                 field("Interview title", text: $model.title, prompt: "e.g. Hiring manager conversation")
-                field("Company", text: $model.company, prompt: "Optional")
+                if let role = model.recordRole {
+                    // A new round of a role: it takes the role's company.
+                    VStack(alignment: .leading, spacing: 7) {
+                        Text("Adds a round to").font(.system(size: 11, weight: .medium)).foregroundStyle(CoachTheme.ink)
+                        HStack(spacing: 8) {
+                            Image(systemName: "briefcase").foregroundStyle(CoachTheme.muted)
+                            Text([role.title, role.company].compactMap { $0 }.joined(separator: " · "))
+                                .font(.system(size: 12)).foregroundStyle(CoachTheme.ink).lineLimit(1)
+                            Spacer()
+                            Button("Don’t add to a role") { model.recordRole = nil }
+                            .buttonStyle(.link).font(.system(size: 11))
+                            .disabled(model.phase.isBusy)
+                        }
+                    }
+                } else {
+                    field("Company", text: $model.company, prompt: "Optional")
+                }
             }
             HStack(spacing: 14) {
                 Label("Your microphone", systemImage: "mic")
@@ -245,6 +261,7 @@ struct RecordWindow: View {
         .onDisappear {
             if !model.phase.isBusy, ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil {
                 model.resetVideoSource()
+                model.recordRole = nil  // closed without recording: the next one isn't that role's round
             }
         }
         .onChange(of: model.recordVideo) { consent = false }  // they agreed to something else

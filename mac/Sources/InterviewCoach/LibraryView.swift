@@ -2,30 +2,45 @@ import InterviewCoachKit
 import SwiftUI
 
 /// The sidebar: companies, the roles at each, and their interviews in order, with search, filters,
-/// archive and Recently Deleted. Several interviews can be selected at once.
+/// archive and Recently Deleted. Several interviews can be selected at once. Drag companies, roles
+/// and rounds to arrange them; each company and role has + (add an interview) and ⋯ on hover.
 struct LibrarySidebar: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
     @State private var collapsed: Set<Int> = []
+    @State private var collapsedCompanies: Set<String> = []
     @State private var editing: SessionSummary?
     @State private var naming: NamePrompt?
     @State private var erasing: [Int]?
+    @State private var deleting: GroupDeletion?
+    /// The company a dragged company is over.
+    @State private var dropTarget: String?
 
     var body: some View {
         @Bindable var model = model
         let tree = buildTree(model.library, filter: model.filter)
         List(selection: $model.listSelection) {
             ForEach(tree.companies) { company in
-                Section {
+                Section(isExpanded: companyExpanded(company.id)) {
                     ForEach(company.roles) { group in
                         DisclosureGroup(isExpanded: expanded(group.id)) {
                             ForEach(group.sessions) { SessionRow(session: $0, inRole: true).tag($0.id) }
+                                .onMove(perform: arranging(group.sessions.map(\.id), model.arrangeInterviews))
                         } label: {
-                            RoleHeader(group: group).contextMenu { roleMenu(group.role) }
+                            GroupHeader(addHelp: "Add a round to \(group.role.title)", moreHelp: "More for \(group.role.title)") {
+                                RoleHeader(group: group)
+                            } add: {
+                                addRoundMenu(group.role)
+                            } more: {
+                                roleMenu(group.role)
+                            }
                         }
                     }
+                    .onMove(perform: arranging(company.roles.map(\.id), model.arrangeRoles))
                     ForEach(company.loose) { SessionRow(session: $0).tag($0.id) }
+                        .onMove(perform: arranging(company.loose.map(\.id), model.arrangeInterviews))
                 } header: {
-                    CompanyHeader(company: company).contextMenu { companyMenu(company) }
+                    companyHeader(company, in: tree)
                 }
             }
             if !tree.deleted.isEmpty {
@@ -92,10 +107,59 @@ struct LibrarySidebar: View {
         } message: {
             Text("The recording, transcript and every report are removed for good. This can't be undone.")
         }
+        .confirmationDialog(deleting?.title ?? "", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                            presenting: deleting) { deletion in
+            Button("Delete", role: .destructive) { deletion.delete() }
+        } message: { deletion in
+            Text(deletion.message)
+        }
     }
 
     private func expanded(_ role: Int) -> Binding<Bool> {
         Binding(get: { !collapsed.contains(role) }, set: { open in if open { collapsed.remove(role) } else { collapsed.insert(role) } })
+    }
+
+    private func companyExpanded(_ key: String) -> Binding<Bool> {
+        Binding(get: { !collapsedCompanies.contains(key) },
+                set: { open in if open { collapsedCompanies.remove(key) } else { collapsedCompanies.insert(key) } })
+    }
+
+    // MARK: Arranging
+
+    /// Drag-to-reorder for one group's items, saved as their new order. Off while searching or
+    /// filtering, when only some of them show.
+    private func arranging<ID>(_ ids: [ID], _ save: @escaping ([ID]) -> Void) -> ((IndexSet, Int) -> Void)? {
+        guard !model.filter.isFiltering else { return nil }
+        return { offsets, destination in save(moving(ids, fromOffsets: offsets, toOffset: destination)) }
+    }
+
+    /// A company's header: dragged onto another company's, it takes that one's place.
+    @ViewBuilder private func companyHeader(_ company: CompanyGroup, in tree: LibraryTree) -> some View {
+        if company.id.isEmpty {
+            CompanyHeader(company: company)
+        } else {
+            GroupHeader(addHelp: "Add an interview at \(company.name)", moreHelp: "More for \(company.name)") {
+                CompanyHeader(company: company)
+            } add: {
+                Button("Record an Interview…") {
+                    model.recordRole = nil
+                    model.company = company.name
+                    openWindow(id: "record")
+                }
+                .disabled(model.phase.isBusy)
+                Button("Import an Interview…") { model.importRecording(company: company.name) }
+                    .disabled(model.phase.isBusy)
+            } more: {
+                companyMenu(company)
+            }
+            .modifier(CompanyDragging(key: company.id, name: company.name, enabled: !model.filter.isFiltering,
+                                      targeted: $dropTarget) { dragged in
+                let keys = tree.companies.map(\.id).filter { !$0.isEmpty }
+                guard keys.contains(dragged), dragged != company.id else { return false }
+                model.arrangeCompanies(moving(keys, dragged, onto: company.id))
+                return true
+            })
+        }
     }
 
     private func sessions(_ ids: [Int]) -> [SessionSummary] { model.library.sessions.filter { ids.contains($0.id) } }
@@ -150,6 +214,25 @@ struct LibrarySidebar: View {
         }
         Divider()
         Button(role.archived ? "Unarchive Role" : "Archive Role") { model.archiveRole(role.id, undo: role.archived) }
+            .help("Archived roles are hidden until you turn on Show archived")
+        Button("Delete Role…") {
+            let count = interviewCount(model.library.interviews(inRole: role.id).count)
+            deleting = GroupDeletion(
+                title: "Delete “\(role.title)” and its \(count)?",
+                message: "They move to Recently Deleted and are erased in 30 days. Restoring one brings the role back."
+            ) { model.deleteRole(role.id) }
+        }
+    }
+
+    /// A role's + menu: a new round, recorded now or imported.
+    @ViewBuilder private func addRoundMenu(_ role: RoleSummary) -> some View {
+        Button("Record a Round…") {
+            model.recordRole = role
+            openWindow(id: "record")
+        }
+        .disabled(model.phase.isBusy)
+        Button("Import a Round…") { model.importRecording(role: role) }
+            .disabled(model.phase.isBusy)
     }
 
     @ViewBuilder private func companyMenu(_ company: CompanyGroup) -> some View {
@@ -161,31 +244,124 @@ struct LibrarySidebar: View {
             }
             let archived = company.roles.allSatisfy(\.role.archived) && company.loose.allSatisfy(\.archived)
             Button(archived ? "Unarchive Company" : "Archive Company") { model.archiveCompany(company.name, undo: archived) }
+                .help("Archived companies are hidden until you turn on Show archived")
+            Button("Delete Company…") {
+                let count = interviewCount(model.library.interviews(atCompany: company.id).count)
+                deleting = GroupDeletion(
+                    title: "Delete \(company.name) and its \(count)?",
+                    message: "Its roles and interviews move to Recently Deleted and are erased in 30 days."
+                ) { model.deleteCompany(company.name) }
+            }
+        }
+    }
+
+    private func interviewCount(_ n: Int) -> String { n == 1 ? "1 interview" : "\(n) interviews" }
+}
+
+/// A company or role to delete, once you confirm.
+struct GroupDeletion: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let delete: () -> Void
+}
+
+/// A company's or role's header with its quick actions on hover: + (add an interview to it) and
+/// ⋯ (its menu). Both are in its context menu too.
+struct GroupHeader<Label: View, Add: View, More: View>: View {
+    let addHelp: String
+    let moreHelp: String
+    @ViewBuilder let label: () -> Label
+    @ViewBuilder let add: () -> Add
+    @ViewBuilder let more: () -> More
+    @State private var hovering = false
+
+    var body: some View {
+        label()
+            .environment(\.headerHovered, hovering)
+            .overlay(alignment: .trailing) {
+                // In place of the status or count (which hide on hover), so the title keeps its room.
+                HStack(spacing: 2) {
+                    Menu(content: add) { Image(systemName: "plus") }.help(addHelp)
+                    Menu(content: more) { Image(systemName: "ellipsis") }.help(moreHelp)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .padding(.leading, 8)
+                .background(CoachTheme.canvas)
+                .opacity(hovering ? 1 : 0)
+                .allowsHitTesting(hovering)
+                .accessibilityHidden(!hovering)
+            }
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .contextMenu {
+                add()
+                Divider()
+                more()
+            }
+    }
+}
+
+extension EnvironmentValues {
+    /// The pointer is over this company's or role's header, which shows its actions instead of its status or count.
+    @Entry var headerHovered = false
+}
+
+/// Drag a company's header onto another's to take its place. Marked "janus-company:" so other
+/// text dropped on a header is ignored.
+struct CompanyDragging: ViewModifier {
+    static let prefix = "janus-company:"
+    let key: String
+    let name: String
+    let enabled: Bool
+    @Binding var targeted: String?
+    let drop: (String) -> Bool
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .background(targeted == key ? CoachTheme.accent.opacity(0.14) : .clear, in: RoundedRectangle(cornerRadius: 4))
+                .draggable(Self.prefix + key) {
+                    Text(name).font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(CoachTheme.canvas, in: RoundedRectangle(cornerRadius: 5))
+                }
+                .dropDestination(for: String.self) { items, _ in
+                    guard let item = items.first, item.hasPrefix(Self.prefix) else { return false }
+                    return drop(String(item.dropFirst(Self.prefix.count)))
+                } isTargeted: { over in
+                    if over { targeted = key } else if targeted == key { targeted = nil }
+                }
+        } else {
+            content
         }
     }
 }
 
 struct CompanyHeader: View {
     let company: CompanyGroup
+    @Environment(\.headerHovered) private var hovered
 
     var body: some View {
         HStack {
             Text(company.name).foregroundStyle(CoachTheme.muted)
             Spacer()
-            Text("\(company.count)").foregroundStyle(.tertiary).monospacedDigit()
+            Text("\(company.count)").foregroundStyle(.tertiary).monospacedDigit().opacity(hovered ? 0 : 1)
         }
     }
 }
 
 struct RoleHeader: View {
     let group: RoleGroup
+    @Environment(\.headerHovered) private var hovered
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "briefcase").foregroundStyle(.secondary)
             Text(group.role.title).font(.system(size: 12, weight: .medium)).foregroundStyle(CoachTheme.ink).lineLimit(1)
             Spacer(minLength: 4)
-            StatusChip(status: group.role.status, label: group.role.statusLabel)
+            StatusChip(status: group.role.status, label: group.role.statusLabel).opacity(hovered ? 0 : 1)
         }
         .opacity(group.role.archived ? 0.55 : 1)
     }
@@ -243,13 +419,18 @@ struct FilterBar: View {
                         model.filter.roleStatus = nil
                     }
                 }
+                if model.library.isArranged {
+                    Divider()
+                    Button("Reset to Date Order") { model.resetArrangement() }
+                        .help("Undo the order you dragged companies, roles and rounds into")
+                }
             } label: {
                 let on = model.filter.outcome != nil || model.filter.verdict != nil || model.filter.roleStatus != nil
                 Image(systemName: on ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .help("Filter by outcome, verdict or where the role stands")
+            .help("Filter by outcome, verdict or where the role stands, or reset the order you arranged")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)

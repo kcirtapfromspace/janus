@@ -141,6 +141,8 @@ pub struct Session {
     pub role_set: bool,
     /// A mock interview, for practice.
     pub practice: bool,
+    /// Its place among its role's rounds (or its company's other interviews), once you've arranged them.
+    pub position: Option<i64>,
 }
 
 pub fn speaker_label(speaker: &str) -> String {

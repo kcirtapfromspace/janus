@@ -51,6 +51,9 @@ enum Snapshots {
                 model.listSelection = [1, 2, 4]
                 await render(BatchView().environment(model), size: CGSize(width: 520, height: 300), name: "batch", to: out)
                 model.listSelection = []
+                model.recordRole = library.roles.first
+                await render(RecordWindow().environment(model), size: CGSize(width: 490, height: 0), name: "record-round", to: out)
+                model.recordRole = nil
                 if let one = library.sessions.first {
                     await render(EditDetailsSheet(session: one).environment(model), size: CGSize(width: 440, height: 0), name: "edit", to: out)
                 }

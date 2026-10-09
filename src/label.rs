@@ -562,7 +562,7 @@ mod tests {
             id: 3, created_at: "2026-10-05T00:00:00+00:00".into(), title: "Acme HM".into(), company: None, stage: None,
             role_id: None, source: Source::Recording, mode: Mode::Dual, source_path: None, dir: "/tmp/s3".into(),
             duration_s: Some(100.0), num_speakers: None, consent: Some(true), status: Status::Analyzed, error: None,
-            archived_at: None, deleted_at: None, role_set: false, practice: false,
+            archived_at: None, deleted_at: None, role_set: false, practice: false, position: None,
         }
     }
 

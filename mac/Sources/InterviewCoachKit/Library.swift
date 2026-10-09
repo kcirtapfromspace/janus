@@ -9,19 +9,105 @@ public struct RoleSummary: Decodable, Identifiable, Hashable {
     public let status: String
     public let statusLabel: String
     public let archived: Bool
+    /// Its place among its company's roles, once you've arranged them.
+    public var position: Int? = nil
 }
 
-/// Every interview (archived and deleted ones flagged) and every role.
+/// A company's place in the sidebar, once you've arranged it (`ic order companies`).
+public struct CompanyPlace: Decodable, Hashable {
+    public let key: String
+    public var position: Int
+
+    public init(key: String, position: Int) {
+        self.key = key
+        self.position = position
+    }
+}
+
+/// Every interview (archived and deleted ones flagged) and every role but deleted ones.
 public struct Library: Decodable, Equatable {
     public var sessions: [SessionSummary]
     public var roles: [RoleSummary]
+    /// The companies you've arranged (absent from libraries listed before arranging existed).
+    public var companyOrder: [CompanyPlace]?
 
-    public init(sessions: [SessionSummary] = [], roles: [RoleSummary] = []) {
+    public init(sessions: [SessionSummary] = [], roles: [RoleSummary] = [], companyOrder: [CompanyPlace] = []) {
         self.sessions = sessions
         self.roles = roles
+        self.companyOrder = companyOrder
     }
 
     public func role(_ id: Int?) -> RoleSummary? { id.flatMap { id in roles.first { $0.id == id } } }
+
+    /// The company an interview shows under: its role's, else its own ("" for none).
+    public func companyKey(of session: SessionSummary) -> String {
+        role(session.roleId)?.companyKey ?? session.companyKey ?? ""
+    }
+
+    /// What deleting a company takes: every interview shown under it, archived ones too.
+    public func interviews(atCompany key: String) -> [SessionSummary] {
+        sessions.filter { !$0.isDeleted && companyKey(of: $0) == key }
+    }
+
+    /// What deleting a role takes: its rounds, archived ones too.
+    public func interviews(inRole id: Int) -> [SessionSummary] {
+        sessions.filter { !$0.isDeleted && $0.roleId == id }
+    }
+
+    /// Whether anything has been arranged by hand, so there's an arrangement to undo.
+    public var isArranged: Bool {
+        !(companyOrder ?? []).isEmpty || roles.contains { $0.position != nil } || sessions.contains { $0.position != nil }
+    }
+
+    /// Show these companies (by key) in this order, top first, as `ic order companies` saves it.
+    public mutating func arrangeCompanies(_ keys: [String]) {
+        var places = (companyOrder ?? []).filter { !keys.contains($0.key) }
+        places += keys.enumerated().map { CompanyPlace(key: $1, position: $0) }
+        companyOrder = places.sorted { ($0.position, $0.key) < ($1.position, $1.key) }
+    }
+
+    /// Show these roles in this order, top first, as `ic order roles` saves it.
+    public mutating func arrangeRoles(_ ids: [Int]) {
+        for (position, id) in ids.enumerated() {
+            if let i = roles.firstIndex(where: { $0.id == id }) { roles[i].position = position }
+        }
+    }
+
+    /// Show these interviews in this order, top first, as `ic order interviews` saves it.
+    public mutating func arrangeInterviews(_ ids: [Int]) {
+        for (position, id) in ids.enumerated() {
+            if let i = sessions.firstIndex(where: { $0.id == id }) { sessions[i].position = position }
+        }
+    }
+
+    /// Back to date order, as `ic order reset` leaves it.
+    public mutating func resetArrangement() {
+        companyOrder = []
+        for i in roles.indices { roles[i].position = nil }
+        for i in sessions.indices { sessions[i].position = nil }
+    }
+}
+
+/// `items` with the ones at `offsets` moved to just before `destination`, the way a list's
+/// drag-to-reorder (`onMove`) reports a move.
+public func moving<T>(_ items: [T], fromOffsets offsets: IndexSet, toOffset destination: Int) -> [T] {
+    var rest: [T] = []
+    var insertAt = 0
+    for (i, item) in items.enumerated() where !offsets.contains(i) {
+        if i < destination { insertAt += 1 }
+        rest.append(item)
+    }
+    rest.insert(contentsOf: offsets.filter { $0 < items.count }.map { items[$0] }, at: insertAt)
+    return rest
+}
+
+/// `items` with `dragged` taking `target`'s place: just after it when dragged down, before it when dragged up.
+public func moving<T: Equatable>(_ items: [T], _ dragged: T, onto target: T) -> [T] {
+    guard dragged != target, let from = items.firstIndex(of: dragged), let to = items.firstIndex(of: target) else { return items }
+    var result = items
+    result.remove(at: from)
+    result.insert(dragged, at: to)
+    return result
 }
 
 /// Where an application stands, for the role status menu.
@@ -84,7 +170,9 @@ public struct LibraryTree: Equatable {
     public var isEmpty: Bool { companies.isEmpty && deleted.isEmpty }
 }
 
-/// Group the library into companies → roles → rounds, applying the filter.
+/// Group the library into companies → roles → rounds, applying the filter. What you've arranged
+/// keeps its place; the rest goes by date, the way a new item would arrive: newer companies, roles
+/// and unfiled interviews above the arranged ones, newer rounds at the end of their role.
 public func buildTree(_ library: Library, filter: LibraryFilter) -> LibraryTree {
     let query = filter.query.trimmingCharacters(in: .whitespaces).lowercased()
     func matches(_ s: SessionSummary) -> Bool {
@@ -109,8 +197,13 @@ public func buildTree(_ library: Library, filter: LibraryFilter) -> LibraryTree 
         if byCompany[k] == nil { order.append(k) }
         byCompany[k, default: []].append(s)
     }
-    // Most recent company first; interviews with no company last.
-    order.sort { ($0.isEmpty ? 1 : 0) < ($1.isEmpty ? 1 : 0) }
+    // Most recent company first, then the ones you've arranged; interviews with no company last.
+    var placed: [String: Int] = [:]
+    for place in library.companyOrder ?? [] where placed[place.key] == nil { placed[place.key] = place.position }
+    order = order.enumerated().sorted { a, b in
+        let rank = { (i: Int, k: String) in (k.isEmpty ? 2 : placed[k] == nil ? 0 : 1, placed[k] ?? 0, i) }
+        return rank(a.offset, a.element) < rank(b.offset, b.element)
+    }.map(\.element)
     let companies = order.map { k -> CompanyGroup in
         let sessions = byCompany[k] ?? []
         // The most common spelling (a role's counts for each of its interviews).
@@ -128,12 +221,25 @@ public func buildTree(_ library: Library, filter: LibraryFilter) -> LibraryTree 
                 loose.append(s)
             }
         }
-        let roles = roleOrder.compactMap { r in
-            library.role(r).map { RoleGroup(role: $0, sessions: (byRole[r] ?? []).sorted { $0.createdAt < $1.createdAt }) }
+        // Rounds oldest first, after the ones you've arranged.
+        let rounds = { (r: Int) in
+            (byRole[r] ?? []).sorted { a, b in
+                (a.position == nil ? 1 : 0, a.position ?? 0, a.createdAt, a.id) < (b.position == nil ? 1 : 0, b.position ?? 0, b.createdAt, b.id)
+            }
         }
-        return CompanyGroup(id: k, name: name, roles: roles, loose: loose)
+        let roles = arranged(roleOrder.compactMap { library.role($0) }, position: \.position)
+            .map { RoleGroup(role: $0, sessions: rounds($0.id)) }
+        return CompanyGroup(id: k, name: name, roles: roles, loose: arranged(loose, position: \.position))
     }
     return LibraryTree(companies: companies, deleted: deleted)
+}
+
+/// Newest-first `items` with the ones you've arranged after the rest, in their arranged order.
+private func arranged<T>(_ items: [T], position: (T) -> Int?) -> [T] {
+    items.enumerated().sorted { a, b in
+        let (pa, pb) = (position(a.element), position(b.element))
+        return (pa == nil ? 0 : 1, pa ?? 0, a.offset) < (pb == nil ? 0 : 1, pb ?? 0, b.offset)
+    }.map(\.element)
 }
 
 /// A search match (`ic search --json`).

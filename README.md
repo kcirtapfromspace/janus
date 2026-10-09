@@ -64,6 +64,11 @@ controls in the menu bar (Roman profiles formed by opposing quotation marks):
   Your searchable library stays on the left; each interview has **Recording**, **Transcript**,
   **Review**, and **Prepare** tabs. The toolbar keeps **Record/Stop** and **Import** close by; the
   review holds report versions, outcome tracking, and browser export.
+- **The library** groups interviews by company, then role, then round. Drag companies, roles and
+  rounds to arrange them (the filter menu's **Reset to Date Order** undoes it). Hover a company or
+  role for **+**, which records or imports a new round straight into it, and **⋯**, which renames,
+  archives (hides it until **Show archived**) or deletes it. A deleted role's interviews stay in
+  Recently Deleted for 30 days, and restoring one brings the role back.
 - **Practice Interview** (menu bar, or **Practice** in the window) runs a mock interview.
   - **Questions:** the interviewer asks real questions from your earlier interviews. It starts
     with the company and role you name, then the questions you answered least well, and fills in

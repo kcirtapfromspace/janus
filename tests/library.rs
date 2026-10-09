@@ -158,3 +158,123 @@ fn roles_merge_and_companies_rename_everywhere() {
     assert_eq!(library::archive_company(&db, "northwind inc", true).unwrap(), 1);
     assert!(library::library(&db).unwrap().sessions[0].archived, "archived through its role");
 }
+
+fn another(db: &Db, title: &str, company: Option<&str>) -> i64 {
+    db.create_session(interview_coach::db::NewSession {
+        title: title.into(), company: company.map(String::from), source: interview_coach::models::Source::Upload,
+        mode: Mode::Dual, source_path: None, num_speakers: None, consent: None, status: Status::Analyzed,
+    })
+    .unwrap()
+    .id
+}
+
+/// Deleting a role takes its rounds to Recently Deleted and hides the role; restoring a round
+/// brings the role back, and erasing the last of them removes it for good.
+#[test]
+fn deleting_a_role_takes_its_rounds_and_restoring_one_brings_it_back() {
+    let (tmp, db, id) = setup(Mode::Dual);
+    let settings = Settings { data_dir: tmp.path().to_path_buf(), ..Settings::load().unwrap() };
+    let role = db.find_or_create_role(Some("Northwind"), "Senior PM").unwrap();
+    let second = another(&db, "Onsite", Some("Northwind"));
+    db.set_session_role(id, Some(role.id)).unwrap();
+    db.set_session_role(second, Some(role.id)).unwrap();
+
+    db.set_status(second, Status::Transcribing, None).unwrap();
+    assert!(library::delete_role(&db, role.id).unwrap_err().to_string().contains("transcribing"));
+    assert!(db.get_session(id).unwrap().deleted_at.is_none(), "all or nothing");
+    db.set_status(second, Status::Analyzed, None).unwrap();
+
+    assert_eq!(library::delete_role(&db, role.id).unwrap(), 2);
+    let lib = library::library(&db).unwrap();
+    assert!(lib.roles.is_empty(), "a deleted role isn't listed");
+    assert!(lib.sessions.iter().all(|s| s.deleted_days_left.is_some()));
+
+    library::restore(&db, second).unwrap();
+    let lib = library::library(&db).unwrap();
+    assert_eq!(lib.roles.iter().map(|r| r.id).collect::<Vec<_>>(), [role.id], "restoring a round brings its role back");
+    assert_eq!(db.get_session(second).unwrap().role_id, Some(role.id));
+
+    library::delete_role(&db, role.id).unwrap();
+    library::erase(&db, &settings, id).unwrap();
+    assert!(db.role(role.id).is_ok(), "kept while a round is left to restore");
+    library::erase(&db, &settings, second).unwrap();
+    assert!(db.role(role.id).is_err(), "erased with its last round");
+}
+
+/// Filing an interview under a deleted role's title brings that role back.
+#[test]
+fn a_deleted_role_comes_back_when_something_is_filed_under_it() {
+    let (_tmp, db, id) = setup(Mode::Dual);
+    let role = db.find_or_create_role(Some("Northwind"), "Senior PM").unwrap();
+    db.set_session_role(id, Some(role.id)).unwrap();
+    library::delete_role(&db, role.id).unwrap();
+    let again = db.find_or_create_role(Some("northwind"), "senior pm").unwrap();
+    assert_eq!((again.id, again.deleted_at), (role.id, None));
+}
+
+/// Deleting a company takes its roles and its interviews without a role, and nothing else.
+#[test]
+fn deleting_a_company_takes_its_roles_and_other_interviews() {
+    let (_tmp, db, id) = setup(Mode::Dual);
+    let role = db.find_or_create_role(Some("Northwind"), "Senior PM").unwrap();
+    db.set_session_role(id, Some(role.id)).unwrap();
+    let loose = another(&db, "Coffee chat", Some("northwind "));
+    let elsewhere = another(&db, "Screen", Some("Acme"));
+    assert_eq!(library::delete_company(&db, "NorthWind").unwrap(), 2);
+    for (s, deleted) in [(id, true), (loose, true), (elsewhere, false)] {
+        assert_eq!(db.get_session(s).unwrap().deleted_at.is_some(), deleted, "session {s}");
+    }
+    assert!(library::library(&db).unwrap().roles.is_empty());
+}
+
+/// The order you arrange things in is kept and listed; renaming a company keeps its place, and
+/// resetting goes back to date order.
+#[test]
+fn arranging_the_sidebar_is_kept_until_reset() {
+    let (_tmp, db, id) = setup(Mode::Dual);
+    let pm = db.find_or_create_role(Some("Northwind"), "Senior PM").unwrap();
+    let lead = db.find_or_create_role(Some("Northwind"), "Product Lead").unwrap();
+    let second = another(&db, "Onsite", Some("Northwind"));
+    db.set_session_role(id, Some(pm.id)).unwrap();
+    db.set_session_role(second, Some(pm.id)).unwrap();
+
+    db.set_role_order(&[lead.id, pm.id]).unwrap();
+    db.set_session_order(&[second, id]).unwrap();
+    db.set_company_order(&["northwind".into(), "acme".into()]).unwrap();
+    assert!(db.set_role_order(&[999]).is_err(), "an unknown role is refused");
+
+    let lib = library::library(&db).unwrap();
+    let position = |rid| lib.roles.iter().find(|r| r.id == rid).unwrap().position;
+    assert_eq!((position(lead.id), position(pm.id)), (Some(0), Some(1)));
+    let position = |sid| lib.sessions.iter().find(|s| s.id == sid).unwrap().position;
+    assert_eq!((position(second), position(id)), (Some(0), Some(1)));
+    let places = |db: &Db| db.company_order().unwrap();
+    assert_eq!(lib.company_order.iter().map(|c| (c.key.as_str(), c.position)).collect::<Vec<_>>(),
+               [("northwind", 0), ("acme", 1)]);
+    db.set_company_order(&["acme".into()]).unwrap();
+    assert_eq!(places(&db), [("acme".into(), 0), ("northwind".into(), 0)], "others keep their places");
+    db.set_company_order(&["northwind".into(), "acme".into()]).unwrap();
+
+    db.rename_company("Northwind", "Northwind Labs").unwrap();
+    assert_eq!(places(&db), [("northwind labs".into(), 0), ("acme".into(), 1)], "a renamed company keeps its place");
+    db.rename_company("Northwind Labs", "Acme").unwrap();
+    assert_eq!(places(&db), [("acme".into(), 1)], "merging into a placed company keeps that one's place");
+
+    db.reset_order().unwrap();
+    let lib = library::library(&db).unwrap();
+    assert!(lib.roles.iter().all(|r| r.position.is_none()) && lib.sessions.iter().all(|s| s.position.is_none()));
+    assert!(lib.company_order.is_empty());
+}
+
+/// An interview under a role with no company shows under its own company, so deleting that
+/// company takes it too.
+#[test]
+fn deleting_a_company_takes_what_the_sidebar_shows_under_it() {
+    let (_tmp, db, id) = setup(Mode::Dual);
+    let role = db.find_or_create_role(None, "Engineer").unwrap();
+    db.set_company(id, Some("Acme")).unwrap();
+    db.set_session_role(id, Some(role.id)).unwrap();
+    assert_eq!(library::delete_company(&db, "acme").unwrap(), 1);
+    assert!(db.get_session(id).unwrap().deleted_at.is_some());
+    assert!(db.role(role.id).unwrap().deleted_at.is_none(), "a role without a company isn't the company's");
+}

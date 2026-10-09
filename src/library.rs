@@ -88,8 +88,15 @@ pub fn delete(db: &Db, id: i64) -> Result<()> {
     db.set_deleted(id, true)
 }
 
+/// Bring an interview back from Recently Deleted, and its role if that was deleted with it.
 pub fn restore(db: &Db, id: i64) -> Result<()> {
-    db.set_deleted(id, false)
+    db.set_deleted(id, false)?;
+    if let Some(role) = db.get_session(id)?.role_id.map(|r| db.role(r)).transpose()?
+        && role.deleted_at.is_some()
+    {
+        db.set_role_deleted(role.id, false)?;
+    }
+    Ok(())
 }
 
 /// Days left before a deleted interview is erased (0 = due).
@@ -119,7 +126,12 @@ pub fn erase(db: &Db, settings: &Settings, id: i64) -> Result<()> {
     if dir.exists() && is_session_folder(&dir, &settings.sessions_dir()) {
         std::fs::remove_dir_all(&dir)?;
     }
-    db.erase_session(id)
+    db.erase_session(id)?;
+    // A deleted role goes for good with the last of its interviews.
+    if let Some(role) = session.role_id {
+        db.remove_role_if_unused(role)?;
+    }
+    Ok(())
 }
 
 /// Erase interviews deleted at least `older_than_days` ago (0: all of Recently Deleted). Returns their ids.
@@ -138,12 +150,72 @@ pub fn empty_deleted(db: &Db, settings: &Settings, older_than_days: i64) -> Resu
     Ok(erased)
 }
 
+/// Move a role and its interviews to Recently Deleted. Restoring any of them brings the role back;
+/// it's erased with the last of them. Returns how many interviews went with it.
+pub fn delete_role(db: &Db, id: i64) -> Result<usize> {
+    let role = db.role(id)?;
+    let sessions: Vec<Session> =
+        db.list_sessions()?.into_iter().filter(|s| s.role_id == Some(id) && s.deleted_at.is_none()).collect();
+    // All or nothing: refuse before deleting any of them.
+    for s in &sessions {
+        if let Some(why) = busy(db, s)? {
+            bail!("Can't delete {} while {why}.", role.title);
+        }
+    }
+    for s in &sessions {
+        db.set_deleted(s.id, true)?;
+    }
+    db.set_role_deleted(id, true)?;
+    // With nothing to restore it by, it goes now.
+    db.remove_role_if_unused(id)?;
+    Ok(sessions.len())
+}
+
+/// Move a company to Recently Deleted: its roles (as `delete_role`) and every interview the app
+/// shows under it. Returns how many interviews went.
+pub fn delete_company(db: &Db, name: &str) -> Result<usize> {
+    let key = company_key(name);
+    let roles = db.roles()?;
+    let inferred = db.latest_companies()?;
+    // Where the app shows an interview: under its role's company, else its own.
+    let shown_under = |s: &Session| {
+        let role = s.role_id.and_then(|id| roles.iter().find(|r| r.id == id));
+        role.and_then(|r| r.company.as_deref())
+            .map(company_key)
+            .or_else(|| display_company(s, role, inferred.get(&s.id).map(String::as_str)).map(|c| company_key(&c)))
+    };
+    let going: Vec<Session> = db
+        .list_sessions()?
+        .into_iter()
+        .filter(|s| s.deleted_at.is_none() && shown_under(s).as_deref() == Some(key.as_str()))
+        .collect();
+    // All or nothing: refuse before deleting any of them.
+    for s in &going {
+        if let Some(why) = busy(db, s)? {
+            bail!("Can't delete {name} while {why}.");
+        }
+    }
+    for role in roles
+        .iter()
+        .filter(|r| r.deleted_at.is_none() && r.company.as_deref().map(company_key).as_deref() == Some(key.as_str()))
+    {
+        delete_role(db, role.id)?;
+    }
+    for s in &going {
+        db.set_deleted(s.id, true)?;
+    }
+    Ok(going.len())
+}
+
 /// Archive (or bring back) a company: its roles, and its interviews that aren't under a role.
 pub fn archive_company(db: &Db, name: &str, archived: bool) -> Result<usize> {
     let key = company_key(name);
     let mut n = 0;
     let roles = db.roles()?;
-    for role in roles.iter().filter(|r| r.company.as_deref().map(company_key) == Some(key.clone())) {
+    for role in roles
+        .iter()
+        .filter(|r| r.deleted_at.is_none() && r.company.as_deref().map(company_key) == Some(key.clone()))
+    {
         db.set_role_archived(role.id, archived)?;
         n += 1;
     }
@@ -193,6 +265,8 @@ pub struct Entry {
     pub deleted_days_left: Option<i64>,
     /// A mock interview, for practice.
     pub practice: bool,
+    /// Its place among its role's rounds (or its company's other interviews), once you've arranged them.
+    pub position: Option<i64>,
 }
 
 /// A role, as the app lists it.
@@ -205,12 +279,24 @@ pub struct RoleEntry {
     pub status: &'static str,
     pub status_label: &'static str,
     pub archived: bool,
+    /// Its place among its company's roles, once you've arranged them.
+    pub position: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct Library {
     pub sessions: Vec<Entry>,
+    /// Every role but those in Recently Deleted.
     pub roles: Vec<RoleEntry>,
+    /// The companies you've arranged, top first (the rest go by date).
+    pub company_order: Vec<CompanyPlace>,
+}
+
+/// A company's place in the sidebar, once you've arranged it.
+#[derive(Debug, Serialize)]
+pub struct CompanyPlace {
+    pub key: String,
+    pub position: i64,
 }
 
 fn existing(dir: &str, name: &str) -> Option<String> {
@@ -249,6 +335,7 @@ pub fn library(db: &Db) -> Result<Library> {
                 archived: s.archived_at.is_some() || role.is_some_and(|r| r.archived_at.is_some()),
                 deleted_days_left: s.deleted_at.as_deref().map(|d| days_left(d, now)),
                 practice: s.practice,
+                position: s.position,
                 created_at: s.created_at,
                 title: s.title,
                 dir: s.dir,
@@ -258,6 +345,7 @@ pub fn library(db: &Db) -> Result<Library> {
         .collect();
     let roles = roles
         .into_iter()
+        .filter(|r| r.deleted_at.is_none())
         .map(|r| RoleEntry {
             id: r.id,
             company_key: r.company.as_deref().map(company_key),
@@ -266,9 +354,11 @@ pub fn library(db: &Db) -> Result<Library> {
             status: r.status.as_str(),
             status_label: r.status.label(),
             archived: r.archived_at.is_some(),
+            position: r.position,
         })
         .collect();
-    Ok(Library { sessions, roles })
+    let company_order = db.company_order()?.into_iter().map(|(key, position)| CompanyPlace { key, position }).collect();
+    Ok(Library { sessions, roles, company_order })
 }
 
 /// Something that matched a search.

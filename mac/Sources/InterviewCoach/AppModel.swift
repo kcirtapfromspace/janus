@@ -90,6 +90,8 @@ final class AppModel {
     var lastError: String?
     var title = ""
     var company = ""
+    /// The role the Record window adds its interview to, as a new round (a role's "Record a Round…").
+    var recordRole: RoleSummary?
     /// A downloaded, verified update waiting for the app to be idle.
     var updateReady: String?
     /// The selected session's whole pipeline, and which stage the window shows.
@@ -272,6 +274,7 @@ final class AppModel {
             .selected(filter: selectedVideoFilter, label: selectedVideoLabel ?? "Selected video source")
         } else if fallbackToScreen { .automaticWithScreenFallback } else { .automatic }
         let videoRequested = recordVideo
+        let role = recordRole
         // Reserve the recording action before the first await so clicks from another window
         // cannot create a second session while the CLI prepares the first.
         phase = .working("Preparing recording…")
@@ -279,7 +282,8 @@ final class AppModel {
         do {
             var args = ["recording", "begin"]
             if !title.isEmpty { args += ["--title", title] }
-            if !company.isEmpty { args += ["--company", company] }
+            // A round of a role takes the role's company.
+            if let role { args += ["--role-id", "\(role.id)"] } else if !company.isEmpty { args += ["--company", company] }
             let new = try await ic.decode(NewRecording.self, args)
             let dir = URL(fileURLWithPath: new.dir, isDirectory: true)
             let session = RecordingSession(
@@ -298,6 +302,7 @@ final class AppModel {
             watchCaptureHealth()
             title = ""
             company = ""
+            recordRole = nil
             await refresh()
         } catch {
             phase = .idle
@@ -343,14 +348,18 @@ final class AppModel {
 
     // MARK: Other actions
 
-    func importRecording() {
+    /// Import a recording: as a new round of `role`, or an interview at `company`, when given.
+    func importRecording(company: String? = nil, role: RoleSummary? = nil) {
         NSApp.activate(ignoringOtherApps: true)
         let panel = NSOpenPanel()
-        panel.title = "Import an interview recording"
+        panel.title = if let role { "Import a round of \(role.title)" } else if let company { "Import an interview at \(company)" }
+            else { "Import an interview recording" }
         panel.allowedContentTypes = [.audio, .movie, .audiovisualContent]
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        runIC(["import", url.path], label: "Importing \(url.lastPathComponent)…", selectNew: true)
+        var args = ["import", url.path]
+        if let role { args += ["--role-id", "\(role.id)"] } else if let company { args += ["--company", company] }
+        runIC(args, label: "Importing \(url.lastPathComponent)…", selectNew: true)
     }
 
     func analyze(_ id: Int) {
@@ -641,6 +650,38 @@ final class AppModel {
     func mergeRole(_ from: Int, into: Int) { manage([["role", "merge", "\(from)", "\(into)"]]) }
     func renameCompany(_ old: String, _ new: String) { manage([["company", "rename", old, new]]) }
     func archiveCompany(_ name: String, undo: Bool = false) { manage([["company", "archive", name] + (undo ? ["--undo"] : [])]) }
+    /// A role, or a company, and their interviews to Recently Deleted.
+    func deleteRole(_ roleID: Int) { manage([["role", "delete", "\(roleID)"]]) }
+    func deleteCompany(_ name: String) { manage([["company", "delete", "--", name]]) }
+
+    // MARK: Arranging the sidebar
+
+    // Each shows the new order at once (so a drop doesn't snap back while ic saves it); the
+    // reload after it then matches, so nothing moves again.
+
+    /// Companies (by key) in this order, top first.
+    func arrangeCompanies(_ keys: [String]) {
+        library.arrangeCompanies(keys)
+        manage([["order", "companies", "--"] + keys])
+    }
+
+    /// Roles at one company in this order, top first.
+    func arrangeRoles(_ ids: [Int]) {
+        library.arrangeRoles(ids)
+        manage([["order", "roles"] + ids.map(String.init)])
+    }
+
+    /// A role's rounds (or a company's interviews without a role) in this order, top first.
+    func arrangeInterviews(_ ids: [Int]) {
+        library.arrangeInterviews(ids)
+        manage([["order", "interviews"] + ids.map(String.init)])
+    }
+
+    /// Forget the arrangement: back to date order.
+    func resetArrangement() {
+        library.resetArrangement()
+        manage([["order", "reset"]])
+    }
 
     /// Interviews whose transcript mentions the search text (titles and companies match in the sidebar itself).
     func searchTranscripts(_ query: String) async {
