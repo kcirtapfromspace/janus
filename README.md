@@ -61,6 +61,18 @@ controls in the menu bar (Roman profiles formed by opposing quotation marks):
 - **Open Janus** opens your interview notebook: the latest conversation, earlier
   interviews, and their reviews. Activity, conversation time, active roles, and recorded outcomes
   stay together on the page. Choose a time range or return to a review.
+- **How you're doing**, at the top of the notebook, follows every review across interviews. It
+  has your overall score over time and a one-line summary of what's getting better and what's
+  slipping. Each area also gets its own line:
+  - the seven rubric scores;
+  - answer scores and habits, such as leading with the point and giving a number;
+  - filler words and hedging;
+  - how the room felt.
+  
+  It names your strongest and weakest areas lately, and the coaching that keeps coming up (or has
+  stopped coming up). It updates as soon as a new interview's review is done. An area gets a
+  direction once three interviews have measured it. Then your latest interviews are compared with
+  the ones before, and a small move counts as steady. Practice interviews are left out.
   Your searchable library stays on the left; each interview has **Recording**, **Transcript**,
   **Review**, and **Prepare** tabs. The toolbar keeps **Record/Stop** and **Import** close by; the
   review holds report versions, outcome tracking, and browser export.
@@ -197,6 +209,7 @@ ic report 3 [--full] [--open]           # analysis in the terminal, or as an HTM
 ic outcome 3 advanced                   # record what actually happened
 ic swap 3                               # if a single-track import got You/Interviewer backwards
 ic questions [--company Acme]           # every interviewer question from your reviews, merged, with your scores
+ic trends [--days 90]                   # each area across your interviews: getting better, slipping or steady
 ```
 
 Recording and importing both transcribe and analyse automatically. `ic transcribe N` and
@@ -215,6 +228,7 @@ it starts.
 | Measure | Talk share, answer lengths, pace, filler words, questions asked, interruptions: computed in code, so they're comparable over time. |
 | Analyse | The model (Claude or OpenAI) reads the transcript and metrics and returns a structured review: verdict + interviewer signals, 7-dimension rubric, question-by-question feedback, and the top 3 things to work on. Every quote is checked against the transcript. |
 | Read the room | The interviewer's turns are timed and placed warm or cool from their words (Jev) and voice. With video, `ic-vision` (Apple Vision, on this Mac) finds faces a few times a second; `src/video.rs` follows them, tells your face apart by whose speech its mouth moves with, and counts the others' nods and looking away during each answer. Experimental: thresholds aren't yet validated on real calls. |
+| Track progress | `ic trends` (the notebook's **How you're doing**) lines up each review's rubric, answer scores, answer checks, talk measures and the room's warmth, interview by interview, and compares your latest interviews with the ones before. |
 | Calibrate | `ic outcome` records the real result, so predicted verdicts can be compared with what actually happened. |
 
 Data lives in `~/InterviewCoach/` (`coach.db` plus one folder per session with audio,

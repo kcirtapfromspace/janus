@@ -3,7 +3,8 @@ import InterviewCoachKit
 import SwiftUI
 
 /// Developer tool for checking layout without screenshots: launched with `IC_SNAPSHOTS=<folder>`
-/// (and optionally `IC_SNAPSHOT_DETAIL=<ic session JSON>`), the app draws its own views into
+/// (and optionally `IC_SNAPSHOT_DETAIL=<ic session JSON>`, `IC_SNAPSHOT_LIBRARY=<ic list --json --all>` and
+/// `IC_SNAPSHOT_TRENDS=<ic trends --json --days 90>`), the app draws its own views into
 /// offscreen windows at several widths, saves each as a PNG, and quits. Nothing on screen is captured.
 @MainActor
 enum Snapshots {
@@ -58,8 +59,17 @@ enum Snapshots {
                     await render(EditDetailsSheet(session: one).environment(model), size: CGSize(width: 440, height: 0), name: "edit", to: out)
                 }
             }
+            if let path = env["IC_SNAPSHOT_TRENDS"], let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                model.trends = try? ICClient.decode(Trends.self, from: data)
+            } else {
+                await model.loadTrends(days: AnalyticsPeriod.quarter.days)  // the notebook's default period
+            }
             await render(DashboardView().environment(model), size: CGSize(width: 936, height: 800), name: "dashboard", to: out)
+            await render(DashboardView().environment(model), size: CGSize(width: 936, height: 2400), name: "dashboard-full", to: out)
+            // The detail pane of a default-size window (1100 wide, less the sidebar): one column of areas.
+            await render(DashboardView().environment(model), size: CGSize(width: 836, height: 2800), name: "dashboard-window-full", to: out)
             await render(DashboardView().environment(model), size: CGSize(width: 550, height: 1000), name: "dashboard-narrow", to: out)
+            await render(DashboardView().environment(model), size: CGSize(width: 550, height: 3600), name: "dashboard-narrow-full", to: out)
             model.appearance = .dark
             await render(DashboardView().environment(model), size: CGSize(width: 936, height: 800), name: "dashboard-dark", to: out)
             model.appearance = .light

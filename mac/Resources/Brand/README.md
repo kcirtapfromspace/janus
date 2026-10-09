@@ -31,8 +31,10 @@ Dark mode keeps the same warm family. Georgia headings, system controls, and sma
 dates give the notebook its rhythm. Use plain rules rather than enclosing every section.
 Status labels remain text, not colored pills; retain native focus and keyboard behavior.
 
-The notebook leads with the latest conversation, its review, and earlier interviews. Facts and
-recorded outcomes sit in the margin. The activity chart follows the conversation list. Avoid
+The notebook opens with **How you're doing**: a one-sentence headline, then your overall score
+over time beside a margin of strongest and weakest areas and recurring coaching. Each area's line
+follows. Below that are the latest conversation, its review, and earlier interviews, with facts and
+recorded outcomes in the margin. The activity chart follows the conversation list. Avoid
 promotional slogans, repeated uppercase labels, avatar initials, nested bezels, and inflated KPI
 numbers. Empty states explain the next action plainly.
 
@@ -64,10 +66,35 @@ available durations. Recorded outcomes count the user's explicit results; missin
 results appear as awaiting an outcome. Predicted verdicts never count as recorded outcomes.
 The dashboard is independent of sidebar search and filters.
 
+**How you're doing** reads `ic trends --json --days N` for the same period. It reloads whenever
+the library changes, so a finished review shows up without leaving the page. It counts reviewed
+interviews only, with the same exclusions as above plus practice interviews. Each area is measured
+from each interview's current review version:
+- **Overall:** the mean of the rubric scores the interview gave a chance to show.
+- **Rubric areas:** each of the seven, 1–5.
+- **Answer scores:** the mean question score.
+- **Answer habits:** pass rates of the answer checks (unclear verdicts left out). These appear only
+  once a scorer has judged an answer.
+- **Filler words and hedging:** per 100 of your words.
+- **Answer length and your share of the talking:** these have no "better" direction. They and the
+  word rates need 100 of your words, so a recording that lost your mic doesn't count.
+- **How the room felt:** the mean temperature of the interviewer's turns.
+- **The review's outlook:** the verdict, −2 to +2, labelled as a prediction.
+
+An area needs three interviews before it gets a direction. Then the latest interviews (up to
+three, never more than half) are compared with the ones before. A change must reach the area's
+band to count: half a point on 1–5 scores, 15 points on habits, 1 filler or 0.5 hedges per 100
+words, 0.2 of warmth, one verdict step, 15 seconds or 5 points of share. Directions are text, green
+for getting better and red for slipping. Recurring coaching merges titles that share at least
+two distinctive words. A theme absent from the latest review shows when it last came up. A note
+appears when the reviews come from more than one model, since models score differently.
+
 ## Visual verification
 
 `IC_SNAPSHOTS` renders the native views into offscreen windows. The fixture mode does not run
 retention cleanup, background polling, or the updater. Use an isolated `IC_DATA_DIR` for any
 CLI calls. It saves overview, narrow layout, dark mode, empty state, capture, all pipeline panes,
-and full windows. The report preview fixture is for layout inspection; it is not an evaluation
+and full windows. `IC_SNAPSHOT_TRENDS` points the notebook at `ic trends --json` output; the
+test fixture `mac/Tests/InterviewCoachKitTests/Fixtures/trends.json` comes from six made-up
+interviews run through the real report stage (`cargo test --test trends -- --ignored`). The report preview fixture is for layout inspection; it is not an evaluation
 of coaching quality or recording hardware.

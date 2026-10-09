@@ -8,8 +8,7 @@ use serde::Serialize;
 
 use crate::db::{Db, StoredAnalysis};
 use crate::models::{Direction, RunStatus, Step};
-use crate::temperature::Kind;
-use crate::versions;
+use crate::{trends, versions};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct History {
@@ -67,8 +66,6 @@ fn how(params: &serde_json::Value) -> String {
 }
 
 fn version(a: &StoredAnalysis, number: usize) -> Version {
-    let scores: Vec<f64> = a.analysis.rubric.items().iter().filter_map(|(_, s)| s.score.map(f64::from)).collect();
-    let temps: Vec<f64> = a.turn_signals.iter().filter(|s| s.kind == Kind::Substantive).filter_map(|s| s.temperature).collect();
     let signals = |d: Direction| a.analysis.outlook.signals.iter().filter(|s| s.direction == d).count();
     Version {
         analysis_id: a.id,
@@ -78,10 +75,10 @@ fn version(a: &StoredAnalysis, number: usize) -> Version {
         verdict: a.analysis.outlook.verdict.label(),
         confidence: a.analysis.outlook.confidence.as_str(),
         your_share: (a.metrics.your_talk_s + a.metrics.their_talk_s > 0.0).then_some(a.metrics.your_share),
-        room: (!temps.is_empty()).then(|| temps.iter().sum::<f64>() / temps.len() as f64),
+        room: trends::room(a),
         positive_signals: signals(Direction::Positive),
         negative_signals: signals(Direction::Negative),
-        rubric_mean: (!scores.is_empty()).then(|| scores.iter().sum::<f64>() / scores.len() as f64),
+        rubric_mean: trends::rubric_mean(a),
         parent: None,
         changes: vec![],
         inputs_recorded: a.inputs.is_some(),

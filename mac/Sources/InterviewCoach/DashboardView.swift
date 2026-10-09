@@ -21,6 +21,8 @@ struct DashboardView: View {
                     } else if data.sessions.isEmpty {
                         emptyRange
                     } else {
+                        progress(width: geometry.size.width)
+                        CoachRule()
                         if geometry.size.width >= 730 {
                             HStack(alignment: .top, spacing: 30) {
                                 conversations(data).frame(maxWidth: .infinity, alignment: .leading)
@@ -46,6 +48,33 @@ struct DashboardView: View {
             .background(CoachTheme.surface)
         }
         .onChange(of: period) { selectedActivity = nil }
+        // Any change to the library (a review finishing, an interview archived) reloads the progress.
+        .task(id: TrendsRequest(days: period.days, library: model.library)) {
+            // Snapshot renders keep whatever trends they were given.
+            guard ProcessInfo.processInfo.environment["IC_SNAPSHOTS"] == nil else { return }
+            await model.loadTrends(days: period.days)
+        }
+    }
+
+    private struct TrendsRequest: Equatable {
+        let days: Int?
+        let library: Library
+    }
+
+    @ViewBuilder private func progress(width: CGFloat) -> some View {
+        if let trends = model.trends, trends.days == period.days {
+            // Two columns of areas need about 170 points for each label beside its numbers.
+            ProgressSection(trends: trends, wide: width >= 730, columns: width >= 920,
+                            periodLabel: period == .all ? "all time" : "last \(period.label)")
+        } else if let error = model.trendsError {
+            Text("Couldn’t load your progress: \(error)")
+                .font(.system(size: 11)).foregroundStyle(CoachTheme.muted).fixedSize(horizontal: false, vertical: true)
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Reading your reviews…").font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
+            }
+        }
     }
 
     private var heading: some View {

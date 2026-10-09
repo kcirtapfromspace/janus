@@ -68,6 +68,7 @@ pub mod steps;
 pub mod temperature;
 pub mod tools;
 pub mod transcribe;
+pub mod trends;
 pub mod versions;
 pub mod video;
 pub mod video_eval;

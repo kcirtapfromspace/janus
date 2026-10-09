@@ -1,0 +1,883 @@
+{
+  "days": 90,
+  "interviews": [
+    {
+      "session_id": 1,
+      "created_at": "2026-08-28T15:00:00+00:00",
+      "title": "Recruiter screen",
+      "company": "Northwind",
+      "round": "Recruiter screen",
+      "model": "anthropic/claude-opus-5-5",
+      "verdict_label": "Mixed"
+    },
+    {
+      "session_id": 2,
+      "created_at": "2026-09-04T15:00:00+00:00",
+      "title": "Hiring manager",
+      "company": "Fabrikam",
+      "round": "Hiring manager",
+      "model": "anthropic/claude-opus-5-5",
+      "verdict_label": "Mixed"
+    },
+    {
+      "session_id": 3,
+      "created_at": "2026-09-11T15:00:00+00:00",
+      "title": "Technical deep dive",
+      "company": "Contoso",
+      "round": "Technical",
+      "model": "anthropic/claude-sonnet-5-5",
+      "verdict_label": "Leaning positive"
+    },
+    {
+      "session_id": 4,
+      "created_at": "2026-09-18T15:00:00+00:00",
+      "title": "Behavioral loop",
+      "company": "Northwind",
+      "round": "Behavioral",
+      "model": "anthropic/claude-opus-5-5",
+      "verdict_label": "Mixed"
+    },
+    {
+      "session_id": 5,
+      "created_at": "2026-09-25T15:00:00+00:00",
+      "title": "Panel",
+      "company": "Litware",
+      "round": "Panel",
+      "model": "anthropic/claude-opus-5-5",
+      "verdict_label": "Leaning positive"
+    },
+    {
+      "session_id": 6,
+      "created_at": "2026-10-02T15:00:00+00:00",
+      "title": "Final round",
+      "company": "Fabrikam",
+      "round": "Final round",
+      "model": "anthropic/claude-opus-5-5",
+      "verdict_label": "Strong"
+    }
+  ],
+  "measures": [
+    {
+      "id": "overall",
+      "label": "Overall",
+      "group": "overall",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 3.0
+        },
+        {
+          "session_id": 2,
+          "value": 3.3333333333333335
+        },
+        {
+          "session_id": 3,
+          "value": 3.2857142857142856
+        },
+        {
+          "session_id": 4,
+          "value": 3.5
+        },
+        {
+          "session_id": 5,
+          "value": 3.4285714285714284
+        },
+        {
+          "session_id": 6,
+          "value": 3.4285714285714284
+        }
+      ],
+      "recent": 3.4523809523809526,
+      "recent_count": 3,
+      "earlier": 3.206349206349207,
+      "earlier_count": 3,
+      "change": 0.2460317460317456,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "clarity",
+      "label": "Clarity",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 4.0
+        },
+        {
+          "session_id": 2,
+          "value": 4.0
+        },
+        {
+          "session_id": 3,
+          "value": 4.0
+        },
+        {
+          "session_id": 4,
+          "value": 4.0
+        },
+        {
+          "session_id": 5,
+          "value": 4.0
+        },
+        {
+          "session_id": 6,
+          "value": 4.0
+        }
+      ],
+      "recent": 4.0,
+      "recent_count": 3,
+      "earlier": 4.0,
+      "earlier_count": 3,
+      "change": 0.0,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "structure",
+      "label": "Structure",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 2.0
+        },
+        {
+          "session_id": 2,
+          "value": 3.0
+        },
+        {
+          "session_id": 3,
+          "value": 3.0
+        },
+        {
+          "session_id": 4,
+          "value": 4.0
+        },
+        {
+          "session_id": 5,
+          "value": 4.0
+        },
+        {
+          "session_id": 6,
+          "value": 4.0
+        }
+      ],
+      "recent": 4.0,
+      "recent_count": 3,
+      "earlier": 2.6666666666666665,
+      "earlier_count": 3,
+      "change": 1.3333333333333335,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "specificity_and_impact",
+      "label": "Specificity & impact",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 2.0
+        },
+        {
+          "session_id": 2,
+          "value": 2.0
+        },
+        {
+          "session_id": 3,
+          "value": 3.0
+        },
+        {
+          "session_id": 4,
+          "value": 3.0
+        },
+        {
+          "session_id": 5,
+          "value": 4.0
+        },
+        {
+          "session_id": 6,
+          "value": 4.0
+        }
+      ],
+      "recent": 3.6666666666666665,
+      "recent_count": 3,
+      "earlier": 2.3333333333333335,
+      "earlier_count": 3,
+      "change": 1.333333333333333,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "role_fit",
+      "label": "Role fit",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 3.0
+        },
+        {
+          "session_id": 2,
+          "value": 4.0
+        },
+        {
+          "session_id": 3,
+          "value": 3.0
+        },
+        {
+          "session_id": 4,
+          "value": 4.0
+        },
+        {
+          "session_id": 5,
+          "value": 3.0
+        },
+        {
+          "session_id": 6,
+          "value": 4.0
+        }
+      ],
+      "recent": 3.6666666666666665,
+      "recent_count": 3,
+      "earlier": 3.3333333333333335,
+      "earlier_count": 3,
+      "change": 0.33333333333333304,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "technical_depth",
+      "label": "Technical depth",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 3,
+          "value": 3.0
+        },
+        {
+          "session_id": 5,
+          "value": 3.0
+        },
+        {
+          "session_id": 6,
+          "value": 3.0
+        }
+      ],
+      "recent": 3.0,
+      "recent_count": 1,
+      "earlier": 3.0,
+      "earlier_count": 2,
+      "change": 0.0,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "curiosity",
+      "label": "Curiosity",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 3.0
+        },
+        {
+          "session_id": 2,
+          "value": 3.0
+        },
+        {
+          "session_id": 3,
+          "value": 3.0
+        },
+        {
+          "session_id": 4,
+          "value": 3.0
+        },
+        {
+          "session_id": 5,
+          "value": 3.0
+        },
+        {
+          "session_id": 6,
+          "value": 2.0
+        }
+      ],
+      "recent": 2.6666666666666665,
+      "recent_count": 3,
+      "earlier": 3.0,
+      "earlier_count": 3,
+      "change": -0.3333333333333335,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "composure",
+      "label": "Composure",
+      "group": "rubric",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 4.0
+        },
+        {
+          "session_id": 2,
+          "value": 4.0
+        },
+        {
+          "session_id": 3,
+          "value": 4.0
+        },
+        {
+          "session_id": 4,
+          "value": 3.0
+        },
+        {
+          "session_id": 5,
+          "value": 3.0
+        },
+        {
+          "session_id": 6,
+          "value": 3.0
+        }
+      ],
+      "recent": 3.0,
+      "recent_count": 3,
+      "earlier": 4.0,
+      "earlier_count": 3,
+      "change": -1.0,
+      "direction": "slipping",
+      "needed": 0
+    },
+    {
+      "id": "answer_score",
+      "label": "Answer scores",
+      "group": "answers",
+      "unit": "score",
+      "better": "higher",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 2.25
+        },
+        {
+          "session_id": 2,
+          "value": 2.5
+        },
+        {
+          "session_id": 3,
+          "value": 2.75
+        },
+        {
+          "session_id": 4,
+          "value": 3.25
+        },
+        {
+          "session_id": 5,
+          "value": 3.5
+        },
+        {
+          "session_id": 6,
+          "value": 3.75
+        }
+      ],
+      "recent": 3.5,
+      "recent_count": 3,
+      "earlier": 2.5,
+      "earlier_count": 3,
+      "change": 1.0,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "leads_with_point",
+      "label": "Leads with the point",
+      "group": "answers",
+      "unit": "percent",
+      "better": "higher",
+      "band": 0.15,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 0.0
+        },
+        {
+          "session_id": 2,
+          "value": 0.25
+        },
+        {
+          "session_id": 3,
+          "value": 0.5
+        },
+        {
+          "session_id": 4,
+          "value": 0.75
+        },
+        {
+          "session_id": 5,
+          "value": 1.0
+        },
+        {
+          "session_id": 6,
+          "value": 1.0
+        }
+      ],
+      "recent": 0.9166666666666666,
+      "recent_count": 3,
+      "earlier": 0.25,
+      "earlier_count": 3,
+      "change": 0.6666666666666666,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "has_quantified_result",
+      "label": "Gives a number",
+      "group": "answers",
+      "unit": "percent",
+      "better": "higher",
+      "band": 0.15,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 0.0
+        },
+        {
+          "session_id": 2,
+          "value": 0.0
+        },
+        {
+          "session_id": 3,
+          "value": 0.25
+        },
+        {
+          "session_id": 4,
+          "value": 0.5
+        },
+        {
+          "session_id": 5,
+          "value": 0.75
+        },
+        {
+          "session_id": 6,
+          "value": 1.0
+        }
+      ],
+      "recent": 0.75,
+      "recent_count": 3,
+      "earlier": 0.08333333333333333,
+      "earlier_count": 3,
+      "change": 0.6666666666666666,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "star_missing",
+      "label": "Tells the whole story",
+      "group": "answers",
+      "unit": "percent",
+      "better": "higher",
+      "band": 0.15,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 0.0
+        },
+        {
+          "session_id": 2,
+          "value": 0.25
+        },
+        {
+          "session_id": 3,
+          "value": 0.5
+        },
+        {
+          "session_id": 4,
+          "value": 0.75
+        },
+        {
+          "session_id": 5,
+          "value": 1.0
+        },
+        {
+          "session_id": 6,
+          "value": 1.0
+        }
+      ],
+      "recent": 0.9166666666666666,
+      "recent_count": 3,
+      "earlier": 0.25,
+      "earlier_count": 3,
+      "change": 0.6666666666666666,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "ownership",
+      "label": "Your own part is clear",
+      "group": "answers",
+      "unit": "percent",
+      "better": "higher",
+      "band": 0.15,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 1.0
+        },
+        {
+          "session_id": 2,
+          "value": 1.0
+        },
+        {
+          "session_id": 3,
+          "value": 1.0
+        },
+        {
+          "session_id": 4,
+          "value": 1.0
+        },
+        {
+          "session_id": 5,
+          "value": 1.0
+        },
+        {
+          "session_id": 6,
+          "value": 1.0
+        }
+      ],
+      "recent": 1.0,
+      "recent_count": 3,
+      "earlier": 1.0,
+      "earlier_count": 3,
+      "change": 0.0,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "fillers",
+      "label": "Filler words",
+      "group": "delivery",
+      "unit": "per_100_words",
+      "better": "lower",
+      "band": 1.0,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 12.5
+        },
+        {
+          "session_id": 2,
+          "value": 10.9
+        },
+        {
+          "session_id": 3,
+          "value": 3.8
+        },
+        {
+          "session_id": 4,
+          "value": 2.6
+        },
+        {
+          "session_id": 5,
+          "value": 0.0
+        },
+        {
+          "session_id": 6,
+          "value": 0.0
+        }
+      ],
+      "recent": 0.8666666666666667,
+      "recent_count": 3,
+      "earlier": 9.066666666666666,
+      "earlier_count": 3,
+      "change": -8.2,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "hedges",
+      "label": "Hedging",
+      "group": "delivery",
+      "unit": "per_100_words",
+      "better": "lower",
+      "band": 0.5,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 4.3478260869565215
+        },
+        {
+          "session_id": 2,
+          "value": 3.125
+        },
+        {
+          "session_id": 3,
+          "value": 2.150537634408602
+        },
+        {
+          "session_id": 4,
+          "value": 1.0204081632653061
+        },
+        {
+          "session_id": 5,
+          "value": 0.0
+        },
+        {
+          "session_id": 6,
+          "value": 0.0
+        }
+      ],
+      "recent": 0.3401360544217687,
+      "recent_count": 3,
+      "earlier": 3.2077879071217077,
+      "earlier_count": 3,
+      "change": -2.867651852699939,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "answer_length",
+      "label": "Answer length",
+      "group": "delivery",
+      "unit": "seconds",
+      "better": "neither",
+      "band": 15.0,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 44.0
+        },
+        {
+          "session_id": 2,
+          "value": 44.0
+        },
+        {
+          "session_id": 3,
+          "value": 44.0
+        },
+        {
+          "session_id": 4,
+          "value": 44.0
+        },
+        {
+          "session_id": 5,
+          "value": 44.0
+        },
+        {
+          "session_id": 6,
+          "value": 44.0
+        }
+      ],
+      "recent": 44.0,
+      "recent_count": 3,
+      "earlier": 44.0,
+      "earlier_count": 3,
+      "change": 0.0,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "talk_share",
+      "label": "Your share of the talking",
+      "group": "delivery",
+      "unit": "share",
+      "better": "neither",
+      "band": 0.05,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 0.898
+        },
+        {
+          "session_id": 2,
+          "value": 0.898
+        },
+        {
+          "session_id": 3,
+          "value": 0.898
+        },
+        {
+          "session_id": 4,
+          "value": 0.898
+        },
+        {
+          "session_id": 5,
+          "value": 0.898
+        },
+        {
+          "session_id": 6,
+          "value": 0.898
+        }
+      ],
+      "recent": 0.898,
+      "recent_count": 3,
+      "earlier": 0.898,
+      "earlier_count": 3,
+      "change": 0.0,
+      "direction": "steady",
+      "needed": 0
+    },
+    {
+      "id": "warmth",
+      "label": "How the room felt",
+      "group": "room",
+      "unit": "warmth",
+      "better": "higher",
+      "band": 0.2,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 0.3687710763768302
+        },
+        {
+          "session_id": 2,
+          "value": 0.403758061000488
+        },
+        {
+          "session_id": 3,
+          "value": 0.561778848142138
+        },
+        {
+          "session_id": 4,
+          "value": 0.6326817237900144
+        },
+        {
+          "session_id": 5,
+          "value": 0.687924487825442
+        },
+        {
+          "session_id": 6,
+          "value": 0.701905979609612
+        }
+      ],
+      "recent": 0.6741707304083562,
+      "recent_count": 3,
+      "earlier": 0.4447693285064854,
+      "earlier_count": 3,
+      "change": 0.2294014019018708,
+      "direction": "improving",
+      "needed": 0
+    },
+    {
+      "id": "outlook",
+      "label": "The review's outlook",
+      "group": "room",
+      "unit": "outlook",
+      "better": "higher",
+      "band": 1.0,
+      "points": [
+        {
+          "session_id": 1,
+          "value": 0.0
+        },
+        {
+          "session_id": 2,
+          "value": 0.0
+        },
+        {
+          "session_id": 3,
+          "value": 1.0
+        },
+        {
+          "session_id": 4,
+          "value": 0.0
+        },
+        {
+          "session_id": 5,
+          "value": 1.0
+        },
+        {
+          "session_id": 6,
+          "value": 2.0
+        }
+      ],
+      "recent": 1.0,
+      "recent_count": 3,
+      "earlier": 0.3333333333333333,
+      "earlier_count": 3,
+      "change": 0.6666666666666667,
+      "direction": "steady",
+      "needed": 0
+    }
+  ],
+  "summary": {
+    "headline": "Your overall score is holding steady at about 3.5 out of 5.",
+    "detail": "Getting better in 8 areas, most of all fewer filler words, less hedging and leading with the point. Slipping: composure.",
+    "improving": [
+      "Filler words",
+      "Hedging",
+      "Leads with the point",
+      "Gives a number",
+      "Tells the whole story",
+      "Structure",
+      "Specificity & impact",
+      "Answer scores"
+    ],
+    "slipping": [
+      "Composure"
+    ],
+    "strongest": {
+      "label": "Structure",
+      "value": 4.0
+    },
+    "weakest": {
+      "label": "Curiosity",
+      "value": 2.6666666666666665
+    },
+    "recurring": [
+      {
+        "title": "Pause before answering",
+        "count": 3,
+        "last_seen": "2026-10-02T15:00:00+00:00",
+        "in_latest": true
+      },
+      {
+        "title": "Keep answers shorter",
+        "count": 3,
+        "last_seen": "2026-10-02T15:00:00+00:00",
+        "in_latest": true
+      },
+      {
+        "title": "Name your own part",
+        "count": 3,
+        "last_seen": "2026-09-25T15:00:00+00:00",
+        "in_latest": false
+      },
+      {
+        "title": "Quantify your impact",
+        "count": 3,
+        "last_seen": "2026-09-18T15:00:00+00:00",
+        "in_latest": false
+      }
+    ]
+  },
+  "models": [
+    "anthropic/claude-opus-5-5",
+    "anthropic/claude-sonnet-5-5"
+  ]
+}

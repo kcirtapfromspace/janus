@@ -274,6 +274,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Your progress across reviewed interviews: each area the reviews measure, and whether it's
+    /// getting better or worse (your latest interviews against the ones before).
+    Trends {
+        /// Only interviews from the last this many days, today included.
+        #[arg(long)]
+        days: Option<i64>,
+        /// Machine-readable output (used by the Janus app).
+        #[arg(long)]
+        json: bool,
+    },
     /// The shared question registry: pull the approved questions, withdraw what you shared, and
     /// (maintainers, with wrangler) moderate contributions.
     Registry {
@@ -2254,6 +2264,65 @@ fn list_questions(settings: &Settings, company: Option<String>, json: bool) -> R
     Ok(())
 }
 
+/// `ic trends`: where you stand, then each area with your latest interviews against the ones before.
+fn show_trends(settings: &Settings, days: Option<i64>, json: bool) -> Result<()> {
+    use interview_coach::trends::{self, Direction, Measure};
+    let db = open_db(settings)?;
+    let t = trends::build(&db, days)?;
+    if json {
+        outln!("{}", serde_json::to_string(&t)?);
+        return Ok(());
+    }
+    outln!("{}", style(&t.summary.headline).bold());
+    if let Some(detail) = &t.summary.detail {
+        outln!("{detail}");
+    }
+    if t.interviews.is_empty() {
+        return Ok(());
+    }
+    let value = |m: &Measure, x: f64| match m.unit {
+        "percent" | "share" => format!("{:.0}%", x * 100.0),
+        "seconds" => format!("{x:.0}s"),
+        "outlook" | "warmth" => format!("{x:+.1}"),
+        _ => format!("{x:.1}"),
+    };
+    let mut group = "";
+    for m in t.measures.iter().filter(|m| !m.points.is_empty()) {
+        if m.group != group {
+            group = m.group;
+            outln!();
+        }
+        let trend = match m.direction {
+            Direction::Improving => style("getting better".to_string()).green(),
+            Direction::Slipping => style("slipping".to_string()).red(),
+            Direction::Steady => style("steady".to_string()).dim(),
+            Direction::Up => style("up".to_string()).dim(),
+            Direction::Down => style("down".to_string()).dim(),
+            Direction::TooFew => style(format!("{} more to tell", m.needed)).dim(),
+        };
+        let numbers = match (m.recent, m.earlier) {
+            (Some(r), Some(e)) => format!("{} lately, {} before", value(m, r), value(m, e)),
+            (r, _) => format!("{} so far", value(m, r.unwrap_or_default())),
+        };
+        outln!("  {:<28} {:<28} {trend}", m.label, numbers);
+    }
+    outln!();
+    if let (Some(s), Some(w)) = (&t.summary.strongest, &t.summary.weakest) {
+        outln!("Strongest lately: {} ({:.1}). Most room to grow: {} ({:.1}).", s.label, s.value, w.label, w.value);
+    }
+    for theme in &t.summary.recurring {
+        let when = if theme.in_latest { "including your latest".to_string() } else { format!("last on {}", &theme.last_seen[..10.min(theme.last_seen.len())]) };
+        outln!("Keeps coming up: “{}”, in {} reviews, {when}.", theme.title, theme.count);
+    }
+    let since = t.days.map_or("all time".to_string(), |d| format!("the last {d} days"));
+    let n = t.interviews.len();
+    outln!("{}", style(format!("{n} reviewed interview{}, {since}. Practice, archived and deleted interviews are left out.", if n == 1 { "" } else { "s" })).dim());
+    if t.models.len() > 1 {
+        outln!("{}", style(format!("Reviews by {} models ({}): scores can shift between models.", t.models.len(), t.models.join(", "))).dim());
+    }
+    Ok(())
+}
+
 fn registry_cmd(settings: &Settings, action: RegistryCmd) -> Result<()> {
     use interview_coach::registry;
     match action {
@@ -2851,6 +2920,7 @@ fn run() -> Result<()> {
         Cmd::Report { id, open, full } => show_report(&settings, id, open, full),
         Cmd::Timeline { id } => refresh_timeline(&settings, id),
         Cmd::Questions { company, json } => list_questions(&settings, company, json),
+        Cmd::Trends { days, json } => show_trends(&settings, days, json),
         Cmd::PrivacyNotice { seen } => {
             if seen {
                 interview_coach::privacy::mark_seen(&settings)?;

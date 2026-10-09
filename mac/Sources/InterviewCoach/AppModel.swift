@@ -32,6 +32,9 @@ final class AppModel {
     }
     /// Every interview (archived and deleted ones flagged) and every role: the sidebar.
     var library = Library()
+    /// Your progress across reviewed interviews (`ic trends --json`), for the notebook's period.
+    var trends: Trends?
+    var trendsError: String?
     var filter = LibraryFilter()
     /// The interviews in the main list (not archived or deleted): the menu bar's Recent Interviews.
     var sessions: [SessionSummary] { library.sessions.filter { !$0.archived && !$0.isDeleted } }
@@ -246,6 +249,25 @@ final class AppModel {
             screenPermission = ScreenCapture.hasPermission()
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    /// Your progress for the notebook's period. The notebook calls this whenever the library changes,
+    /// so a newly reviewed interview shows up in it as soon as its report is done.
+    func loadTrends(days: Int?) async {
+        guard let ic else { return }
+        var args = ["trends", "--json"]
+        if let days { args += ["--days", "\(days)"] }
+        do {
+            let loaded = try await ic.decode(Trends.self, args)
+            guard !Task.isCancelled else { return }  // another period or library change asked since
+            if loaded != trends { trends = loaded }
+            trendsError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            // Never show another period's numbers as this one's.
+            trends = nil
+            trendsError = error.localizedDescription
         }
     }
 
