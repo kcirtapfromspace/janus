@@ -168,6 +168,20 @@ public struct LibraryTree: Equatable {
     /// Recently Deleted, soonest to be erased first.
     public let deleted: [SessionSummary]
     public var isEmpty: Bool { companies.isEmpty && deleted.isEmpty }
+
+    /// The group each shown interview is listed under, by interview id: its role (`role:<id>`), its
+    /// company when it has no role (`company:<key>`), or Recently Deleted (`deleted`).
+    public var groups: [Int: String] {
+        var groups: [Int: String] = [:]
+        for company in companies {
+            for role in company.roles {
+                for session in role.sessions { groups[session.id] = "role:\(role.id)" }
+            }
+            for session in company.loose { groups[session.id] = "company:\(company.id)" }
+        }
+        for session in deleted { groups[session.id] = "deleted" }
+        return groups
+    }
 }
 
 /// Group the library into companies → roles → rounds, applying the filter. What you've arranged

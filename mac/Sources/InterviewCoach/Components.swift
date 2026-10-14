@@ -23,6 +23,8 @@ struct ElapsedTime: View {
 /// The analysis verdict, or the session's status if it hasn't been analysed.
 struct VerdictBadge: View {
     let session: SessionSummary
+    /// On a selected sidebar row the label follows the highlight; only the dot keeps its color.
+    @Environment(\.backgroundProminence) private var prominence
 
     var label: String {
         if let verdict = session.verdictLabel { return verdict }
@@ -47,8 +49,8 @@ struct VerdictBadge: View {
         HStack(spacing: 5) {
             Circle().fill(color).frame(width: 4, height: 4).accessibilityHidden(true)
             Text(label).font(.system(size: 10))
+                .foregroundStyle(prominence == .increased ? AnyShapeStyle(.primary) : AnyShapeStyle(color))
         }
-        .foregroundStyle(color)
         .accessibilityElement(children: .combine)
     }
 }
@@ -61,9 +63,7 @@ struct SessionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
-                Text(session.title)
-                    .font(.system(size: 12, weight: .medium)).foregroundStyle(CoachTheme.ink)
-                    .lineLimit(1)
+                RowTitle(text: session.title)
                 Spacer(minLength: 6)
                 VerdictBadge(session: session)
             }
@@ -79,6 +79,21 @@ struct SessionRow: View {
             }
         }
         .padding(.vertical, 6)
+    }
+}
+
+/// A row's title: selected, it follows the highlight, as the details under it do. (A list row's
+/// own view never sees its selection's prominence; the views inside it do.)
+private struct RowTitle: View {
+    let text: String
+    @Environment(\.backgroundProminence) private var prominence
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(prominence == .increased ? AnyShapeStyle(.primary) : AnyShapeStyle(CoachTheme.ink))
+            .lineLimit(1)
+            .help(text)  // long titles are cut short in the sidebar
     }
 }
 

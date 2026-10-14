@@ -45,6 +45,7 @@ struct MainWindow: View {
                     DashboardView()
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)  // the canvas fills the pane behind smaller states too
             .background(CoachTheme.canvas)
             .safeAreaInset(edge: .top, spacing: 0) { StatusBanner() }
         }
