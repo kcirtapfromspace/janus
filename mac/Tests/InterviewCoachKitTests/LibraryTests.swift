@@ -53,6 +53,12 @@ final class LibraryTests: XCTestCase {
         XCTAssertEqual(tree.deleted.map(\.id), [7])
     }
 
+    func testEachShownInterviewHasTheGroupItIsListedUnder() {
+        XCTAssertEqual(buildTree(library, filter: LibraryFilter()).groups,
+                       [1: "role:10", 2: "role:10", 3: "company:agility", 4: "role:11", 5: "company:", 7: "deleted"],
+                       "the archived interview isn't shown, so it has no group")
+    }
+
     func testShowArchivedAndFilters() {
         XCTAssertTrue(buildTree(library, filter: LibraryFilter(showArchived: true)).companies.contains { $0.name == "Acme" })
         let offers = buildTree(library, filter: LibraryFilter(roleStatus: "offer"))

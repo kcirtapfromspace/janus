@@ -6,6 +6,7 @@ import SwiftUI
 struct DashboardView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.colorScheme) private var colorScheme
     @State private var selectedActivity: String?
     @State private var period: AnalyticsPeriod = .quarter
 
@@ -83,10 +84,16 @@ struct DashboardView: View {
                 Text(Date().formatted(.dateTime.month(.wide).year()))
                     .font(.system(size: 11)).foregroundStyle(CoachTheme.muted)
                 Spacer()
-                Picker("Time period", selection: $period) {
-                    ForEach(AnalyticsPeriod.allCases) { Text($0.label).tag($0) }
+                // A menu titled with the period, not a menu-style picker: that one is measured before
+                // it has its choices, and stays too narrow to show "90 days".
+                Menu(period.label) {
+                    Picker("Time period", selection: $period) {
+                        ForEach(AnalyticsPeriod.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden().pickerStyle(.inline)
                 }
-                .labelsHidden().pickerStyle(.menu).fixedSize()
+                .fixedSize()
+                .id(colorScheme)  // otherwise its title keeps the previous appearance's color
                 .accessibilityLabel("Notebook time period")
             }
             Text("Interview notebook")

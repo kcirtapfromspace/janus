@@ -15,11 +15,14 @@ struct LibrarySidebar: View {
     @State private var deleting: GroupDeletion?
     /// The company a dragged company is over.
     @State private var dropTarget: String?
+    /// The groups (companies, roles, Recently Deleted) the list showed after its last update.
+    @State private var shownGroups: Set<String>?
 
     var body: some View {
         @Bindable var model = model
         let tree = buildTree(model.library, filter: model.filter)
-        List(selection: $model.listSelection) {
+        let groups = tree.groups
+        List(selection: selection(groups)) {
             ForEach(tree.companies) { company in
                 Section(isExpanded: companyExpanded(company.id)) {
                     ForEach(company.roles) { group in
@@ -80,6 +83,7 @@ struct LibrarySidebar: View {
             .background(CoachTheme.canvas)
         }
         .contextMenu(forSelectionType: Int.self) { ids in sessionMenu(Array(ids)) }
+        .onChange(of: Set(groups.values), initial: true) { _, shown in shownGroups = shown }
         .searchable(text: $model.filter.query, placement: .sidebar, prompt: "Search interviews")
         .task(id: model.filter.query) {
             try? await Task.sleep(for: .milliseconds(300))
@@ -115,6 +119,17 @@ struct LibrarySidebar: View {
         }
     }
 
+    /// The list's selection, less any interview in a group that this update adds: those are selected
+    /// on the next update, once their rows exist. Selecting a row in the update that inserts its group
+    /// (a just-recorded interview filed under a new company or role, or the first one in Recently
+    /// Deleted) leaves a stale copy of the row drawn over the list, which no later update removes.
+    private func selection(_ groups: [Int: String]) -> Binding<Set<Int>> {
+        let added = Set(groups.values).subtracting(shownGroups ?? Set(groups.values))
+        let held = model.listSelection.filter { groups[$0].map(added.contains) ?? false }
+        return Binding(get: { model.listSelection.subtracting(held) },
+                       set: { model.listSelection = $0.union(held) })
+    }
+
     private func expanded(_ role: Int) -> Binding<Bool> {
         Binding(get: { !collapsed.contains(role) }, set: { open in if open { collapsed.remove(role) } else { collapsed.insert(role) } })
     }
@@ -138,7 +153,8 @@ struct LibrarySidebar: View {
         if company.id.isEmpty {
             CompanyHeader(company: company)
         } else {
-            GroupHeader(addHelp: "Add an interview at \(company.name)", moreHelp: "More for \(company.name)") {
+            GroupHeader(addHelp: "Add an interview at \(company.name)", moreHelp: "More for \(company.name)",
+                        actionsInset: SectionHeaderInsets.chevron) {
                 CompanyHeader(company: company)
             } add: {
                 Button("Record an Interview…") {
@@ -271,6 +287,8 @@ struct GroupDeletion: Identifiable {
 struct GroupHeader<Label: View, Add: View, More: View>: View {
     let addHelp: String
     let moreHelp: String
+    /// How far in from the trailing edge the actions sit.
+    var actionsInset: CGFloat = 0
     @ViewBuilder let label: () -> Label
     @ViewBuilder let add: () -> Add
     @ViewBuilder let more: () -> More
@@ -293,6 +311,7 @@ struct GroupHeader<Label: View, Add: View, More: View>: View {
                 .opacity(hovering ? 1 : 0)
                 .allowsHitTesting(hovering)
                 .accessibilityHidden(!hovering)
+                .padding(.trailing, actionsInset)
             }
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
@@ -339,6 +358,15 @@ struct CompanyDragging: ViewModifier {
     }
 }
 
+/// A sidebar section header reaches 14 pt past its rows' trailing edge, and on hover macOS draws
+/// the section's collapse chevron in the last 23 pt of it.
+enum SectionHeaderInsets {
+    /// Lines the count up with the rows' statuses and verdicts.
+    static let rows: CGFloat = 14
+    /// Keeps + and ⋯ clear of the collapse chevron.
+    static let chevron: CGFloat = 28
+}
+
 struct CompanyHeader: View {
     let company: CompanyGroup
     @Environment(\.headerHovered) private var hovered
@@ -349,6 +377,7 @@ struct CompanyHeader: View {
             Spacer()
             Text("\(company.count)").foregroundStyle(.tertiary).monospacedDigit().opacity(hovered ? 0 : 1)
         }
+        .padding(.trailing, SectionHeaderInsets.rows)
     }
 }
 
@@ -360,6 +389,7 @@ struct RoleHeader: View {
         HStack(spacing: 6) {
             Image(systemName: "briefcase").foregroundStyle(.secondary)
             Text(group.role.title).font(.system(size: 12, weight: .medium)).foregroundStyle(CoachTheme.ink).lineLimit(1)
+                .help(group.role.title)  // long titles are cut short in the sidebar
             Spacer(minLength: 4)
             StatusChip(status: group.role.status, label: group.role.statusLabel).opacity(hovered ? 0 : 1)
         }
